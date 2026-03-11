@@ -185,8 +185,8 @@ public class BusinessController {
         return Map.of("success", true, "results", businessStoreService.listRiskResults(taskId, bankId, regionCode));
     }
 
-    @GetMapping("/results/{result_id}")
-    public Map<String, Object> getResult(@PathVariable("result_id") Integer resultId) {
-        return Map.of("success", true, "result", businessStoreService.getRiskResult(resultId));
+    @GetMapping("/results/{section_id}")
+    public Map<String, Object> getResult(@PathVariable("section_id") String sectionId) {
+        return Map.of("success", true, "result", businessStoreService.getRiskResultBySectionId(sectionId));
     }
 }

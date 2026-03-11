@@ -13,6 +13,7 @@ import org.springframework.stereotype.Service;
 import java.sql.ResultSet;
 import java.sql.ResultSetMetaData;
 import java.sql.SQLException;
+import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -58,16 +59,15 @@ public class BusinessStoreService {
     }
 
     public List<Map<String, Object>> listBanks(String regionCode) {
-        return jdbcTemplate.query(
+        StringBuilder sql = new StringBuilder(
                 """
                 SELECT b.*, ST_AsGeoJSON(b.geom)::jsonb AS geometry
                 FROM banks b
-                WHERE (? IS NULL OR b.region_code = ?)
-                ORDER BY b.id
-                """,
-                mapRow(),
-                regionCode,
-                regionCode);
+                """);
+        List<Object> args = new ArrayList<>();
+        appendEqualsCondition(sql, args, "b.region_code", regionCode);
+        sql.append(" ORDER BY b.id");
+        return jdbcTemplate.query(sql.toString(), mapRow(), args.toArray());
     }
 
     public Map<String, Object> getBank(String bankId) {
@@ -156,13 +156,12 @@ public class BusinessStoreService {
                 UPDATE tasks
                 SET status = COALESCE(?, status),
                     run_started_at = COALESCE(CAST(? AS TIMESTAMP), run_started_at),
-                    run_completed_at = CASE WHEN ? IS NULL THEN run_completed_at ELSE CAST(? AS TIMESTAMP) END,
+                    run_completed_at = COALESCE(CAST(? AS TIMESTAMP), run_completed_at),
                     error_message = ?
                 WHERE task_id = ?
                 """,
                 status,
                 runStartedAt,
-                runCompletedAt,
                 runCompletedAt,
                 errorMessage,
                 taskId);
@@ -348,20 +347,17 @@ public class BusinessStoreService {
 
     public List<Map<String, Object>> listSections(String taskId, String bankId) {
         Integer taskDbId = taskId == null ? null : toInteger(getTask(taskId).get("id"));
-        return jdbcTemplate.query(
+        StringBuilder sql = new StringBuilder(
                 """
                 SELECT cs.*, t.task_id AS task_code, t.task_name, ST_AsGeoJSON(cs.geom)::jsonb AS geometry
                 FROM cross_sections cs
                 JOIN tasks t ON cs.task_id = t.id
-                WHERE (? IS NULL OR cs.task_id = ?)
-                  AND (? IS NULL OR cs.bank_id = ?)
-                ORDER BY cs.id
-                """,
-                mapRow(),
-                taskDbId,
-                taskDbId,
-                bankId,
-                bankId);
+                """);
+        List<Object> args = new ArrayList<>();
+        appendEqualsCondition(sql, args, "cs.task_id", taskDbId);
+        appendEqualsCondition(sql, args, "cs.bank_id", bankId);
+        sql.append(" ORDER BY cs.id");
+        return jdbcTemplate.query(sql.toString(), mapRow(), args.toArray());
     }
 
     public Map<String, Object> getSection(String sectionId) {
@@ -390,9 +386,9 @@ public class BusinessStoreService {
                     bank_id = COALESCE(?, bank_id),
                     region_code = COALESCE(?, region_code),
                     segment_index = COALESCE(?, segment_index),
-                    start_point = CASE WHEN ? IS NULL THEN start_point ELSE ST_StartPoint(ST_SetSRID(ST_GeomFromGeoJSON(?), 4326)) END,
-                    end_point = CASE WHEN ? IS NULL THEN end_point ELSE ST_EndPoint(ST_SetSRID(ST_GeomFromGeoJSON(?), 4326)) END,
-                    geom = CASE WHEN ? IS NULL THEN geom ELSE ST_SetSRID(ST_GeomFromGeoJSON(?), 4326) END,
+                    start_point = COALESCE(ST_StartPoint(ST_SetSRID(ST_GeomFromGeoJSON(?), 4326)), start_point),
+                    end_point = COALESCE(ST_EndPoint(ST_SetSRID(ST_GeomFromGeoJSON(?), 4326)), end_point),
+                    geom = COALESCE(ST_SetSRID(ST_GeomFromGeoJSON(?), 4326), geom),
                     section_geometry = COALESCE(?::jsonb, section_geometry),
                     distance = COALESCE(?, distance),
                     basic_param_id = COALESCE(?, basic_param_id),
@@ -418,9 +414,6 @@ public class BusinessStoreService {
                 payload.bankId(),
                 payload.regionCode(),
                 payload.segmentIndex(),
-                geometryJson,
-                geometryJson,
-                geometryJson,
                 geometryJson,
                 geometryJson,
                 geometryJson,
@@ -474,31 +467,33 @@ public class BusinessStoreService {
 
     public List<Map<String, Object>> listRiskResults(String taskId, String bankId, String regionCode) {
         Integer taskDbId = taskId == null ? null : toInteger(getTask(taskId).get("id"));
-        return jdbcTemplate.query(
+        StringBuilder sql = new StringBuilder(
                 """
                 SELECT brr.*, ST_AsGeoJSON(brr.geom)::jsonb AS geometry
                 FROM bank_risk_results brr
-                WHERE (? IS NULL OR brr.task_id = ?)
-                  AND (? IS NULL OR brr.bank_id = ?)
-                  AND (? IS NULL OR brr.region_code = ?)
-                ORDER BY brr.id
-                """,
-                mapRow(),
-                taskDbId,
-                taskDbId,
-                bankId,
-                bankId,
-                regionCode,
-                regionCode);
+                """);
+        List<Object> args = new ArrayList<>();
+        appendEqualsCondition(sql, args, "brr.task_id", taskDbId);
+        appendEqualsCondition(sql, args, "brr.bank_id", bankId);
+        appendEqualsCondition(sql, args, "brr.region_code", regionCode);
+        sql.append(" ORDER BY brr.id");
+        return jdbcTemplate.query(sql.toString(), mapRow(), args.toArray());
     }
 
-    public Map<String, Object> getRiskResult(Integer resultId) {
+    public Map<String, Object> getRiskResultBySectionId(String sectionId) {
+        Integer sectionDbId = getSectionDbId(sectionId);
         List<Map<String, Object>> rows = jdbcTemplate.query(
-                "SELECT brr.*, ST_AsGeoJSON(brr.geom)::jsonb AS geometry FROM bank_risk_results brr WHERE brr.id = ?",
+                """
+                SELECT brr.*, ST_AsGeoJSON(brr.geom)::jsonb AS geometry
+                FROM bank_risk_results brr
+                WHERE brr.section_id = ?
+                ORDER BY brr.id DESC
+                LIMIT 1
+                """,
                 mapRow(),
-                resultId);
+                sectionDbId);
         if (rows.isEmpty()) {
-            throw new IllegalArgumentException("Risk result not found: " + resultId);
+            throw new IllegalArgumentException("Risk result not found for section_id: " + sectionId);
         }
         return rows.getFirst();
     }
@@ -571,6 +566,16 @@ public class BusinessStoreService {
         if (value != null) {
             map.put(key, value);
         }
+    }
+
+    private void appendEqualsCondition(StringBuilder sql, List<Object> args, String column, Object value) {
+        if (value == null) {
+            return;
+        }
+        sql.append(args.isEmpty() ? " WHERE " : " AND ")
+                .append(column)
+                .append(" = ?");
+        args.add(value);
     }
 
     private boolean exists(String sql, Object value) {
