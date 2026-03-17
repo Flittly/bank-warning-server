@@ -130,18 +130,18 @@ public class BusinessStoreService {
             return getSection(payload.sectionId());
         }
 
-        Integer taskDbId = getTaskDbId(taskId);
+        String taskCode = getTaskCode(taskId);
         Integer basicParamId = payload.basicParamId();
         Map<String, Object> baseParams = inheritFromBasicParam && basicParamId != null
                 ? basicParamRepository.getById(basicParamId)
                 : new LinkedHashMap<>();
         Map<String, Object> merged = mergeSectionParams(baseParams, payload);
-        return sectionRepository.insert(taskDbId, basicParamId, merged, payload);
+        return sectionRepository.insert(taskCode, basicParamId, merged, payload);
     }
 
     public List<Map<String, Object>> listSections(String taskId, String bankId) {
-        Integer taskDbId = taskId == null ? null : getTaskDbId(taskId);
-        return sectionRepository.list(taskDbId, bankId);
+        String taskCode = taskId == null ? null : getTaskCode(taskId);
+        return sectionRepository.list(taskCode, bankId);
     }
 
     public Map<String, Object> getSection(String sectionId) {
@@ -170,25 +170,25 @@ public class BusinessStoreService {
     }
 
     public Map<String, Integer> clearTaskData(String taskId) {
-        Integer taskDbId = getTaskDbId(taskId);
-        int resultCount = riskResultRepository.countByTaskId(taskDbId);
-        int sectionCount = sectionRepository.countByTaskId(taskDbId);
-        riskResultRepository.deleteByTaskId(taskDbId);
-        sectionRepository.deleteByTaskId(taskDbId);
+        String taskCode = getTaskCode(taskId);
+        int resultCount = riskResultRepository.countByTaskId(taskCode);
+        int sectionCount = sectionRepository.countByTaskId(taskCode);
+        riskResultRepository.deleteByTaskId(taskCode);
+        sectionRepository.deleteByTaskId(taskCode);
         return Map.of("sections", sectionCount, "results", resultCount);
     }
 
     public void clearTaskResults(String taskId) {
-        riskResultRepository.deleteByTaskId(getTaskDbId(taskId));
+        riskResultRepository.deleteByTaskId(getTaskCode(taskId));
     }
 
     public List<Map<String, Object>> listRiskResults(String taskId, String bankId, String regionCode) {
-        Integer taskDbId = taskId == null ? null : getTaskDbId(taskId);
-        return riskResultRepository.list(taskDbId, bankId, regionCode);
+        String taskCode = taskId == null ? null : getTaskCode(taskId);
+        return riskResultRepository.list(taskCode, bankId, regionCode);
     }
 
     public Map<String, Object> getRiskResultBySectionId(String sectionId) {
-        Map<String, Object> row = riskResultRepository.getLatestBySectionDbId(getSectionDbId(sectionId));
+        Map<String, Object> row = riskResultRepository.getLatestBySectionId(sectionId);
         if (row == null) {
             throw new IllegalArgumentException("Risk result not found for section_id: " + sectionId);
         }
@@ -197,6 +197,10 @@ public class BusinessStoreService {
 
     public Integer getTaskDbId(String taskId) {
         return toInteger(getTask(taskId).get("id"));
+    }
+
+    public String getTaskCode(String taskId) {
+        return String.valueOf(getTask(taskId).get("task_id"));
     }
 
     public Integer getSectionDbId(String sectionId) {
@@ -208,15 +212,15 @@ public class BusinessStoreService {
     }
 
     public void saveRiskResult(
-            Integer taskDbId,
-            Integer sectionDbId,
+            String taskId,
+            String sectionId,
             String sectionName,
             String regionCode,
             String bankId,
             Integer riskLevel,
             Map<String, Object> indicators,
             Map<String, Object> geometry) {
-        riskResultRepository.save(taskDbId, sectionDbId, sectionName, regionCode, bankId, riskLevel, indicators, geometry);
+        riskResultRepository.save(taskId, sectionId, sectionName, regionCode, bankId, riskLevel, indicators, geometry);
     }
 
     private Map<String, Object> mergeSectionParams(Map<String, Object> baseParams, SectionPayload payload) {

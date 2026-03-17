@@ -3,6 +3,8 @@ package com.yangtze.bankwarning.service;
 import com.yangtze.bankwarning.config.ModelServiceProperties;
 import com.yangtze.bankwarning.dto.ModelPredictRequest;
 import com.yangtze.bankwarning.model.ParameterProfile;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.core.ParameterizedTypeReference;
 import org.springframework.stereotype.Service;
 import org.springframework.web.reactive.function.client.WebClient;
@@ -15,6 +17,7 @@ import java.util.Map;
 @Service
 public class ModelGatewayService {
 
+    private static final Logger log = LoggerFactory.getLogger(ModelGatewayService.class);
     private static final ParameterizedTypeReference<Map<String, Object>> MAP_TYPE = new ParameterizedTypeReference<>() {
     };
 
@@ -109,7 +112,15 @@ public class ModelGatewayService {
                         .retrieve()
                         .bodyToMono(MAP_TYPE)
                         .block(properties.getConnectTimeout());
-                throw new IllegalStateException(String.valueOf(error.get("error")));
+                log.error("[model-error] received error from model service, caseId={}, errorResponse={}", caseId, error);
+                Object errorMessage = error.get("error");
+                String message;
+                if (errorMessage == null || "OK".equalsIgnoreCase(String.valueOf(errorMessage))) {
+                    message = "Model service returned error status but no valid error message. Full response: " + error;
+                } else {
+                    message = String.valueOf(errorMessage);
+                }
+                throw new IllegalStateException(message);
             }
 
             try {

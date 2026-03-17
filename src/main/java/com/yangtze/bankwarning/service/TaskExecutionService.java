@@ -1,5 +1,7 @@
 package com.yangtze.bankwarning.service;
 
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
 
 import java.time.Instant;
@@ -11,6 +13,8 @@ import java.util.Map;
 @Service
 public class TaskExecutionService {
 
+    private static final Logger log = LoggerFactory.getLogger(TaskExecutionService.class);
+
     private final BusinessStoreService businessStoreService;
     private final ModelGatewayService modelGatewayService;
 
@@ -20,34 +24,44 @@ public class TaskExecutionService {
     }
 
     public Map<String, Object> runTask(String taskId) {
+        log.info("[task-run] starting task run, taskId={}", taskId);
         businessStoreService.getTask(taskId);
+        log.info("[task-run] task exists, clearing old results, taskId={}", taskId);
         businessStoreService.clearTaskResults(taskId);
+        log.info("[task-run] old results cleared, marking running, taskId={}", taskId);
         businessStoreService.markTaskRunning(taskId);
 
         try {
-            Integer taskDbId = businessStoreService.getTaskDbId(taskId);
+            String taskCode = businessStoreService.getTaskCode(taskId);
             List<Map<String, Object>> sections = businessStoreService.getSectionsByTask(taskId);
+            log.info("[task-run] loaded sections, taskId={}, taskCode={}, sectionCount={}", taskId, taskCode, sections.size());
             List<Map<String, Object>> results = new ArrayList<>();
 
             for (Map<String, Object> section : sections) {
+                String sectionId = String.valueOf(section.get("section_id"));
+                log.info("[task-run] processing section, taskId={}, taskCode={}, sectionId={}, sectionName={}",
+                        taskId, taskCode, sectionId, section.get("section_name"));
                 Map<String, Object> payload = buildRiskLevelPayload(section);
+                log.info("[task-run] built model payload, taskId={}, sectionId={}, payloadKeys={}", taskId, sectionId, payload.keySet());
                 Map<String, Object> rawResult = modelGatewayService.runLegacyModelAndWait(
                         "/v0/mi/risk-level",
                         payload,
                         null);
 
-                Integer sectionDbId = businessStoreService.getSectionDbId(String.valueOf(section.get("section_id")));
+                log.info("[task-run] model returned, taskId={}, sectionId={}, resultKeys={}", taskId, sectionId, rawResult.keySet());
                 Integer riskLevel = toRiskLevel(rawResult.get("risk-level"));
+                log.info("[task-run] parsed risk level, taskId={}, sectionId={}, riskLevel={}", taskId, sectionId, riskLevel);
 
                 businessStoreService.saveRiskResult(
-                        taskDbId,
-                        sectionDbId,
+                        taskCode,
+                        sectionId,
                         String.valueOf(section.get("section_name")),
                         String.valueOf(section.get("region_code")),
                         String.valueOf(section.get("bank_id")),
                         riskLevel,
                         rawResult,
                         castMap(section.get("geometry")));
+                log.info("[task-run] saved risk result, taskId={}, taskCode={}, sectionId={}", taskId, taskCode, sectionId);
 
                 Map<String, Object> result = new LinkedHashMap<>();
                 result.put("section_id", section.get("section_id"));
@@ -58,12 +72,14 @@ public class TaskExecutionService {
             }
 
             businessStoreService.markTaskCompleted(taskId);
+            log.info("[task-run] task completed, taskId={}, taskCode={}, resultCount={}", taskId, taskCode, results.size());
             return Map.of(
                     "success", true,
                     "task_id", taskId,
                     "status", "completed",
                     "results", results);
         } catch (Exception exception) {
+            log.error("[task-run] task failed, taskId={}, message={}", taskId, exception.getMessage(), exception);
             businessStoreService.markTaskError(taskId, exception.getMessage());
             throw exception;
         }
