@@ -189,4 +189,9 @@ public class BusinessController {
     public Map<String, Object> getResult(@PathVariable("section_id") String sectionId) {
         return Map.of("success", true, "result", businessStoreService.getRiskResultBySectionId(sectionId));
     }
+
+    @PostMapping("/tasks/{task_id}/run/async")
+    public Map<String, Object> runTaskAsync(@PathVariable("task_id") String taskId) {
+        return taskExecutionService.submitTaskRun(taskId);
+    }
 }

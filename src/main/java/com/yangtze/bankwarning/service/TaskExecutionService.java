@@ -3,7 +3,12 @@ package com.yangtze.bankwarning.service;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
+import com.yangtze.bankwarning.dto.kafka.ModelTask;
+import com.yangtze.bankwarning.kafka.ModelTaskProducer;
+import org.springframework.beans.factory.annotation.Value;
 
+import java.time.Instant;
+import java.util.UUID;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
@@ -17,10 +22,21 @@ public class TaskExecutionService {
 
     private final BusinessStoreService businessStoreService;
     private final ModelGatewayService modelGatewayService;
+    private final ModelTaskProducer modelTaskProducer;
+    private final TaskRunStateService taskRunStateService;
 
-    public TaskExecutionService(BusinessStoreService businessStoreService, ModelGatewayService modelGatewayService) {
+    @Value("${app.kafka.enabled:false}")
+    private boolean kafkaEnabled;
+
+    public TaskExecutionService(
+            BusinessStoreService businessStoreService,
+            ModelGatewayService modelGatewayService,
+            ModelTaskProducer modelTaskProducer,
+            TaskRunStateService taskRunStateService) {
         this.businessStoreService = businessStoreService;
         this.modelGatewayService = modelGatewayService;
+        this.modelTaskProducer = modelTaskProducer;
+        this.taskRunStateService = taskRunStateService;
     }
 
     public Map<String, Object> runTask(String taskId) {
@@ -129,5 +145,72 @@ public class TaskExecutionService {
             return result;
         }
         return new LinkedHashMap<>();
+    }
+    public Map<String, Object> submitTaskRun(String taskId) {
+        if (!kafkaEnabled) {
+            throw new IllegalStateException("Kafka模式未启用，请设置环境变量 KAFKA_ENABLED=true");
+        }
+
+        log.info("[task-submit-kafka] 开始提交任务 taskId={}", taskId);
+
+        // 1. 校验任务存在
+        businessStoreService.getTask(taskId);
+        log.info("[task-submit-kafka] 任务存在，清理旧结果 taskId={}", taskId);
+
+        // 2. 清理本次运行旧结果
+        businessStoreService.clearTaskResults(taskId);
+        log.info("[task-submit-kafka] 旧结果已清理，标记任务运行中 taskId={}", taskId);
+
+        // 3. 标记任务状态为 running
+        businessStoreService.markTaskRunning(taskId);
+
+        try {
+            String taskCode = businessStoreService.getTaskCode(taskId);
+            List<Map<String, Object>> sections = businessStoreService.getSectionsByTask(taskId);
+            log.info("[task-submit-kafka] 加载断面完成 taskId={} taskCode={} sectionCount={}",
+                    taskId, taskCode, sections.size());
+
+            // 4. 生成 runId
+            String runId = taskRunStateService.createRun(taskId, sections.size());
+
+            // 5. 遍历断面，发送到 Kafka
+            for (Map<String, Object> section : sections) {
+                String sectionId = String.valueOf(section.get("section_id"));
+                log.info("[task-submit-kafka] 发送断面到 Kafka taskId={} sectionId={}",
+                        taskId, sectionId);
+
+                // 构造任务消息
+                Map<String, Object> payload = buildRiskLevelPayload(section);
+                ModelTask modelTask = new ModelTask();
+                modelTask.setRunId(runId);
+                modelTask.setTaskId(taskId);
+                modelTask.setSectionId(sectionId);
+                modelTask.setBankId(String.valueOf(section.get("bank_id")));
+                modelTask.setRegionCode(String.valueOf(section.get("region_code")));
+                modelTask.setModelType("risk-level");
+                modelTask.setPayload(payload);
+                modelTask.setSubmittedAt(Instant.now());
+                modelTask.setTraceId(UUID.randomUUID().toString());
+                modelTask.setRetryCount(0);
+
+                // 发送到 Kafka
+                modelTaskProducer.send(modelTask);
+            }
+
+            log.info("[task-submit-kafka] 所有断面已发送到 Kafka taskId={} runId={}", taskId, runId);
+
+            return Map.of(
+                    "success", true,
+                    "taskId", taskId,
+                    "runId", runId,
+                    "status", "SUBMITTED",
+                    "expectedCount", sections.size());
+
+        } catch (Exception exception) {
+            log.error("[task-submit-kafka] 任务提交失败 taskId={} message={}",
+                    taskId, exception.getMessage(), exception);
+            businessStoreService.markTaskError(taskId, exception.getMessage());
+            throw exception;
+        }
     }
 }

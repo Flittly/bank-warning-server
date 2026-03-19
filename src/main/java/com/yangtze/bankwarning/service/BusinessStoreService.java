@@ -261,4 +261,44 @@ public class BusinessStoreService {
         }
         return Integer.parseInt(String.valueOf(value));
     }
+    public Map<String, Object> getSectionForResult(String sectionId) {
+        return getSection(sectionId);
+    }
+
+    // 在现有类中新增：幂等保存结果
+    public void saveRiskResultIfAbsent(
+            String runId,
+            String taskId,
+            String sectionId,
+            Integer riskLevel,
+            Map<String, Object> indicators) {
+        // 先查这个 runId + sectionId 是否已存在
+        if (riskResultRepository.existsByRunIdAndSectionId(runId, sectionId)) {
+            // 已存在，直接返回不重复保存
+            return;
+        }
+        // 不存在，查 section 真实信息并保存
+        Map<String, Object> section = getSectionForResult(sectionId);
+        riskResultRepository.saveWithRunId(
+                runId,
+                taskId,
+                sectionId,
+                String.valueOf(section.get("section_name")),
+                String.valueOf(section.get("region_code")),
+                String.valueOf(section.get("bank_id")),
+                riskLevel,
+                indicators,
+                castMap(section.get("geometry"))
+        );
+    }
+
+    // 辅助方法：转换为 Map
+    private Map<String, Object> castMap(Object value) {
+        if (value instanceof Map<?, ?> map) {
+            Map<String, Object> result = new LinkedHashMap<>();
+            map.forEach((key, item) -> result.put(String.valueOf(key), item));
+            return result;
+        }
+        return new LinkedHashMap<>();
+    }
 }

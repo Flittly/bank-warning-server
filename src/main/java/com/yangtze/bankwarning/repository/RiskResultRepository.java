@@ -84,4 +84,52 @@ public class RiskResultRepository extends AbstractJdbcRepository {
     public int deleteByTaskId(String taskId) {
         return update("DELETE FROM bank_risk_results WHERE task_id = :taskId", params("taskId", taskId));
     }
+    public boolean existsByRunIdAndSectionId(String runId, String sectionId) {
+        return exists(
+                "SELECT 1 FROM bank_risk_results WHERE run_id = :runId AND section_id = :sectionId",
+                Map.of("runId", runId, "sectionId", sectionId)
+        );
+    }
+
+    // 在现有类中新增：带 runId 的幂等保存
+    public void saveWithRunId(
+            String runId,
+            String taskId,
+            String sectionId,
+            String sectionName,
+            String regionCode,
+            String bankId,
+            Integer riskLevel,
+            Map<String, Object> indicators,
+            Map<String, Object> geometry) {
+        log.info("[risk-result-save] 插入结果 runId={} taskId={} sectionId={}",
+                runId, taskId, sectionId);
+        Map<String, Object> args = new LinkedHashMap<>();
+        args.put("runId", runId);
+        args.put("taskId", taskId);
+        args.put("sectionId", sectionId);
+        args.put("sectionName", sectionName);
+        args.put("regionCode", regionCode);
+        args.put("bankId", bankId);
+        args.put("riskLevel", riskLevel);
+        args.put("indicators", writeJson(indicators));
+        args.put("geometry", writeJson(geometry));
+
+        // 使用 INSERT ... ON CONFLICT DO NOTHING 实现幂等
+        // 如果 runId + sectionId 已存在，就跳过插入
+        update(
+                """
+                INSERT INTO bank_risk_results (
+                    run_id, task_id, section_id, section_name, region_code, bank_id,
+                    risk_level, indicators, geom
+                ) VALUES (
+                    :runId, :taskId, :sectionId, :sectionName, :regionCode, :bankId,
+                    :riskLevel, CAST(:indicators AS jsonb), ST_SetSRID(ST_GeomFromGeoJSON(:geometry), 4326)
+                ) ON CONFLICT (run_id, section_id) DO NOTHING
+                """,
+                args
+        );
+        log.info("[risk-result-save] 插入完成 runId={} taskId={} sectionId={}",
+                runId, taskId, sectionId);
+    }
 }
