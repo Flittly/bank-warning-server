@@ -11,5 +11,6 @@ public record BankPayload(
         @JsonProperty("region_code") @NotBlank String regionCode,
         Map<String, Object> geometry,
         @JsonProperty("bank_geometry") Map<String, Object> bankGeometry,
-        String description) {
+        String description,
+        Boolean reversed) {
 }

@@ -14,6 +14,8 @@ public class ModelTask {
     private String bankId;
     private String regionCode;
     private String modelType;
+    private String terrainBucket;  // RustFS bucket 名称
+    private String terrainKey;     // RustFS 地形文件路径
     private Map<String, Object> payload;
     private Instant submittedAt;
     private String traceId;

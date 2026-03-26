@@ -68,13 +68,17 @@ app:
     default-model-api: /v0/mi/risk-level
     connect-timeout: 5s
     read-timeout: 600s
+  
   # Kafka 相关配置
   kafka:
     # 是否启用 Kafka 模式
     enabled: ${KAFKA_ENABLED:true}
-    # 任务 Topic 名称
-    task-topic: ${KAFKA_TASK_TOPIC:bank.model.task.v1}
+    # 任务 Topic 名称（按岸段分区消费）
+    task-topic: ${KAFKA_TASK_TOPIC:bank.model.task}
     # 结果 Topic 名称
     result-topic: ${KAFKA_RESULT_TOPIC:bank.model.result.v1}
     # 死信队列 Topic 名称
     result-dlt-topic: ${KAFKA_RESULT_DLT_TOPIC:bank.model.result.dlt.v1}
+    # RustFS bucket 名称（传递给 Python Worker）
+    # 地形文件路径从数据库 banks.terrain_key 读取
+    terrain-bucket: ${KAFKA_TERRAIN_BUCKET:yangtze-bank-warning-system}

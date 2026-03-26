@@ -30,17 +30,18 @@ public class BankRepository extends AbstractJdbcRepository {
         args.put("geometryJson", geometryJson);
         args.put("bankGeometry", writeJson(payload.bankGeometry()));
         args.put("description", payload.description());
+        args.put("reversed", payload.reversed() != null && payload.reversed());
         update(
                 """
                 INSERT INTO banks (
                     bank_id, bank_name, region_code,
-                    start_point, end_point, geom, bank_geometry, description
+                    start_point, end_point, geom, bank_geometry, description, reversed
                 ) VALUES (
                     :bankId, :bankName, :regionCode,
                     ST_StartPoint(ST_SetSRID(ST_GeomFromGeoJSON(:geometryJson), 4326)),
                     ST_EndPoint(ST_SetSRID(ST_GeomFromGeoJSON(:geometryJson), 4326)),
                     ST_SetSRID(ST_GeomFromGeoJSON(:geometryJson), 4326),
-                    CAST(:bankGeometry AS jsonb), :description
+                    CAST(:bankGeometry AS jsonb), :description, :reversed
                 )
                 """,
                 args);
@@ -76,6 +77,7 @@ public class BankRepository extends AbstractJdbcRepository {
         args.put("geometryJson", geometryJson);
         args.put("bankGeometry", writeJson(payload.bankGeometry()));
         args.put("description", payload.description());
+        args.put("reversed", payload.reversed() != null && payload.reversed());
         args.put("bankId", bankId);
         update(
                 """
@@ -86,7 +88,8 @@ public class BankRepository extends AbstractJdbcRepository {
                     end_point = ST_EndPoint(ST_SetSRID(ST_GeomFromGeoJSON(:geometryJson), 4326)),
                     geom = ST_SetSRID(ST_GeomFromGeoJSON(:geometryJson), 4326),
                     bank_geometry = CAST(:bankGeometry AS jsonb),
-                    description = :description
+                    description = :description,
+                    reversed = :reversed
                 WHERE bank_id = :bankId
                 """,
                 args);

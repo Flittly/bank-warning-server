@@ -1,5 +1,6 @@
 package com.yangtze.bankwarning.service;
 
+import com.yangtze.bankwarning.config.TerrainMappingProperties;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
@@ -24,6 +25,7 @@ public class TaskExecutionService {
     private final ModelGatewayService modelGatewayService;
     private final ModelTaskProducer modelTaskProducer;
     private final TaskRunStateService taskRunStateService;
+    private final TerrainMappingProperties terrainMappingProperties;
 
     @Value("${app.kafka.enabled:false}")
     private boolean kafkaEnabled;
@@ -32,11 +34,13 @@ public class TaskExecutionService {
             BusinessStoreService businessStoreService,
             ModelGatewayService modelGatewayService,
             ModelTaskProducer modelTaskProducer,
-            TaskRunStateService taskRunStateService) {
+            TaskRunStateService taskRunStateService,
+            TerrainMappingProperties terrainMappingProperties) {
         this.businessStoreService = businessStoreService;
         this.modelGatewayService = modelGatewayService;
         this.modelTaskProducer = modelTaskProducer;
         this.taskRunStateService = taskRunStateService;
+        this.terrainMappingProperties = terrainMappingProperties;
     }
 
     public Map<String, Object> runTask(String taskId) {
@@ -176,8 +180,22 @@ public class TaskExecutionService {
             // 5. 遍历断面，发送到 Kafka
             for (Map<String, Object> section : sections) {
                 String sectionId = String.valueOf(section.get("section_id"));
-                log.info("[task-submit-kafka] 发送断面到 Kafka taskId={} sectionId={}",
-                        taskId, sectionId);
+                String bankId = String.valueOf(section.get("bank_id"));
+                log.info("[task-submit-kafka] 发送断面到 Kafka taskId={} sectionId={} bankId={}",
+                        taskId, sectionId, bankId);
+
+                // 从数据库获取岸段信息，读取 terrain_key
+                Map<String, Object> bank = businessStoreService.getBank(bankId);
+                String terrainKey = String.valueOf(bank.get("terrain_key"));
+                String terrainBucket = terrainMappingProperties.getTerrainBucket();
+                
+                // 如果数据库中没有 terrain_key，使用默认格式
+                if (terrainKey == null || "null".equals(terrainKey) || terrainKey.isBlank()) {
+                    terrainKey = "tiff/" + bankId + ".tif";
+                    log.info("[task-submit-kafka] 数据库无地形映射，使用默认格式: bankId={} -> terrainKey={}", bankId, terrainKey);
+                } else {
+                    log.info("[task-submit-kafka] 从数据库获取地形映射: bankId={} -> terrainKey={}", bankId, terrainKey);
+                }
 
                 // 构造任务消息
                 Map<String, Object> payload = buildRiskLevelPayload(section);
@@ -185,15 +203,17 @@ public class TaskExecutionService {
                 modelTask.setRunId(runId);
                 modelTask.setTaskId(taskId);
                 modelTask.setSectionId(sectionId);
-                modelTask.setBankId(String.valueOf(section.get("bank_id")));
+                modelTask.setBankId(bankId);
                 modelTask.setRegionCode(String.valueOf(section.get("region_code")));
                 modelTask.setModelType("risk-level");
+                modelTask.setTerrainBucket(terrainBucket);  // 设置 RustFS bucket
+                modelTask.setTerrainKey(terrainKey);         // 设置地形文件路径
                 modelTask.setPayload(payload);
                 modelTask.setSubmittedAt(Instant.now());
                 modelTask.setTraceId(UUID.randomUUID().toString());
                 modelTask.setRetryCount(0);
 
-                // 发送到 Kafka
+                // 发送到 Kafka（Key 为 bankId，保证同一岸段的任务由同一 Worker 处理）
                 modelTaskProducer.send(modelTask);
             }
 

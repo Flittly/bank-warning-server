@@ -10,6 +10,7 @@ import com.yangtze.bankwarning.dto.TaskPayload;
 import com.yangtze.bankwarning.dto.TasksCreateRequest;
 import com.yangtze.bankwarning.dto.TaskStatusUpdateRequest;
 import com.yangtze.bankwarning.service.BusinessStoreService;
+import com.yangtze.bankwarning.service.SectionValidationService;
 import com.yangtze.bankwarning.service.TaskExecutionService;
 import jakarta.validation.Valid;
 import org.springframework.web.bind.annotation.DeleteMapping;
@@ -22,6 +23,7 @@ import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
 
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 
@@ -31,10 +33,14 @@ public class BusinessController {
 
     private final BusinessStoreService businessStoreService;
     private final TaskExecutionService taskExecutionService;
+    private final SectionValidationService sectionValidationService;
 
-    public BusinessController(BusinessStoreService businessStoreService, TaskExecutionService taskExecutionService) {
+    public BusinessController(BusinessStoreService businessStoreService,
+                              TaskExecutionService taskExecutionService,
+                              SectionValidationService sectionValidationService) {
         this.businessStoreService = businessStoreService;
         this.taskExecutionService = taskExecutionService;
+        this.sectionValidationService = sectionValidationService;
     }
 
     @PostMapping("/banks")
@@ -193,5 +199,35 @@ public class BusinessController {
     @PostMapping("/tasks/{task_id}/run/async")
     public Map<String, Object> runTaskAsync(@PathVariable("task_id") String taskId) {
         return taskExecutionService.submitTaskRun(taskId);
+    }
+
+    @PostMapping("/sections/{section_id}/validate")
+    public Map<String, Object> validateSection(@PathVariable("section_id") String sectionId) {
+        Map<String, Object> section = businessStoreService.getSection(sectionId);
+        Map<String, Object> sectionGeometry = (Map<String, Object>) section.get("section_geometry");
+        String benchId = (String) section.get("bench_id");
+
+        SectionValidationService.ValidationResponse response =
+                sectionValidationService.validateSection(sectionId, sectionGeometry, benchId);
+
+        Map<String, Object> result = new HashMap<>();
+        result.put("success", response.isValid() == null || response.isValid());
+        result.put("section_id", sectionId);
+        result.put("is_valid", response.isValid());
+        result.put("validation_status", response.status());
+        result.put("validation_message", response.message());
+        return result;
+    }
+
+    @GetMapping("/sections/{section_id}/validation")
+    public Map<String, Object> getSectionValidation(@PathVariable("section_id") String sectionId) {
+        Map<String, Object> section = businessStoreService.getSection(sectionId);
+        Map<String, Object> result = new HashMap<>();
+        result.put("success", true);
+        result.put("section_id", sectionId);
+        result.put("is_valid", section.get("is_valid"));
+        result.put("validation_status", section.get("validation_status"));
+        result.put("validation_message", section.get("validation_message"));
+        return result;
     }
 }

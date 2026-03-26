@@ -31,9 +31,10 @@ public class ModelTaskProducer {
 
     // 发送一个任务到 Kafka
     public void send(ModelTask task) {
-        // 构造消息 Key：runId + ":" + sectionId
-        // 这样同一个 runId 的不同 section 会均匀分散到不同 partition，能并行处理
-        String key = task.getRunId() + ":" + task.getSectionId();
+        // 使用 bankId 作为 Key
+        // 这样同一个岸段的所有 section 会发送到同一个 partition
+        // 确保同一个岸段的任务由同一个 Worker 处理，复用地形数据
+        String key = task.getBankId();
 
         // 异步发送消息到 Kafka
         CompletableFuture<SendResult<String, ModelTask>> future =
@@ -43,10 +44,11 @@ public class ModelTaskProducer {
         future.whenComplete((result, throwable) -> {
             // 如果发送失败
             if (throwable != null) {
-                log.error("[kafka-task-send] 发送任务失败 runId={} taskId={} sectionId={} modelType={} error={}",
+                log.error("[kafka-task-send] 发送任务失败 runId={} taskId={} sectionId={} bankId={} modelType={} error={}",
                         task.getRunId(),
                         task.getTaskId(),
                         task.getSectionId(),
+                        task.getBankId(),
                         task.getModelType(),
                         throwable.getMessage(),
                         throwable);
@@ -54,10 +56,11 @@ public class ModelTaskProducer {
             }
 
             // 发送成功，打印日志
-            log.info("[kafka-task-send] 发送任务成功 runId={} taskId={} sectionId={} partition={} offset={}",
+            log.info("[kafka-task-send] 发送任务成功 runId={} taskId={} sectionId={} bankId={} partition={} offset={}",
                     task.getRunId(),
                     task.getTaskId(),
                     task.getSectionId(),
+                    task.getBankId(),
                     result.getRecordMetadata().partition(),  // 发送到哪个 partition
                     result.getRecordMetadata().offset());     // 在该 partition 的偏移量
         });
