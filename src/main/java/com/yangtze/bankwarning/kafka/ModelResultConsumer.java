@@ -2,6 +2,7 @@ package com.yangtze.bankwarning.kafka;
 
 import com.yangtze.bankwarning.dto.kafka.ModelResult;
 import com.yangtze.bankwarning.service.BusinessStoreService;
+import com.yangtze.bankwarning.service.SectionProfileService;
 import com.yangtze.bankwarning.service.TaskRunStateService;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -19,12 +20,15 @@ public class ModelResultConsumer {
 
     private final BusinessStoreService businessStoreService;
     private final TaskRunStateService taskRunStateService;
+    private final SectionProfileService sectionProfileService;
 
     public ModelResultConsumer(
             BusinessStoreService businessStoreService,
-            TaskRunStateService taskRunStateService) {
+            TaskRunStateService taskRunStateService,
+            SectionProfileService sectionProfileService) {
         this.businessStoreService = businessStoreService;
         this.taskRunStateService = taskRunStateService;
+        this.sectionProfileService = sectionProfileService;
     }
 
     // 监听结果 Topic
@@ -53,6 +57,8 @@ public class ModelResultConsumer {
                         result.getRiskLevel(),
                         buildIndicators(result)
                 );
+                Map<String, Object> section = businessStoreService.getSectionForResult(result.getSectionId());
+                sectionProfileService.saveForSection(result.getTaskId(), section);
                 // 标记该断面成功
                 taskRunStateService.markSectionSuccess(result.getRunId());
             } else {

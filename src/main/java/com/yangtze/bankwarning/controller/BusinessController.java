@@ -196,6 +196,27 @@ public class BusinessController {
         return Map.of("success", true, "result", businessStoreService.getRiskResultBySectionId(sectionId));
     }
 
+    @GetMapping("/results/{section_id}/matrix")
+    public Map<String, Object> getRiskMatrix(@PathVariable("section_id") String sectionId) {
+        Map<String, Object> result = businessStoreService.getRiskResultBySectionId(sectionId);
+        Object indicators = result.get("indicators");
+        return Map.of(
+                "success", true,
+                "section_id", sectionId,
+                "matrix", indicators
+        );
+    }
+
+    @GetMapping("/tasks/{task_id}/section-profiles")
+    public Map<String, Object> listSectionProfiles(@PathVariable("task_id") String taskId) {
+        return Map.of("success", true, "task_id", taskId, "profiles", businessStoreService.listSectionProfiles(taskId));
+    }
+
+    @GetMapping("/sections/{section_id}/profile")
+    public Map<String, Object> getSectionProfile(@PathVariable("section_id") String sectionId) {
+        return Map.of("success", true, "profile", businessStoreService.getSectionProfile(sectionId));
+    }
+
     @PostMapping("/tasks/{task_id}/run/async")
     public Map<String, Object> runTaskAsync(@PathVariable("task_id") String taskId) {
         return taskExecutionService.submitTaskRun(taskId);

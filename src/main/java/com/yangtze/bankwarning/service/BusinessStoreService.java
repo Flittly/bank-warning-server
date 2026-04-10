@@ -8,6 +8,7 @@ import com.yangtze.bankwarning.repository.BankRepository;
 import com.yangtze.bankwarning.repository.BasicParamRepository;
 import com.yangtze.bankwarning.repository.RiskResultRepository;
 import com.yangtze.bankwarning.repository.SectionRepository;
+import com.yangtze.bankwarning.repository.SectionProfileRepository;
 import com.yangtze.bankwarning.repository.TaskRepository;
 import org.springframework.stereotype.Service;
 
@@ -23,18 +24,21 @@ public class BusinessStoreService {
     private final BasicParamRepository basicParamRepository;
     private final SectionRepository sectionRepository;
     private final RiskResultRepository riskResultRepository;
+    private final SectionProfileRepository sectionProfileRepository;
 
     public BusinessStoreService(
             BankRepository bankRepository,
             TaskRepository taskRepository,
             BasicParamRepository basicParamRepository,
             SectionRepository sectionRepository,
-            RiskResultRepository riskResultRepository) {
+            RiskResultRepository riskResultRepository,
+            SectionProfileRepository sectionProfileRepository) {
         this.bankRepository = bankRepository;
         this.taskRepository = taskRepository;
         this.basicParamRepository = basicParamRepository;
         this.sectionRepository = sectionRepository;
         this.riskResultRepository = riskResultRepository;
+        this.sectionProfileRepository = sectionProfileRepository;
     }
 
     public Map<String, Object> saveBank(BankPayload payload, boolean overwrite) {
@@ -179,7 +183,9 @@ public class BusinessStoreService {
     }
 
     public void clearTaskResults(String taskId) {
-        riskResultRepository.deleteByTaskId(getTaskCode(taskId));
+        String taskCode = getTaskCode(taskId);
+        riskResultRepository.deleteByTaskId(taskCode);
+        sectionProfileRepository.deleteByTaskId(taskCode);
     }
 
     public List<Map<String, Object>> listRiskResults(String taskId, String bankId, String regionCode) {
@@ -193,6 +199,48 @@ public class BusinessStoreService {
             throw new IllegalArgumentException("Risk result not found for section_id: " + sectionId);
         }
         return row;
+    }
+
+    public List<Map<String, Object>> listSectionProfiles(String taskId) {
+        return sectionProfileRepository.listByTaskId(getTaskCode(taskId));
+    }
+
+    public Map<String, Object> getSectionProfile(String sectionId) {
+        Map<String, Object> row = sectionProfileRepository.getLatestBySectionId(sectionId);
+        if (row == null) {
+            throw new IllegalArgumentException("Section profile not found for section_id: " + sectionId);
+        }
+        return row;
+    }
+
+    public void saveSectionProfile(
+            String taskId,
+            String sectionId,
+            String sectionName,
+            String regionCode,
+            String bankId,
+            String demId,
+            String sourceCaseId,
+            Number interval,
+            Integer deepestIndex,
+            Integer slopeFootIndex,
+            Integer pointCount,
+            Map<String, Object> profileData,
+            Map<String, Object> geometry) {
+        sectionProfileRepository.save(
+                taskId,
+                sectionId,
+                sectionName,
+                regionCode,
+                bankId,
+                demId,
+                sourceCaseId,
+                interval,
+                deepestIndex,
+                slopeFootIndex,
+                pointCount,
+                profileData,
+                geometry);
     }
 
     public Integer getTaskDbId(String taskId) {
@@ -229,6 +277,7 @@ public class BusinessStoreService {
             merged.putAll(baseParams);
         }
         putIfNotNull(merged, "segment_index", payload.segmentIndex());
+        putIfNotNull(merged, "vertical_foot_point", payload.verticalFootPoint());
         putIfNotNull(merged, "distance", payload.distance());
         putIfNotNull(merged, "param_name", payload.paramName());
         putIfNotNull(merged, "segment", payload.segment());

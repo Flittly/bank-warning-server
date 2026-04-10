@@ -37,6 +37,7 @@ public class SectionRepository extends AbstractJdbcRepository {
         args.put("segmentIndex", merged.get("segment_index"));
         args.put("geometryJson", geometryJson);
         args.put("sectionGeometry", writeJson(payload.sectionGeometry()));
+        args.put("verticalFootPoint", writeJson(merged.get("vertical_foot_point")));
         args.put("distance", merged.get("distance"));
         args.put("basicParamId", basicParamId);
         args.put("paramName", merged.get("param_name"));
@@ -59,7 +60,7 @@ public class SectionRepository extends AbstractJdbcRepository {
                 """
                 INSERT INTO cross_sections (
                     task_id, section_id, section_name, bank_id, region_code, segment_index,
-                    start_point, end_point, geom, section_geometry, distance, basic_param_id,
+                    start_point, end_point, geom, section_geometry, vertical_foot_point, distance, basic_param_id,
                     param_name, segment, current_timepoint, set_name, water_qs, tidal_level,
                     bench_id, ref_id, hs, hc, protection_level, control_level,
                     comparison_timepoint, risk_thresholds, weights, other_params
@@ -67,7 +68,7 @@ public class SectionRepository extends AbstractJdbcRepository {
                     :taskId, :sectionId, :sectionName, :bankId, :regionCode, :segmentIndex,
                     ST_StartPoint(ST_SetSRID(ST_GeomFromGeoJSON(:geometryJson), 4326)),
                     ST_EndPoint(ST_SetSRID(ST_GeomFromGeoJSON(:geometryJson), 4326)),
-                    ST_SetSRID(ST_GeomFromGeoJSON(:geometryJson), 4326), CAST(:sectionGeometry AS jsonb), :distance, :basicParamId,
+                    ST_SetSRID(ST_GeomFromGeoJSON(:geometryJson), 4326), CAST(:sectionGeometry AS jsonb), CAST(:verticalFootPoint AS jsonb), :distance, :basicParamId,
                     :paramName, :segment, :currentTimepoint, :setName, :waterQs, :tidalLevel,
                     :benchId, :refId, :hs, :hc, :protectionLevel, :controlLevel,
                     :comparisonTimepoint, CAST(:riskThresholds AS jsonb), CAST(:weights AS jsonb), CAST(:otherParams AS jsonb)
@@ -112,6 +113,7 @@ public class SectionRepository extends AbstractJdbcRepository {
         args.put("segmentIndex", payload.segmentIndex());
         args.put("geometryJson", geometryJson);
         args.put("sectionGeometry", writeJson(payload.sectionGeometry()));
+        args.put("verticalFootPoint", writeJson(payload.verticalFootPoint()));
         args.put("distance", payload.distance());
         args.put("basicParamId", payload.basicParamId());
         args.put("paramName", payload.paramName());
@@ -142,6 +144,7 @@ public class SectionRepository extends AbstractJdbcRepository {
                     end_point = COALESCE(ST_EndPoint(ST_SetSRID(ST_GeomFromGeoJSON(:geometryJson), 4326)), end_point),
                     geom = COALESCE(ST_SetSRID(ST_GeomFromGeoJSON(:geometryJson), 4326), geom),
                     section_geometry = COALESCE(CAST(:sectionGeometry AS jsonb), section_geometry),
+                    vertical_foot_point = COALESCE(CAST(:verticalFootPoint AS jsonb), vertical_foot_point),
                     distance = COALESCE(:distance, distance),
                     basic_param_id = COALESCE(:basicParamId, basic_param_id),
                     param_name = COALESCE(:paramName, param_name),

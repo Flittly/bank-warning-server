@@ -14,6 +14,7 @@ public record SectionPayload(
         @JsonProperty("segment_index") Integer segmentIndex,
         Map<String, Object> geometry,
         @JsonProperty("section_geometry") Map<String, Object> sectionGeometry,
+        @JsonProperty("vertical_foot_point") Map<String, Object> verticalFootPoint,
         Double distance,
         @JsonProperty("basic_param_id") Integer basicParamId,
         @JsonProperty("param_name") String paramName,

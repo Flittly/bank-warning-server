@@ -10,7 +10,6 @@ import org.springframework.beans.factory.annotation.Value;
 
 import java.time.Instant;
 import java.util.UUID;
-import java.time.Instant;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -26,6 +25,7 @@ public class TaskExecutionService {
     private final ModelTaskProducer modelTaskProducer;
     private final TaskRunStateService taskRunStateService;
     private final TerrainMappingProperties terrainMappingProperties;
+    private final SectionProfileService sectionProfileService;
 
     @Value("${app.kafka.enabled:false}")
     private boolean kafkaEnabled;
@@ -35,12 +35,14 @@ public class TaskExecutionService {
             ModelGatewayService modelGatewayService,
             ModelTaskProducer modelTaskProducer,
             TaskRunStateService taskRunStateService,
-            TerrainMappingProperties terrainMappingProperties) {
+            TerrainMappingProperties terrainMappingProperties,
+            SectionProfileService sectionProfileService) {
         this.businessStoreService = businessStoreService;
         this.modelGatewayService = modelGatewayService;
         this.modelTaskProducer = modelTaskProducer;
         this.taskRunStateService = taskRunStateService;
         this.terrainMappingProperties = terrainMappingProperties;
+        this.sectionProfileService = sectionProfileService;
     }
 
     public Map<String, Object> runTask(String taskId) {
@@ -71,6 +73,8 @@ public class TaskExecutionService {
                 log.info("[task-run] model returned, taskId={}, sectionId={}, resultKeys={}", taskId, sectionId, rawResult.keySet());
                 Integer riskLevel = toRiskLevel(rawResult.get("risk-level"));
                 log.info("[task-run] parsed risk level, taskId={}, sectionId={}, riskLevel={}", taskId, sectionId, riskLevel);
+
+                sectionProfileService.saveForSection(taskCode, section);
 
                 businessStoreService.saveRiskResult(
                         taskCode,

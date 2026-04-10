@@ -6,6 +6,7 @@ import com.yangtze.bankwarning.model.ParameterProfile;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.core.ParameterizedTypeReference;
+import org.springframework.http.MediaType;
 import org.springframework.stereotype.Service;
 import org.springframework.web.reactive.function.client.WebClient;
 
@@ -70,14 +71,50 @@ public class ModelGatewayService {
             String modelApi,
             Map<String, Object> payload,
             Integer timeoutSeconds) {
+        return waitForLegacyModelResult(submitLegacyModel(modelApi, payload, timeoutSeconds), timeoutSeconds);
+    }
+
+    public Map<String, Object> runLegacyModelAndWaitForCase(
+            String modelApi,
+            Map<String, Object> payload,
+            Integer timeoutSeconds) {
+        Map<String, Object> submitResult = submitLegacyModel(modelApi, payload, timeoutSeconds);
+        Object caseId = submitResult.get("case-id");
+        Map<String, Object> result = waitForLegacyModelResult(submitResult, timeoutSeconds);
+        return Map.of(
+                "caseId", String.valueOf(caseId),
+                "result", result);
+    }
+
+    public String fetchModelCaseFile(String caseId, String filename) {
+        return modelWebClient.get()
+                .uri(uriBuilder -> uriBuilder
+                        .path("/v0/fs/result/file")
+                        .queryParam("case_id", caseId)
+                        .queryParam("filename", filename)
+                        .build())
+                .accept(MediaType.TEXT_PLAIN, MediaType.APPLICATION_OCTET_STREAM, MediaType.APPLICATION_JSON)
+                .retrieve()
+                .bodyToMono(String.class)
+                .block(properties.getConnectTimeout());
+    }
+
+    private Map<String, Object> submitLegacyModel(
+            String modelApi,
+            Map<String, Object> payload,
+            Integer timeoutSeconds) {
         String normalizedModelApi = normalizeModelApi(modelApi);
-        Map<String, Object> submitResult = modelWebClient.post()
+        return modelWebClient.post()
                 .uri(normalizedModelApi)
                 .bodyValue(payload)
                 .retrieve()
                 .bodyToMono(MAP_TYPE)
                 .block(resolveTimeout(timeoutSeconds));
+    }
 
+    private Map<String, Object> waitForLegacyModelResult(
+            Map<String, Object> submitResult,
+            Integer timeoutSeconds) {
         Object caseId = submitResult.get("case-id");
         if (caseId == null) {
             throw new IllegalStateException("Python model service did not return case-id");
