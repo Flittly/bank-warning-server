@@ -1,11 +1,12 @@
 package com.yangtze.bankwarning.service;
 
 import com.yangtze.bankwarning.config.TerrainMappingProperties;
+import com.yangtze.bankwarning.service.async.TaskDispatchPort;
+import com.yangtze.bankwarning.service.async.TaskRunStatePort;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
 import com.yangtze.bankwarning.dto.kafka.ModelTask;
-import com.yangtze.bankwarning.kafka.ModelTaskProducer;
 import org.springframework.beans.factory.annotation.Value;
 
 import java.time.Instant;
@@ -22,8 +23,8 @@ public class TaskExecutionService {
 
     private final BusinessStoreService businessStoreService;
     private final ModelGatewayService modelGatewayService;
-    private final ModelTaskProducer modelTaskProducer;
-    private final TaskRunStateService taskRunStateService;
+    private final TaskDispatchPort taskDispatchPort;
+    private final TaskRunStatePort taskRunStatePort;
     private final TerrainMappingProperties terrainMappingProperties;
     private final SectionProfileService sectionProfileService;
 
@@ -33,14 +34,14 @@ public class TaskExecutionService {
     public TaskExecutionService(
             BusinessStoreService businessStoreService,
             ModelGatewayService modelGatewayService,
-            ModelTaskProducer modelTaskProducer,
-            TaskRunStateService taskRunStateService,
+            TaskDispatchPort taskDispatchPort,
+            TaskRunStatePort taskRunStatePort,
             TerrainMappingProperties terrainMappingProperties,
             SectionProfileService sectionProfileService) {
         this.businessStoreService = businessStoreService;
         this.modelGatewayService = modelGatewayService;
-        this.modelTaskProducer = modelTaskProducer;
-        this.taskRunStateService = taskRunStateService;
+        this.taskDispatchPort = taskDispatchPort;
+        this.taskRunStatePort = taskRunStatePort;
         this.terrainMappingProperties = terrainMappingProperties;
         this.sectionProfileService = sectionProfileService;
     }
@@ -179,7 +180,7 @@ public class TaskExecutionService {
                     taskId, taskCode, sections.size());
 
             // 4. 生成 runId
-            String runId = taskRunStateService.createRun(taskId, sections.size());
+            String runId = taskRunStatePort.createRun(taskId, sections.size());
 
             // 5. 遍历断面，发送到 Kafka
             for (Map<String, Object> section : sections) {
@@ -218,7 +219,7 @@ public class TaskExecutionService {
                 modelTask.setRetryCount(0);
 
                 // 发送到 Kafka（Key 为 bankId，保证同一岸段的任务由同一 Worker 处理）
-                modelTaskProducer.send(modelTask);
+                taskDispatchPort.send(modelTask);
             }
 
             log.info("[task-submit-kafka] 所有断面已发送到 Kafka taskId={} runId={}", taskId, runId);

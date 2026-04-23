@@ -72,7 +72,7 @@ app:
   # Kafka 相关配置
   kafka:
     # 是否启用 Kafka 模式
-    enabled: ${KAFKA_ENABLED:true}
+    enabled: ${KAFKA_ENABLED:false}
     # 任务 Topic 名称（按岸段分区消费）
     task-topic: ${KAFKA_TASK_TOPIC:bank.model.task}
     # 结果 Topic 名称

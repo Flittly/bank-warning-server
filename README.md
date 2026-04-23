@@ -22,6 +22,21 @@
 mvn spring-boot:run
 ```
 
+### Kafka Optional Mode
+
+默认不启用 Kafka（`KAFKA_ENABLED=false`），应用可在无 Kafka broker 的环境下正常启动并运行同步任务链路。
+
+启用 Kafka 模式：
+
+```bash
+mvn spring-boot:run -Dspring-boot.run.profiles=kafka -DKAFKA_ENABLED=true
+```
+
+说明：
+
+- `POST /v0/bank/tasks/{task_id}/run`：同步执行，始终可用。
+- `POST /v0/bank/tasks/{task_id}/run/async`：仅在 Kafka 启用时可用；禁用时会返回明确错误。
+
 Defaults:
 
 - Java service: `http://localhost:8090`

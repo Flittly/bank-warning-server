@@ -1,9 +1,11 @@
 package com.yangtze.bankwarning.kafka;
 
 import com.yangtze.bankwarning.dto.kafka.ModelTask;
+import com.yangtze.bankwarning.service.async.TaskDispatchPort;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
+import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.kafka.core.KafkaTemplate;
 import org.springframework.kafka.support.SendResult;
 import org.springframework.stereotype.Component;
@@ -12,7 +14,8 @@ import java.util.concurrent.CompletableFuture;
 
 // Kafka 任务生产者：负责把断面计算任务发送到 Kafka
 @Component
-public class ModelTaskProducer {
+@ConditionalOnProperty(name = "app.kafka.enabled", havingValue = "true")
+public class ModelTaskProducer implements TaskDispatchPort {
 
     // 日志记录器
     private static final Logger log = LoggerFactory.getLogger(ModelTaskProducer.class);
@@ -30,6 +33,7 @@ public class ModelTaskProducer {
     }
 
     // 发送一个任务到 Kafka
+    @Override
     public void send(ModelTask task) {
         // 使用 bankId 作为 Key
         // 这样同一个岸段的所有 section 会发送到同一个 partition

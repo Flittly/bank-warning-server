@@ -1,6 +1,7 @@
 package com.yangtze.bankwarning.service;
 
 import com.yangtze.bankwarning.repository.TaskRunRepository;
+import com.yangtze.bankwarning.service.async.TaskRunStatePort;
 import org.springframework.stereotype.Service;
 
 import java.util.Map;
@@ -8,7 +9,7 @@ import java.util.UUID;
 
 // 任务运行状态服务：负责管理一次运行实例的状态汇总
 @Service
-public class TaskRunStateService {
+public class TaskRunStateService implements TaskRunStatePort {
 
     private final TaskRunRepository taskRunRepository;
 
@@ -17,6 +18,7 @@ public class TaskRunStateService {
     }
 
     // 创建一次新的运行，生成 runId
+    @Override
     public String createRun(String taskId, int expectedCount) {
         // 用 UUID 生成唯一的运行实例 ID
         String runId = UUID.randomUUID().toString();
@@ -25,6 +27,7 @@ public class TaskRunStateService {
     }
 
     // 标记一个断面计算成功
+    @Override
     public void markSectionSuccess(String runId) {
         // 先确保状态是 running
         taskRunRepository.markSubmittedToRunning(runId);
@@ -35,6 +38,7 @@ public class TaskRunStateService {
     }
 
     // 标记一个断面计算失败
+    @Override
     public void markSectionError(String runId, String errorMessage) {
         // 先确保状态是 running
         taskRunRepository.markSubmittedToRunning(runId);

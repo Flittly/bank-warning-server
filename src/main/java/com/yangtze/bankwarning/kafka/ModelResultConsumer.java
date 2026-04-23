@@ -3,9 +3,10 @@ package com.yangtze.bankwarning.kafka;
 import com.yangtze.bankwarning.dto.kafka.ModelResult;
 import com.yangtze.bankwarning.service.BusinessStoreService;
 import com.yangtze.bankwarning.service.SectionProfileService;
-import com.yangtze.bankwarning.service.TaskRunStateService;
+import com.yangtze.bankwarning.service.async.TaskRunStatePort;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.kafka.annotation.KafkaListener;
 import org.springframework.kafka.support.Acknowledgment;
 import org.springframework.stereotype.Component;
@@ -14,20 +15,21 @@ import java.util.Map;
 
 // Kafka 结果消费者：负责从 Kafka 消费模型计算结果
 @Component
+@ConditionalOnProperty(name = "app.kafka.enabled", havingValue = "true")
 public class ModelResultConsumer {
 
     private static final Logger log = LoggerFactory.getLogger(ModelResultConsumer.class);
 
     private final BusinessStoreService businessStoreService;
-    private final TaskRunStateService taskRunStateService;
+    private final TaskRunStatePort taskRunStatePort;
     private final SectionProfileService sectionProfileService;
 
     public ModelResultConsumer(
             BusinessStoreService businessStoreService,
-            TaskRunStateService taskRunStateService,
+            TaskRunStatePort taskRunStatePort,
             SectionProfileService sectionProfileService) {
         this.businessStoreService = businessStoreService;
-        this.taskRunStateService = taskRunStateService;
+        this.taskRunStatePort = taskRunStatePort;
         this.sectionProfileService = sectionProfileService;
     }
 
@@ -60,10 +62,10 @@ public class ModelResultConsumer {
                 Map<String, Object> section = businessStoreService.getSectionForResult(result.getSectionId());
                 sectionProfileService.saveForSection(result.getTaskId(), section);
                 // 标记该断面成功
-                taskRunStateService.markSectionSuccess(result.getRunId());
+                taskRunStatePort.markSectionSuccess(result.getRunId());
             } else {
                 // 失败：只标记失败
-                taskRunStateService.markSectionError(
+                taskRunStatePort.markSectionError(
                         result.getRunId(),
                         result.getErrorMessage()
                 );
