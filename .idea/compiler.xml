@@ -7,13 +7,18 @@
         <sourceOutputDir name="target/generated-sources/annotations" />
         <sourceTestOutputDir name="target/generated-test-sources/test-annotations" />
         <outputRelativeToContentRoot value="true" />
-        <module name="bank-warning-server" />
+        <module name="bank-warning-app" />
+        <module name="bank-warning-core" />
+        <module name="bank-warning-kafka" />
       </profile>
     </annotationProcessing>
   </component>
   <component name="JavacSettings">
     <option name="ADDITIONAL_OPTIONS_OVERRIDE">
-      <module name="bank-warning-server" options="-parameters" />
+      <module name="bank-warning-app" options="-parameters" />
+      <module name="bank-warning-core" options="-parameters" />
+      <module name="bank-warning-kafka" options="-parameters" />
+      <module name="bank-warning-server" options="" />
     </option>
   </component>
 </project>

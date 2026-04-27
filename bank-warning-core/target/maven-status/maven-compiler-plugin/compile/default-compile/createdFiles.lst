@@ -1,0 +1,4 @@
+com\yangtze\bankwarning\service\async\TaskDispatchPort.class
+com\yangtze\bankwarning\dto\kafka\ModelTask.class
+com\yangtze\bankwarning\service\async\TaskRunStatePort.class
+com\yangtze\bankwarning\dto\kafka\ModelResult.class

@@ -16,10 +16,18 @@
 - `basic_params` is still only a template source;
 - `POST /v0/bank/tasks/{task_id}/run` keeps the documented meaning.
 
+## Build Structure
+
+This repository now uses Maven multi-module layout:
+
+- `bank-warning-core`: shared async ports and kafka DTOs
+- `bank-warning-kafka`: optional kafka producer/consumer/config implementation
+- `bank-warning-app`: executable Spring Boot business application
+
 ## Run
 
 ```bash
-mvn spring-boot:run
+mvn -pl bank-warning-app spring-boot:run
 ```
 
 ### Kafka Optional Mode
@@ -29,7 +37,7 @@ mvn spring-boot:run
 启用 Kafka 模式：
 
 ```bash
-mvn spring-boot:run -Dspring-boot.run.profiles=kafka -DKAFKA_ENABLED=true
+mvn -pl bank-warning-app spring-boot:run -Dspring-boot.run.profiles=kafka -DKAFKA_ENABLED=true
 ```
 
 说明：

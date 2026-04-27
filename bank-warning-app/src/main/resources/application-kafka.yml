@@ -1,0 +1,33 @@
+spring:
+  kafka:
+    bootstrap-servers: ${KAFKA_BOOTSTRAP_SERVERS:127.0.0.1:9092}
+    producer:
+      key-serializer: org.apache.kafka.common.serialization.StringSerializer
+      value-serializer: org.springframework.kafka.support.serializer.JsonSerializer
+      acks: all
+      retries: 10
+      properties:
+        enable.idempotence: true
+        max.in.flight.requests.per.connection: 5
+        delivery.timeout.ms: 120000
+        request.timeout.ms: 30000
+    consumer:
+      group-id: ${KAFKA_RESULT_GROUP_ID:bank-warning-result-consumer}
+      key-deserializer: org.apache.kafka.common.serialization.StringDeserializer
+      value-deserializer: org.springframework.kafka.support.serializer.JsonDeserializer
+      auto-offset-reset: earliest
+      enable-auto-commit: false
+      properties:
+        spring.json.trusted.packages: com.yangtze.bankwarning.dto.kafka
+        isolation.level: read_committed
+    listener:
+      ack-mode: manual
+      concurrency: 2
+
+app:
+  kafka:
+    enabled: ${KAFKA_ENABLED:true}
+    task-topic: ${KAFKA_TASK_TOPIC:bank.model.task}
+    result-topic: ${KAFKA_RESULT_TOPIC:bank.model.result.v1}
+    result-dlt-topic: ${KAFKA_RESULT_DLT_TOPIC:bank.model.result.dlt.v1}
+    terrain-bucket: ${KAFKA_TERRAIN_BUCKET:yangtze-bank-warning-system}
