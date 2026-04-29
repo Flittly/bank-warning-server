@@ -101,6 +101,10 @@ public class BusinessStoreService {
         taskRepository.markError(taskId, errorMessage);
     }
 
+    public void markTaskPartialFailed(String taskId, String errorMessage) {
+        taskRepository.markPartialFailed(taskId, errorMessage);
+    }
+
     public void deleteTask(String taskId) {
         if (taskRepository.deleteByTaskId(taskId) == 0) {
             throw new IllegalArgumentException("Task not found: " + taskId);

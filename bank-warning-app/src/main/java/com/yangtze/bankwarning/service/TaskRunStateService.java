@@ -67,8 +67,12 @@ public class TaskRunStateService implements TaskRunStatePort {
         // 如果已完成 + 已失败 >= 预期总数，说明全部返回了
         if (completed + failed >= expected) {
             if (failed > 0) {
-                // 有失败，标记整体状态为 error
-                taskRunRepository.markError(runId, String.valueOf(run.get("error_message")));
+                if (completed > 0) {
+                    taskRunRepository.markPartialFailed(runId, String.valueOf(run.get("error_message")));
+                } else {
+                    // 有失败，标记整体状态为 error
+                    taskRunRepository.markError(runId, String.valueOf(run.get("error_message")));
+                }
             } else {
                 // 全部成功，标记整体状态为 completed
                 taskRunRepository.markCompleted(runId);

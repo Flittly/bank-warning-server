@@ -150,14 +150,7 @@ public class ModelGatewayService {
                         .bodyToMono(MAP_TYPE)
                         .block(properties.getConnectTimeout());
                 log.error("[model-error] received error from model service, caseId={}, errorResponse={}", caseId, error);
-                Object errorMessage = error.get("error");
-                String message;
-                if (errorMessage == null || "OK".equalsIgnoreCase(String.valueOf(errorMessage))) {
-                    message = "Model service returned error status but no valid error message. Full response: " + error;
-                } else {
-                    message = String.valueOf(errorMessage);
-                }
-                throw new IllegalStateException(message);
+                throw new IllegalStateException(buildDetailedModelError(error));
             }
 
             try {
@@ -213,5 +206,46 @@ public class ModelGatewayService {
 
     private Duration resolveTimeout(Integer timeoutSeconds) {
         return timeoutSeconds == null ? properties.getReadTimeout() : Duration.ofSeconds(timeoutSeconds.longValue());
+    }
+
+    private String buildDetailedModelError(Map<String, Object> errorResponse) {
+        Object errorMessage = errorResponse.get("error");
+        String base = errorMessage == null ? "" : String.valueOf(errorMessage).trim();
+
+        Object runtimeObj = errorResponse.get("runtime");
+        if (runtimeObj instanceof Map<?, ?> runtimeMap) {
+            Object runtimeMessage = runtimeMap.get("message");
+            if (runtimeMessage instanceof String runtimeText && !runtimeText.isBlank()) {
+                if (base.isBlank() || "OK".equalsIgnoreCase(base)) {
+                    base = runtimeText;
+                } else if (!base.contains(runtimeText)) {
+                    base = base + " | runtime=" + runtimeText;
+                }
+            }
+        }
+
+        Object eventsObj = errorResponse.get("events");
+        if (eventsObj instanceof List<?> events) {
+            for (int index = events.size() - 1; index >= 0; index--) {
+                Object eventObj = events.get(index);
+                if (!(eventObj instanceof Map<?, ?> eventMap)) {
+                    continue;
+                }
+                Object level = eventMap.get("level");
+                if (!(level instanceof String levelText) || !"error".equalsIgnoreCase(levelText)) {
+                    continue;
+                }
+                Object message = eventMap.get("message");
+                if (message instanceof String messageText && !messageText.isBlank() && !base.contains(messageText)) {
+                    base = (base.isBlank() ? messageText : base + " | event=" + messageText);
+                    break;
+                }
+            }
+        }
+
+        if (base.isBlank() || "OK".equalsIgnoreCase(base)) {
+            return "Model service returned error status but no valid error message. Full response: " + errorResponse;
+        }
+        return base;
     }
 }

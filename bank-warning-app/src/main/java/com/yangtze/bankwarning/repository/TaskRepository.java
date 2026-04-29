@@ -81,6 +81,13 @@ public class TaskRepository extends AbstractJdbcRepository {
         update("UPDATE tasks SET status = 'error', run_completed_at = CURRENT_TIMESTAMP, error_message = :errorMessage WHERE task_id = :taskId", args);
     }
 
+    public void markPartialFailed(String taskId, String errorMessage) {
+        Map<String, Object> args = new LinkedHashMap<>();
+        args.put("errorMessage", errorMessage);
+        args.put("taskId", taskId);
+        update("UPDATE tasks SET status = 'partial_failed', run_completed_at = CURRENT_TIMESTAMP, error_message = :errorMessage WHERE task_id = :taskId", args);
+    }
+
     public int deleteByTaskId(String taskId) {
         return update("DELETE FROM tasks WHERE task_id = :taskId", params("taskId", taskId));
     }

@@ -78,4 +78,15 @@ public class TaskRunRepository extends AbstractJdbcRepository {
                 args
         );
     }
+
+    //标记本次运行部分失败
+    public void markPartialFailed(String runId, String errorMessage) {
+        Map<String, Object> args = new LinkedHashMap<>();
+        args.put("runId", runId);
+        args.put("errorMessage", errorMessage);
+        update(
+                "UPDATE task_runs SET status = 'partial_failed', completed_at = CURRENT_TIMESTAMP, error_message = :errorMessage WHERE run_id = :runId",
+                args
+        );
+    }
 }
