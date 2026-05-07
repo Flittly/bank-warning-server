@@ -76,6 +76,8 @@ public class TaskExecutionService {
                             null);
 
                     log.info("[task-run] model returned, taskId={}, sectionId={}, resultKeys={}", taskId, sectionId, rawResult.keySet());
+                    rawResult.put("water_qs", section.get("water_qs"));
+                    rawResult.put("tidal_level", section.get("tidal_level"));
                     Integer riskLevel = toRiskLevel(rawResult.get("risk-level"));
                     log.info("[task-run] parsed risk level, taskId={}, sectionId={}, riskLevel={}", taskId, sectionId, riskLevel);
 
