@@ -10,6 +10,11 @@ spring:
     password: ${BANK_DB_PASSWORD:123456}
     driver-class-name: org.postgresql.Driver
 
+  servlet:
+    multipart:
+      max-file-size: 2GB
+      max-request-size: 2GB
+
   # Kafka 4.0 配置
   kafka:
     # Kafka 服务器地址，多个用逗号分隔
