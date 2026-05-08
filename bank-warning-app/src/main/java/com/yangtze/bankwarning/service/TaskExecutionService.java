@@ -106,10 +106,13 @@ public class TaskExecutionService {
                             sectionId,
                             sectionException.getMessage(),
                             sectionException);
+                    Map<String, Object> errorInfo = classifyError(sectionException);
                     Map<String, Object> failed = new LinkedHashMap<>();
                     failed.put("section_id", section.get("section_id"));
                     failed.put("status", 500);
-                    failed.put("error", sectionException.getMessage());
+                    failed.put("error_code", errorInfo.get("error_code"));
+                    failed.put("error_message", errorInfo.get("error_message"));
+                    failed.put("error_detail", sectionException.getMessage());
                     failed.put("executed_at", Instant.now().toString());
                     failures.add(failed);
                 }
@@ -369,7 +372,50 @@ public class TaskExecutionService {
             return null;
         }
         return failures.stream()
-                .map(item -> String.format("section_id=%s error=%s", item.get("section_id"), item.get("error")))
+                .map(item -> String.format("section_id=%s error_code=%s error=%s",
+                        item.get("section_id"),
+                        item.get("error_code"),
+                        item.get("error_message")))
                 .collect(Collectors.joining(" | "));
+    }
+
+    private Map<String, Object> classifyError(Exception exception) {
+        String message = exception.getMessage();
+        if (message == null) {
+            message = "";
+        }
+
+        if (message.contains("LineString Is Invalid") || message.contains("scatter points are insufficient")) {
+            return Map.of("error_code", "GEOMETRY_INVALID", "error_message", "断面几何数据无效，无法生成采样点");
+        }
+        if (message.contains("Invalid section_geometry")) {
+            return Map.of("error_code", "GEOMETRY_INVALID", "error_message", "断面几何格式不合法");
+        }
+        if (message.contains("Feature Collection Is Not Allowed")) {
+            return Map.of("error_code", "GEOMETRY_FORMAT_ERROR", "error_message", "不支持 FeatureCollection 格式，请使用 LineString");
+        }
+        if (message.contains("Section View") && message.contains("error")) {
+            return Map.of("error_code", "SECTION_VIEW_FAILED", "error_message", "断面剖面计算失败，请检查 DEM 数据");
+        }
+        if (message.contains("timed out") || message.contains("Timeout")) {
+            return Map.of("error_code", "MODEL_TIMEOUT", "error_message", "模型计算超时，请稍后重试");
+        }
+        if (message.contains("Could not connect") || message.contains("Connection refused")) {
+            return Map.of("error_code", "MODEL_UNAVAILABLE", "error_message", "模型服务不可用，请检查服务状态");
+        }
+        if (message.contains("TIFF file not found") || message.contains("Resource not found")) {
+            return Map.of("error_code", "TIFF_NOT_FOUND", "error_message", "DEM 数据文件不存在，请检查数据配置");
+        }
+        if (message.contains("Task not found")) {
+            return Map.of("error_code", "TASK_NOT_FOUND", "error_message", "任务不存在");
+        }
+        if (message.contains("Section not found")) {
+            return Map.of("error_code", "SECTION_NOT_FOUND", "error_message", "断面数据不存在");
+        }
+        if (exception instanceof IllegalArgumentException) {
+            return Map.of("error_code", "INVALID_INPUT", "error_message", "输入参数无效：" + message);
+        }
+
+        return Map.of("error_code", "UNKNOWN_ERROR", "error_message", "计算过程中发生未知错误");
     }
 }
