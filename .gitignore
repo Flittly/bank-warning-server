@@ -1,2 +1,11 @@
 # 项目排除路径
 /target/
+/hs_err_pid15300.log
+/hs_err_pid30056.log
+/demo-example/README_原理说明.md
+/demo-example/对比说明.md
+/验证单JVM.bat
+/bank-warning-app/target/classes/com/yangtze/bankwarning/controller/TiffController.class
+/bank-warning-app/target/classes/com/yangtze/bankwarning/repository/TiffRepository.class
+/bank-warning-app/target/classes/com/yangtze/bankwarning/service/TiffService$1.class
+/bank-warning-app/target/classes/com/yangtze/bankwarning/service/TiffService.class
