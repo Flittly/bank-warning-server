@@ -1,0 +1,125 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN" "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="com.yangtze.bankwarning.mapper.SectionMapper">
+
+    <resultMap id="SectionResultMap" type="com.yangtze.bankwarning.domain.po.SectionPO">
+        <id property="id" column="id"/>
+        <result property="taskId" column="task_id"/>
+        <result property="sectionId" column="section_id"/>
+        <result property="sectionName" column="section_name"/>
+        <result property="bankId" column="bank_id"/>
+        <result property="regionCode" column="region_code"/>
+        <result property="segmentIndex" column="segment_index"/>
+        <result property="sectionGeometry" column="section_geometry"/>
+        <result property="verticalFootPoint" column="vertical_foot_point"/>
+        <result property="distance" column="distance"/>
+        <result property="basicParamId" column="basic_param_id"/>
+        <result property="paramName" column="param_name"/>
+        <result property="segment" column="segment"/>
+        <result property="currentTimepoint" column="current_timepoint"/>
+        <result property="setName" column="set_name"/>
+        <result property="waterQs" column="water_qs"/>
+        <result property="tidalLevel" column="tidal_level"/>
+        <result property="benchId" column="bench_id"/>
+        <result property="refId" column="ref_id"/>
+        <result property="hs" column="hs"/>
+        <result property="hc" column="hc"/>
+        <result property="protectionLevel" column="protection_level"/>
+        <result property="controlLevel" column="control_level"/>
+        <result property="comparisonTimepoint" column="comparison_timepoint"/>
+        <result property="riskThresholds" column="risk_thresholds"/>
+        <result property="weights" column="weights"/>
+        <result property="otherParams" column="other_params"/>
+        <result property="isValid" column="is_valid"/>
+        <result property="validationStatus" column="validation_status"/>
+        <result property="validationMessage" column="validation_message"/>
+        <result property="createdAt" column="created_at"/>
+        <result property="updatedAt" column="updated_at"/>
+        <result property="deletedAt" column="deleted_at"/>
+    </resultMap>
+
+    <select id="selectByTaskIdAndBankId" resultMap="SectionResultMap">
+        SELECT cs.*, t.task_id AS task_code, t.task_name
+        FROM cross_sections cs
+        JOIN tasks t ON cs.task_id = t.task_id
+        WHERE cs.deleted_at IS NULL AND t.deleted_at IS NULL
+        <if test="taskId != null">
+            AND cs.task_id = #{taskId}
+        </if>
+        <if test="bankId != null">
+            AND cs.bank_id = #{bankId}
+        </if>
+        ORDER BY cs.id
+    </select>
+
+    <select id="selectBySectionId" resultMap="SectionResultMap">
+        SELECT cs.*, t.task_id AS task_code, t.task_name
+        FROM cross_sections cs
+        JOIN tasks t ON cs.task_id = t.task_id
+        WHERE cs.section_id = #{sectionId} AND cs.deleted_at IS NULL AND t.deleted_at IS NULL
+    </select>
+
+    <insert id="insert" parameterType="com.yangtze.bankwarning.domain.po.SectionPO" useGeneratedKeys="true" keyProperty="id">
+        INSERT INTO cross_sections (
+            task_id, section_id, section_name, bank_id, region_code, segment_index,
+            section_geometry, vertical_foot_point, distance, basic_param_id,
+            param_name, segment, current_timepoint, set_name, water_qs, tidal_level,
+            bench_id, ref_id, hs, hc, protection_level, control_level,
+            comparison_timepoint, risk_thresholds, weights, other_params
+        ) VALUES (
+            #{taskId}, #{sectionId}, #{sectionName}, #{bankId}, #{regionCode}, #{segmentIndex},
+            #{sectionGeometry}::jsonb, #{verticalFootPoint}::jsonb, #{distance}, #{basicParamId},
+            #{paramName}, #{segment}, #{currentTimepoint}, #{setName}, #{waterQs}, #{tidalLevel},
+            #{benchId}, #{refId}, #{hs}, #{hc}, #{protectionLevel}, #{controlLevel},
+            #{comparisonTimepoint}, #{riskThresholds}::jsonb, #{weights}::jsonb, #{otherParams}::jsonb
+        )
+    </insert>
+
+    <update id="update" parameterType="com.yangtze.bankwarning.domain.po.SectionPO">
+        UPDATE cross_sections
+        SET section_name = COALESCE(#{sectionName}, section_name),
+            bank_id = COALESCE(#{bankId}, bank_id),
+            region_code = COALESCE(#{regionCode}, region_code),
+            segment_index = COALESCE(#{segmentIndex}, segment_index),
+            section_geometry = COALESCE(#{sectionGeometry}::jsonb, section_geometry),
+            vertical_foot_point = COALESCE(#{verticalFootPoint}::jsonb, vertical_foot_point),
+            distance = COALESCE(#{distance}, distance),
+            basic_param_id = COALESCE(#{basicParamId}, basic_param_id),
+            param_name = COALESCE(#{paramName}, param_name),
+            segment = COALESCE(#{segment}, segment),
+            current_timepoint = COALESCE(#{currentTimepoint}, current_timepoint),
+            set_name = COALESCE(#{setName}, set_name),
+            water_qs = COALESCE(#{waterQs}, water_qs),
+            tidal_level = COALESCE(#{tidalLevel}, tidal_level),
+            bench_id = COALESCE(#{benchId}, bench_id),
+            ref_id = COALESCE(#{refId}, ref_id),
+            hs = COALESCE(#{hs}, hs),
+            hc = COALESCE(#{hc}, hc),
+            protection_level = COALESCE(#{protectionLevel}, protection_level),
+            control_level = COALESCE(#{controlLevel}, control_level),
+            comparison_timepoint = COALESCE(#{comparisonTimepoint}, comparison_timepoint),
+            risk_thresholds = COALESCE(#{riskThresholds}::jsonb, risk_thresholds),
+            weights = COALESCE(#{weights}::jsonb, weights),
+            other_params = COALESCE(#{otherParams}::jsonb, other_params)
+        WHERE section_id = #{sectionId} AND deleted_at IS NULL
+    </update>
+
+    <update id="deleteBySectionId">
+        UPDATE cross_sections SET deleted_at = CURRENT_TIMESTAMP
+        WHERE section_id = #{sectionId} AND deleted_at IS NULL
+    </update>
+
+    <select id="countByTaskId" resultType="int">
+        SELECT COUNT(*) FROM cross_sections WHERE task_id = #{taskId} AND deleted_at IS NULL
+    </select>
+
+    <update id="deleteByTaskId">
+        UPDATE cross_sections SET deleted_at = CURRENT_TIMESTAMP
+        WHERE task_id = #{taskId} AND deleted_at IS NULL
+    </update>
+
+    <select id="existsBySectionId" resultType="boolean">
+        SELECT COUNT(*) > 0 FROM cross_sections WHERE section_id = #{sectionId} AND deleted_at IS NULL
+    </select>
+
+</mapper>

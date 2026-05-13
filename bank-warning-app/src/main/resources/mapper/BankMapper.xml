@@ -1,0 +1,50 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN" "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="com.yangtze.bankwarning.mapper.BankMapper">
+
+    <resultMap id="BankResultMap" type="com.yangtze.bankwarning.domain.po.BankPO">
+        <id property="id" column="id"/>
+        <result property="bankId" column="bank_id"/>
+        <result property="bankName" column="bank_name"/>
+        <result property="regionCode" column="region_code"/>
+        <result property="bankGeometry" column="bank_geometry"/>
+        <result property="reversed" column="reversed"/>
+        <result property="description" column="description"/>
+        <result property="createdAt" column="created_at"/>
+        <result property="updatedAt" column="updated_at"/>
+        <result property="deletedAt" column="deleted_at"/>
+    </resultMap>
+
+    <select id="selectAll" resultMap="BankResultMap">
+        SELECT * FROM banks WHERE deleted_at IS NULL
+        <if test="regionCode != null">
+            AND region_code = #{regionCode}
+        </if>
+        ORDER BY id
+    </select>
+
+    <select id="selectByBankId" resultMap="BankResultMap">
+        SELECT * FROM banks WHERE bank_id = #{bankId} AND deleted_at IS NULL
+    </select>
+
+    <insert id="insert" parameterType="com.yangtze.bankwarning.domain.po.BankPO" useGeneratedKeys="true" keyProperty="id">
+        INSERT INTO banks (bank_id, bank_name, region_code, bank_geometry, description, reversed)
+        VALUES (#{bankId}, #{bankName}, #{regionCode}, #{bankGeometry}::jsonb, #{description}, #{reversed})
+    </insert>
+
+    <update id="update" parameterType="com.yangtze.bankwarning.domain.po.BankPO">
+        UPDATE banks
+        SET bank_name = #{bankName},
+            region_code = #{regionCode},
+            bank_geometry = #{bankGeometry}::jsonb,
+            description = #{description},
+            reversed = #{reversed}
+        WHERE bank_id = #{bankId} AND deleted_at IS NULL
+    </update>
+
+    <update id="deleteByBankId">
+        UPDATE banks SET deleted_at = CURRENT_TIMESTAMP
+        WHERE bank_id = #{bankId} AND deleted_at IS NULL
+    </update>
+
+</mapper>

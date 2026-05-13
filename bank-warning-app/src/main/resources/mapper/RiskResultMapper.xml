@@ -1,0 +1,64 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN" "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="com.yangtze.bankwarning.mapper.RiskResultMapper">
+
+    <resultMap id="RiskResultResultMap" type="com.yangtze.bankwarning.domain.po.RiskResultPO">
+        <id property="id" column="id"/>
+        <result property="runId" column="run_id"/>
+        <result property="taskId" column="task_id"/>
+        <result property="sectionId" column="section_id"/>
+        <result property="sectionName" column="section_name"/>
+        <result property="regionCode" column="region_code"/>
+        <result property="bankId" column="bank_id"/>
+        <result property="riskLevel" column="risk_level"/>
+        <result property="indicators" column="indicators"/>
+        <result property="createdAt" column="created_at"/>
+        <result property="updatedAt" column="updated_at"/>
+        <result property="deletedAt" column="deleted_at"/>
+    </resultMap>
+
+    <select id="selectByTaskIdAndBankIdAndRegionCode" resultMap="RiskResultResultMap">
+        SELECT * FROM bank_risk_results WHERE deleted_at IS NULL
+        <if test="taskId != null">
+            AND task_id = #{taskId}
+        </if>
+        <if test="bankId != null">
+            AND bank_id = #{bankId}
+        </if>
+        <if test="regionCode != null">
+            AND region_code = #{regionCode}
+        </if>
+        ORDER BY id
+    </select>
+
+    <select id="selectLatestBySectionId" resultMap="RiskResultResultMap">
+        SELECT * FROM bank_risk_results
+        WHERE section_id = #{sectionId} AND deleted_at IS NULL
+        ORDER BY id DESC LIMIT 1
+    </select>
+
+    <insert id="insert" parameterType="com.yangtze.bankwarning.domain.po.RiskResultPO" useGeneratedKeys="true" keyProperty="id">
+        INSERT INTO bank_risk_results (
+            run_id, task_id, section_id, section_name, region_code, bank_id,
+            risk_level, indicators
+        ) VALUES (
+            #{runId}, #{taskId}, #{sectionId}, #{sectionName}, #{regionCode}, #{bankId},
+            #{riskLevel}, #{indicators}::jsonb
+        )
+    </insert>
+
+    <select id="countByTaskId" resultType="int">
+        SELECT COUNT(*) FROM bank_risk_results WHERE task_id = #{taskId} AND deleted_at IS NULL
+    </select>
+
+    <update id="deleteByTaskId">
+        UPDATE bank_risk_results SET deleted_at = CURRENT_TIMESTAMP
+        WHERE task_id = #{taskId} AND deleted_at IS NULL
+    </update>
+
+    <select id="existsByRunIdAndSectionId" resultType="boolean">
+        SELECT COUNT(*) > 0 FROM bank_risk_results
+        WHERE run_id = #{runId} AND section_id = #{sectionId} AND deleted_at IS NULL
+    </select>
+
+</mapper>

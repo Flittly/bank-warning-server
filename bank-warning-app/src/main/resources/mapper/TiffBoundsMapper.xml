@@ -1,0 +1,41 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN" "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="com.yangtze.bankwarning.mapper.TiffBoundsMapper">
+
+    <resultMap id="TiffBoundsResultMap" type="com.yangtze.bankwarning.domain.po.TiffBoundsPO">
+        <id property="id" column="id"/>
+        <result property="tiffKey" column="tiff_key"/>
+        <result property="regionCode" column="region_code"/>
+        <result property="year" column="year"/>
+        <result property="timepoint" column="timepoint"/>
+        <result property="minX" column="min_x"/>
+        <result property="minY" column="min_y"/>
+        <result property="maxX" column="max_x"/>
+        <result property="maxY" column="max_y"/>
+        <result property="createdAt" column="created_at"/>
+        <result property="updatedAt" column="updated_at"/>
+    </resultMap>
+
+    <select id="selectAll" resultMap="TiffBoundsResultMap">
+        SELECT * FROM tiff_bounds ORDER BY tiff_key
+    </select>
+
+    <select id="selectByTiffKey" resultMap="TiffBoundsResultMap">
+        SELECT * FROM tiff_bounds WHERE tiff_key = #{tiffKey}
+    </select>
+
+    <insert id="insertOrUpdate" parameterType="com.yangtze.bankwarning.domain.po.TiffBoundsPO" useGeneratedKeys="true" keyProperty="id">
+        INSERT INTO tiff_bounds (tiff_key, region_code, year, timepoint, min_x, min_y, max_x, max_y)
+        VALUES (#{tiffKey}, #{regionCode}, #{year}, #{timepoint}, #{minX}, #{minY}, #{maxX}, #{maxY})
+        ON CONFLICT (tiff_key) DO UPDATE SET
+            region_code = EXCLUDED.region_code,
+            year = EXCLUDED.year,
+            timepoint = EXCLUDED.timepoint,
+            min_x = EXCLUDED.min_x,
+            min_y = EXCLUDED.min_y,
+            max_x = EXCLUDED.max_x,
+            max_y = EXCLUDED.max_y,
+            updated_at = CURRENT_TIMESTAMP
+    </insert>
+
+</mapper>

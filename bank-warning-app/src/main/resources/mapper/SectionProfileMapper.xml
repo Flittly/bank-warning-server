@@ -1,0 +1,65 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN" "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="com.yangtze.bankwarning.mapper.SectionProfileMapper">
+
+    <resultMap id="SectionProfileResultMap" type="com.yangtze.bankwarning.domain.po.SectionProfilePO">
+        <id property="id" column="id"/>
+        <result property="taskId" column="task_id"/>
+        <result property="sectionId" column="section_id"/>
+        <result property="sectionName" column="section_name"/>
+        <result property="regionCode" column="region_code"/>
+        <result property="bankId" column="bank_id"/>
+        <result property="demId" column="dem_id"/>
+        <result property="sourceCaseId" column="source_case_id"/>
+        <result property="interval" column="interval"/>
+        <result property="deepestIndex" column="deepest_index"/>
+        <result property="slopeFootIndex" column="slope_foot_index"/>
+        <result property="pointCount" column="point_count"/>
+        <result property="profileData" column="profile_data"/>
+        <result property="createdAt" column="created_at"/>
+        <result property="updatedAt" column="updated_at"/>
+        <result property="deletedAt" column="deleted_at"/>
+    </resultMap>
+
+    <select id="selectByTaskId" resultMap="SectionProfileResultMap">
+        SELECT * FROM section_profiles
+        WHERE task_id = #{taskId} AND deleted_at IS NULL
+        ORDER BY id
+    </select>
+
+    <select id="selectLatestBySectionId" resultMap="SectionProfileResultMap">
+        SELECT * FROM section_profiles
+        WHERE section_id = #{sectionId} AND deleted_at IS NULL
+        ORDER BY id DESC LIMIT 1
+    </select>
+
+    <insert id="insertOrUpdate" parameterType="com.yangtze.bankwarning.domain.po.SectionProfilePO" useGeneratedKeys="true" keyProperty="id">
+        INSERT INTO section_profiles (
+            task_id, section_id, section_name, region_code, bank_id, dem_id,
+            source_case_id, interval, deepest_index, slope_foot_index, point_count,
+            profile_data
+        ) VALUES (
+            #{taskId}, #{sectionId}, #{sectionName}, #{regionCode}, #{bankId}, #{demId},
+            #{sourceCaseId}, #{interval}, #{deepestIndex}, #{slopeFootIndex}, #{pointCount},
+            #{profileData}::jsonb
+        )
+        ON CONFLICT (task_id, section_id) DO UPDATE SET
+            section_name = EXCLUDED.section_name,
+            region_code = EXCLUDED.region_code,
+            bank_id = EXCLUDED.bank_id,
+            dem_id = EXCLUDED.dem_id,
+            source_case_id = EXCLUDED.source_case_id,
+            interval = EXCLUDED.interval,
+            deepest_index = EXCLUDED.deepest_index,
+            slope_foot_index = EXCLUDED.slope_foot_index,
+            point_count = EXCLUDED.point_count,
+            profile_data = EXCLUDED.profile_data,
+            updated_at = CURRENT_TIMESTAMP
+    </insert>
+
+    <update id="deleteByTaskId">
+        UPDATE section_profiles SET deleted_at = CURRENT_TIMESTAMP
+        WHERE task_id = #{taskId} AND deleted_at IS NULL
+    </update>
+
+</mapper>

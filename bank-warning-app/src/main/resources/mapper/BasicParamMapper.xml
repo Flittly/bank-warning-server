@@ -1,0 +1,74 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN" "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="com.yangtze.bankwarning.mapper.BasicParamMapper">
+
+    <resultMap id="BasicParamResultMap" type="com.yangtze.bankwarning.domain.po.BasicParamPO">
+        <id property="id" column="id"/>
+        <result property="paramId" column="param_id"/>
+        <result property="paramName" column="param_name"/>
+        <result property="segment" column="segment"/>
+        <result property="currentTimepoint" column="current_timepoint"/>
+        <result property="setName" column="set_name"/>
+        <result property="waterQs" column="water_qs"/>
+        <result property="tidalLevel" column="tidal_level"/>
+        <result property="benchId" column="bench_id"/>
+        <result property="refId" column="ref_id"/>
+        <result property="hs" column="hs"/>
+        <result property="hc" column="hc"/>
+        <result property="protectionLevel" column="protection_level"/>
+        <result property="controlLevel" column="control_level"/>
+        <result property="comparisonTimepoint" column="comparison_timepoint"/>
+        <result property="riskThresholds" column="risk_thresholds"/>
+        <result property="weights" column="weights"/>
+        <result property="otherParams" column="other_params"/>
+        <result property="createdAt" column="created_at"/>
+        <result property="updatedAt" column="updated_at"/>
+        <result property="deletedAt" column="deleted_at"/>
+    </resultMap>
+
+    <select id="selectAll" resultMap="BasicParamResultMap">
+        SELECT * FROM basic_params WHERE deleted_at IS NULL ORDER BY id DESC
+    </select>
+
+    <select id="selectByParamId" resultMap="BasicParamResultMap">
+        SELECT * FROM basic_params WHERE param_id = #{paramId} AND deleted_at IS NULL
+    </select>
+
+    <select id="selectById" resultMap="BasicParamResultMap">
+        SELECT * FROM basic_params WHERE id = #{id} AND deleted_at IS NULL
+    </select>
+
+    <insert id="insert" parameterType="com.yangtze.bankwarning.domain.po.BasicParamPO" useGeneratedKeys="true" keyProperty="id">
+        INSERT INTO basic_params (
+            param_id, param_name, segment, current_timepoint, set_name, water_qs, tidal_level,
+            bench_id, ref_id, hs, hc, protection_level, control_level,
+            comparison_timepoint, risk_thresholds, weights, other_params
+        ) VALUES (
+            #{paramId}, #{paramName}, #{segment}, #{currentTimepoint}, #{setName}, #{waterQs}, #{tidalLevel},
+            #{benchId}, #{refId}, #{hs}, #{hc}, #{protectionLevel}, #{controlLevel},
+            #{comparisonTimepoint}, #{riskThresholds}::jsonb, #{weights}::jsonb, #{otherParams}::jsonb
+        )
+    </insert>
+
+    <update id="update" parameterType="com.yangtze.bankwarning.domain.po.BasicParamPO">
+        UPDATE basic_params
+        SET param_name = COALESCE(#{paramName}, param_name),
+            segment = COALESCE(#{segment}, segment),
+            current_timepoint = COALESCE(#{currentTimepoint}, current_timepoint),
+            set_name = COALESCE(#{setName}, set_name),
+            water_qs = COALESCE(#{waterQs}, water_qs),
+            tidal_level = COALESCE(#{tidalLevel}, tidal_level),
+            bench_id = COALESCE(#{benchId}, bench_id),
+            ref_id = COALESCE(#{refId}, ref_id),
+            hs = COALESCE(#{hs}, hs),
+            hc = COALESCE(#{hc}, hc),
+            protection_level = COALESCE(#{protectionLevel}, protection_level),
+            control_level = COALESCE(#{controlLevel}, control_level),
+            comparison_timepoint = COALESCE(#{comparisonTimepoint}, comparison_timepoint),
+            risk_thresholds = COALESCE(#{riskThresholds}::jsonb, risk_thresholds),
+            weights = COALESCE(#{weights}::jsonb, weights),
+            other_params = COALESCE(#{otherParams}::jsonb, other_params)
+        WHERE param_id = #{paramId} AND deleted_at IS NULL
+    </update>
+
+</mapper>

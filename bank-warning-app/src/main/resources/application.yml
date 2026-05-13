@@ -87,3 +87,15 @@ app:
     # RustFS bucket 名称（传递给 Python Worker）
     # 地形文件路径从数据库 banks.terrain_key 读取
     terrain-bucket: ${KAFKA_TERRAIN_BUCKET:yangtze-bank-warning-system}
+
+# MyBatis 配置
+mybatis:
+  # Mapper XML 文件位置
+  mapper-locations: classpath*:mapper/**/*.xml
+  # 实体类包别名
+  type-aliases-package: com.yangtze.bankwarning.domain.po
+  configuration:
+    # 驼峰命名自动映射
+    map-underscore-to-camel-case: true
+    # 日志实现
+    log-impl: org.apache.ibatis.logging.slf4j.Slf4jImpl
