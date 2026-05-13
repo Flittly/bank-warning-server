@@ -17,7 +17,7 @@ public class TaskRepository extends AbstractJdbcRepository {
     }
 
     public Map<String, Object> save(TaskPayload payload, boolean overwrite) {
-        if (overwrite && exists("SELECT 1 FROM tasks WHERE task_id = :taskId", params("taskId", payload.taskId()))) {
+        if (overwrite && exists("SELECT 1 FROM tasks WHERE task_id = :taskId AND deleted_at IS NULL", params("taskId", payload.taskId()))) {
             Map<String, Object> args = new LinkedHashMap<>();
             args.put("taskName", payload.taskName());
             args.put("bankIds", writeJson(payload.bankIds()));
@@ -40,11 +40,11 @@ public class TaskRepository extends AbstractJdbcRepository {
     }
 
     public List<Map<String, Object>> list() {
-        return queryList("SELECT * FROM tasks ORDER BY id DESC", Map.of());
+        return queryList("SELECT * FROM tasks WHERE deleted_at IS NULL ORDER BY id DESC", Map.of());
     }
 
     public Map<String, Object> getByTaskId(String taskId) {
-        return queryOne("SELECT * FROM tasks WHERE task_id = :taskId", params("taskId", taskId));
+        return queryOne("SELECT * FROM tasks WHERE task_id = :taskId AND deleted_at IS NULL", params("taskId", taskId));
     }
 
     public void updateStatus(String taskId, String status, String runStartedAt, String runCompletedAt, String errorMessage) {
@@ -61,34 +61,34 @@ public class TaskRepository extends AbstractJdbcRepository {
                     run_started_at = COALESCE(CAST(:runStartedAt AS TIMESTAMP), run_started_at),
                     run_completed_at = COALESCE(CAST(:runCompletedAt AS TIMESTAMP), run_completed_at),
                     error_message = :errorMessage
-                WHERE task_id = :taskId
+                WHERE task_id = :taskId AND deleted_at IS NULL
                 """,
                 args);
     }
 
     public void markRunning(String taskId) {
-        update("UPDATE tasks SET status = 'running', run_started_at = CURRENT_TIMESTAMP, run_completed_at = NULL, error_message = NULL WHERE task_id = :taskId", params("taskId", taskId));
+        update("UPDATE tasks SET status = 'running', run_started_at = CURRENT_TIMESTAMP, run_completed_at = NULL, error_message = NULL WHERE task_id = :taskId AND deleted_at IS NULL", params("taskId", taskId));
     }
 
     public void markCompleted(String taskId) {
-        update("UPDATE tasks SET status = 'completed', run_completed_at = CURRENT_TIMESTAMP, error_message = NULL WHERE task_id = :taskId", params("taskId", taskId));
+        update("UPDATE tasks SET status = 'completed', run_completed_at = CURRENT_TIMESTAMP, error_message = NULL WHERE task_id = :taskId AND deleted_at IS NULL", params("taskId", taskId));
     }
 
     public void markError(String taskId, String errorMessage) {
         Map<String, Object> args = new LinkedHashMap<>();
         args.put("errorMessage", errorMessage);
         args.put("taskId", taskId);
-        update("UPDATE tasks SET status = 'error', run_completed_at = CURRENT_TIMESTAMP, error_message = :errorMessage WHERE task_id = :taskId", args);
+        update("UPDATE tasks SET status = 'error', run_completed_at = CURRENT_TIMESTAMP, error_message = :errorMessage WHERE task_id = :taskId AND deleted_at IS NULL", args);
     }
 
     public void markPartialFailed(String taskId, String errorMessage) {
         Map<String, Object> args = new LinkedHashMap<>();
         args.put("errorMessage", errorMessage);
         args.put("taskId", taskId);
-        update("UPDATE tasks SET status = 'partial_failed', run_completed_at = CURRENT_TIMESTAMP, error_message = :errorMessage WHERE task_id = :taskId", args);
+        update("UPDATE tasks SET status = 'partial_failed', run_completed_at = CURRENT_TIMESTAMP, error_message = :errorMessage WHERE task_id = :taskId AND deleted_at IS NULL", args);
     }
 
     public int deleteByTaskId(String taskId) {
-        return update("DELETE FROM tasks WHERE task_id = :taskId", params("taskId", taskId));
+        return update("UPDATE tasks SET deleted_at = CURRENT_TIMESTAMP WHERE task_id = :taskId AND deleted_at IS NULL", params("taskId", taskId));
     }
 }

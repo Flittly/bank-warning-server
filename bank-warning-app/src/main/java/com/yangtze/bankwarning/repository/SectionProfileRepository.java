@@ -76,7 +76,7 @@ public class SectionProfileRepository extends AbstractJdbcRepository {
                 """
                 SELECT sp.*, ST_AsGeoJSON(sp.geom)::jsonb AS geometry
                 FROM section_profiles sp
-                WHERE sp.task_id = :taskId
+                WHERE sp.task_id = :taskId AND sp.deleted_at IS NULL
                 ORDER BY sp.id
                 """,
                 params("taskId", taskId));
@@ -87,7 +87,7 @@ public class SectionProfileRepository extends AbstractJdbcRepository {
                 """
                 SELECT sp.*, ST_AsGeoJSON(sp.geom)::jsonb AS geometry
                 FROM section_profiles sp
-                WHERE sp.section_id = :sectionId
+                WHERE sp.section_id = :sectionId AND sp.deleted_at IS NULL
                 ORDER BY sp.id DESC
                 LIMIT 1
                 """,
@@ -95,6 +95,6 @@ public class SectionProfileRepository extends AbstractJdbcRepository {
     }
 
     public int deleteByTaskId(String taskId) {
-        return update("DELETE FROM section_profiles WHERE task_id = :taskId", params("taskId", taskId));
+        return update("UPDATE section_profiles SET deleted_at = CURRENT_TIMESTAMP WHERE task_id = :taskId AND deleted_at IS NULL", params("taskId", taskId));
     }
 }

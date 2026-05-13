@@ -17,7 +17,7 @@ public class BasicParamRepository extends AbstractJdbcRepository {
     }
 
     public Map<String, Object> save(BasicParamPayload payload, boolean overwrite) {
-        if (overwrite && exists("SELECT 1 FROM basic_params WHERE param_id = :paramId", params("paramId", payload.paramId()))) {
+        if (overwrite && exists("SELECT 1 FROM basic_params WHERE param_id = :paramId AND deleted_at IS NULL", params("paramId", payload.paramId()))) {
             update(payload.paramId(), payload);
             return getByParamId(payload.paramId());
         }
@@ -39,15 +39,15 @@ public class BasicParamRepository extends AbstractJdbcRepository {
     }
 
     public List<Map<String, Object>> list() {
-        return queryList("SELECT * FROM basic_params ORDER BY id DESC", Map.of());
+        return queryList("SELECT * FROM basic_params WHERE deleted_at IS NULL ORDER BY id DESC", Map.of());
     }
 
     public Map<String, Object> getByParamId(String paramId) {
-        return queryOne("SELECT * FROM basic_params WHERE param_id = :paramId", params("paramId", paramId));
+        return queryOne("SELECT * FROM basic_params WHERE param_id = :paramId AND deleted_at IS NULL", params("paramId", paramId));
     }
 
     public Map<String, Object> getById(Integer id) {
-        return queryOne("SELECT * FROM basic_params WHERE id = :id", params("id", id));
+        return queryOne("SELECT * FROM basic_params WHERE id = :id AND deleted_at IS NULL", params("id", id));
     }
 
     public void update(String paramId, BasicParamPayload payload) {

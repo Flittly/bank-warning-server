@@ -24,6 +24,7 @@ public class RiskResultRepository extends AbstractJdbcRepository {
                 """
                 SELECT brr.*, ST_AsGeoJSON(brr.geom)::jsonb AS geometry
                 FROM bank_risk_results brr
+                WHERE brr.deleted_at IS NULL
                 """);
         Map<String, Object> args = new LinkedHashMap<>();
         appendEqualsCondition(sql, args, "brr.task_id", "taskId", taskId);
@@ -38,7 +39,7 @@ public class RiskResultRepository extends AbstractJdbcRepository {
                 """
                 SELECT brr.*, ST_AsGeoJSON(brr.geom)::jsonb AS geometry
                 FROM bank_risk_results brr
-                WHERE brr.section_id = :sectionId
+                WHERE brr.section_id = :sectionId AND brr.deleted_at IS NULL
                 ORDER BY brr.id DESC
                 LIMIT 1
                 """,
@@ -78,15 +79,15 @@ public class RiskResultRepository extends AbstractJdbcRepository {
     }
 
     public int countByTaskId(String taskId) {
-        return queryInt("SELECT COUNT(*) FROM bank_risk_results WHERE task_id = :taskId", params("taskId", taskId));
+        return queryInt("SELECT COUNT(*) FROM bank_risk_results WHERE task_id = :taskId AND deleted_at IS NULL", params("taskId", taskId));
     }
 
     public int deleteByTaskId(String taskId) {
-        return update("DELETE FROM bank_risk_results WHERE task_id = :taskId", params("taskId", taskId));
+        return update("UPDATE bank_risk_results SET deleted_at = CURRENT_TIMESTAMP WHERE task_id = :taskId AND deleted_at IS NULL", params("taskId", taskId));
     }
     public boolean existsByRunIdAndSectionId(String runId, String sectionId) {
         return exists(
-                "SELECT 1 FROM bank_risk_results WHERE run_id = :runId AND section_id = :sectionId",
+                "SELECT 1 FROM bank_risk_results WHERE run_id = :runId AND section_id = :sectionId AND deleted_at IS NULL",
                 Map.of("runId", runId, "sectionId", sectionId)
         );
     }

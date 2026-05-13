@@ -21,7 +21,7 @@ public class SectionRepository extends AbstractJdbcRepository {
     }
 
     public boolean existsBySectionId(String sectionId) {
-        return exists("SELECT 1 FROM cross_sections WHERE section_id = :sectionId", params("sectionId", sectionId));
+        return exists("SELECT 1 FROM cross_sections WHERE section_id = :sectionId AND deleted_at IS NULL", params("sectionId", sectionId));
     }
 
     public Map<String, Object> insert(String taskId, Integer basicParamId, Map<String, Object> merged, SectionPayload payload) {
@@ -85,6 +85,7 @@ public class SectionRepository extends AbstractJdbcRepository {
                 SELECT cs.*, t.task_id AS task_code, t.task_name, ST_AsGeoJSON(cs.geom)::jsonb AS geometry
                 FROM cross_sections cs
                 JOIN tasks t ON cs.task_id = t.task_id
+                WHERE cs.deleted_at IS NULL AND t.deleted_at IS NULL
                 """);
         Map<String, Object> args = new LinkedHashMap<>();
         appendEqualsCondition(sql, args, "cs.task_id", "taskId", taskId);
@@ -99,7 +100,7 @@ public class SectionRepository extends AbstractJdbcRepository {
                 SELECT cs.*, t.task_id AS task_code, t.task_name, ST_AsGeoJSON(cs.geom)::jsonb AS geometry
                 FROM cross_sections cs
                 JOIN tasks t ON cs.task_id = t.task_id
-                WHERE cs.section_id = :sectionId
+                WHERE cs.section_id = :sectionId AND cs.deleted_at IS NULL AND t.deleted_at IS NULL
                 """,
                 params("sectionId", sectionId));
     }
@@ -169,14 +170,14 @@ public class SectionRepository extends AbstractJdbcRepository {
     }
 
     public int deleteBySectionId(String sectionId) {
-        return update("DELETE FROM cross_sections WHERE section_id = :sectionId", params("sectionId", sectionId));
+        return update("UPDATE cross_sections SET deleted_at = CURRENT_TIMESTAMP WHERE section_id = :sectionId AND deleted_at IS NULL", params("sectionId", sectionId));
     }
 
     public int countByTaskId(String taskId) {
-        return queryInt("SELECT COUNT(*) FROM cross_sections WHERE task_id = :taskId", params("taskId", taskId));
+        return queryInt("SELECT COUNT(*) FROM cross_sections WHERE task_id = :taskId AND deleted_at IS NULL", params("taskId", taskId));
     }
 
     public int deleteByTaskId(String taskId) {
-        return update("DELETE FROM cross_sections WHERE task_id = :taskId", params("taskId", taskId));
+        return update("UPDATE cross_sections SET deleted_at = CURRENT_TIMESTAMP WHERE task_id = :taskId AND deleted_at IS NULL", params("taskId", taskId));
     }
 }

@@ -17,7 +17,7 @@ public class BankRepository extends AbstractJdbcRepository {
     }
 
     public Map<String, Object> save(BankPayload payload, boolean overwrite) {
-        if (overwrite && exists("SELECT 1 FROM banks WHERE bank_id = :bankId", params("bankId", payload.bankId()))) {
+        if (overwrite && exists("SELECT 1 FROM banks WHERE bank_id = :bankId AND deleted_at IS NULL", params("bankId", payload.bankId()))) {
             update(payload.bankId(), payload);
             return getByBankId(payload.bankId());
         }
@@ -53,6 +53,7 @@ public class BankRepository extends AbstractJdbcRepository {
                 """
                 SELECT b.*, ST_AsGeoJSON(b.geom)::jsonb AS geometry
                 FROM banks b
+                WHERE b.deleted_at IS NULL
                 """);
         Map<String, Object> args = new LinkedHashMap<>();
         appendEqualsCondition(sql, args, "b.region_code", "regionCode", regionCode);
@@ -64,7 +65,7 @@ public class BankRepository extends AbstractJdbcRepository {
         return queryOne(
                 """
                 SELECT b.*, ST_AsGeoJSON(b.geom)::jsonb AS geometry
-                FROM banks b WHERE b.bank_id = :bankId
+                FROM banks b WHERE b.bank_id = :bankId AND b.deleted_at IS NULL
                 """,
                 params("bankId", bankId));
     }
@@ -96,6 +97,6 @@ public class BankRepository extends AbstractJdbcRepository {
     }
 
     public int deleteByBankId(String bankId) {
-        return update("DELETE FROM banks WHERE bank_id = :bankId", params("bankId", bankId));
+        return update("UPDATE banks SET deleted_at = CURRENT_TIMESTAMP WHERE bank_id = :bankId AND deleted_at IS NULL", params("bankId", bankId));
     }
 }
