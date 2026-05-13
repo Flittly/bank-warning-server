@@ -27,9 +27,18 @@ public class RiskResultRepository extends AbstractJdbcRepository {
                 WHERE brr.deleted_at IS NULL
                 """);
         Map<String, Object> args = new LinkedHashMap<>();
-        appendEqualsCondition(sql, args, "brr.task_id", "taskId", taskId);
-        appendEqualsCondition(sql, args, "brr.bank_id", "bankId", bankId);
-        appendEqualsCondition(sql, args, "brr.region_code", "regionCode", regionCode);
+        if (taskId != null) {
+            sql.append(" AND brr.task_id = :taskId");
+            args.put("taskId", taskId);
+        }
+        if (bankId != null) {
+            sql.append(" AND brr.bank_id = :bankId");
+            args.put("bankId", bankId);
+        }
+        if (regionCode != null) {
+            sql.append(" AND brr.region_code = :regionCode");
+            args.put("regionCode", regionCode);
+        }
         sql.append(" ORDER BY brr.id");
         return queryList(sql.toString(), args);
     }

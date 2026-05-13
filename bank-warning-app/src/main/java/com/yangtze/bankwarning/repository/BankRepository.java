@@ -56,7 +56,10 @@ public class BankRepository extends AbstractJdbcRepository {
                 WHERE b.deleted_at IS NULL
                 """);
         Map<String, Object> args = new LinkedHashMap<>();
-        appendEqualsCondition(sql, args, "b.region_code", "regionCode", regionCode);
+        if (regionCode != null) {
+            sql.append(" AND b.region_code = :regionCode");
+            args.put("regionCode", regionCode);
+        }
         sql.append(" ORDER BY b.id");
         return queryList(sql.toString(), args);
     }

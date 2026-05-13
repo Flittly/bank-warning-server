@@ -88,8 +88,14 @@ public class SectionRepository extends AbstractJdbcRepository {
                 WHERE cs.deleted_at IS NULL AND t.deleted_at IS NULL
                 """);
         Map<String, Object> args = new LinkedHashMap<>();
-        appendEqualsCondition(sql, args, "cs.task_id", "taskId", taskId);
-        appendEqualsCondition(sql, args, "cs.bank_id", "bankId", bankId);
+        if (taskId != null) {
+            sql.append(" AND cs.task_id = :taskId");
+            args.put("taskId", taskId);
+        }
+        if (bankId != null) {
+            sql.append(" AND cs.bank_id = :bankId");
+            args.put("bankId", bankId);
+        }
         sql.append(" ORDER BY cs.id");
         return queryList(sql.toString(), args);
     }
