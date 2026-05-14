@@ -1,6 +1,6 @@
 package com.yangtze.bankwarning.service;
 
-import com.yangtze.bankwarning.dto.ModelParameterUpdateRequest;
+import com.yangtze.bankwarning.domain.dto.ModelParameterUpdateRequest;
 import com.yangtze.bankwarning.model.ParameterProfile;
 import org.springframework.stereotype.Service;
 

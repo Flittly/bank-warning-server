@@ -1,10 +1,10 @@
 package com.yangtze.bankwarning.service;
 
 import com.yangtze.bankwarning.domain.po.*;
-import com.yangtze.bankwarning.dto.BankPayload;
-import com.yangtze.bankwarning.dto.BasicParamPayload;
-import com.yangtze.bankwarning.dto.SectionPayload;
-import com.yangtze.bankwarning.dto.TaskPayload;
+import com.yangtze.bankwarning.domain.dto.BankPayload;
+import com.yangtze.bankwarning.domain.dto.BasicParamPayload;
+import com.yangtze.bankwarning.domain.dto.SectionPayload;
+import com.yangtze.bankwarning.domain.dto.TaskPayload;
 import com.yangtze.bankwarning.mapper.*;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.springframework.stereotype.Service;

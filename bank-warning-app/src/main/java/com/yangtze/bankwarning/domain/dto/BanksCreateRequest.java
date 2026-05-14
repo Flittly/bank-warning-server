@@ -1,6 +1,4 @@
-package com.yangtze.bankwarning.dto;
-
-import com.fasterxml.jackson.annotation.JsonProperty;
+package com.yangtze.bankwarning.domain.dto;
 
 import java.util.List;
 
