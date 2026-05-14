@@ -1,6 +1,7 @@
 package com.yangtze.bankwarning.service;
 
-import com.yangtze.bankwarning.repository.TiffRepository;
+import com.yangtze.bankwarning.domain.po.TiffBoundsPO;
+import com.yangtze.bankwarning.mapper.TiffBoundsMapper;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
@@ -18,23 +19,24 @@ import org.springframework.web.multipart.MultipartFile;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.stream.Collectors;
 
 @Service
 public class TiffService {
 
     private static final Logger log = LoggerFactory.getLogger(TiffService.class);
     private final RestTemplate restTemplate = new RestTemplate();
-    private final TiffRepository tiffRepository;
+    private final TiffBoundsMapper tiffBoundsMapper;
 
     @Value("${app.model-service.base-url:http://localhost:8088}")
     private String modelServiceBaseUrl;
 
-    public TiffService(TiffRepository tiffRepository) {
-        this.tiffRepository = tiffRepository;
+    public TiffService(TiffBoundsMapper tiffBoundsMapper) {
+        this.tiffBoundsMapper = tiffBoundsMapper;
     }
 
     public List<Map<String, Object>> listTiffs() {
-        return tiffRepository.listAll();
+        return tiffBoundsMapper.selectAll().stream().map(this::toMap).collect(Collectors.toList());
     }
 
     public Map<String, Object> uploadTiff(MultipartFile file, String segment, String year, String timepoint) {
@@ -104,5 +106,22 @@ public class TiffService {
             log.error("[tiff-delete] failed, tiff_key={}, error={}", tiffKey, exception.getMessage(), exception);
             throw new IllegalStateException("Failed to delete tiff: " + exception.getMessage(), exception);
         }
+    }
+
+    private Map<String, Object> toMap(TiffBoundsPO po) {
+        if (po == null) return null;
+        Map<String, Object> map = new LinkedHashMap<>();
+        map.put("id", po.getId());
+        map.put("tiff_key", po.getTiffKey());
+        map.put("region_code", po.getRegionCode());
+        map.put("year", po.getYear());
+        map.put("timepoint", po.getTimepoint());
+        map.put("min_x", po.getMinX());
+        map.put("min_y", po.getMinY());
+        map.put("max_x", po.getMaxX());
+        map.put("max_y", po.getMaxY());
+        map.put("created_at", po.getCreatedAt());
+        map.put("updated_at", po.getUpdatedAt());
+        return map;
     }
 }
