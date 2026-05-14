@@ -1,7 +1,7 @@
 package com.yangtze.bankwarning.service;
 
 import com.yangtze.bankwarning.config.ModelServiceProperties;
-import com.yangtze.bankwarning.dto.ModelPredictRequest;
+import com.yangtze.bankwarning.domain.dto.ModelPredictRequest;
 import com.yangtze.bankwarning.model.ParameterProfile;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;

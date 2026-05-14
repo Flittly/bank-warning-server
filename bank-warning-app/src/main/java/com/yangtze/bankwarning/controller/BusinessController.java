@@ -1,14 +1,13 @@
 package com.yangtze.bankwarning.controller;
 
-import com.yangtze.bankwarning.dto.BankPayload;
-import com.yangtze.bankwarning.dto.BanksCreateRequest;
-import com.yangtze.bankwarning.dto.BasicParamPayload;
-import com.yangtze.bankwarning.dto.BasicParamsCreateRequest;
-import com.yangtze.bankwarning.dto.SectionPayload;
-import com.yangtze.bankwarning.dto.SectionsCreateRequest;
-import com.yangtze.bankwarning.dto.TaskPayload;
-import com.yangtze.bankwarning.dto.TasksCreateRequest;
-import com.yangtze.bankwarning.dto.TaskStatusUpdateRequest;
+import com.yangtze.bankwarning.domain.dto.BankPayload;
+import com.yangtze.bankwarning.domain.dto.BanksCreateRequest;
+import com.yangtze.bankwarning.domain.dto.BasicParamPayload;
+import com.yangtze.bankwarning.domain.dto.BasicParamsCreateRequest;
+import com.yangtze.bankwarning.domain.dto.SectionPayload;
+import com.yangtze.bankwarning.domain.dto.SectionsCreateRequest;
+import com.yangtze.bankwarning.domain.dto.TasksCreateRequest;
+import com.yangtze.bankwarning.domain.dto.TaskStatusUpdateRequest;
 import com.yangtze.bankwarning.service.BusinessStoreService;
 import com.yangtze.bankwarning.service.SectionValidationService;
 import com.yangtze.bankwarning.service.TaskExecutionService;

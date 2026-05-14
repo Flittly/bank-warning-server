@@ -1,7 +1,7 @@
 package com.yangtze.bankwarning.controller;
 
-import com.yangtze.bankwarning.dto.ModelParameterUpdateRequest;
-import com.yangtze.bankwarning.dto.ModelPredictRequest;
+import com.yangtze.bankwarning.domain.dto.ModelParameterUpdateRequest;
+import com.yangtze.bankwarning.domain.dto.ModelPredictRequest;
 import com.yangtze.bankwarning.service.ModelGatewayService;
 import com.yangtze.bankwarning.service.ModelParameterService;
 import jakarta.validation.Valid;

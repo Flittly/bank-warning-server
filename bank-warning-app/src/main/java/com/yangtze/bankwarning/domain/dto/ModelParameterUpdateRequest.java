@@ -1,4 +1,4 @@
-package com.yangtze.bankwarning.dto;
+package com.yangtze.bankwarning.domain.dto;
 
 import java.util.Map;
 
