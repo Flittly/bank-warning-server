@@ -250,7 +250,7 @@ public class BusinessStoreService {
         if (po == null) {
             throw new IllegalArgumentException("Risk result not found for section_id: " + sectionId);
         }
-        return toMap(po);
+        return toMapDetail(po);
     }
 
     public void saveRiskResult(
@@ -445,6 +445,38 @@ public class BusinessStoreService {
         map.put("region_code", po.getRegionCode());
         map.put("bank_id", po.getBankId());
         map.put("risk_level", po.getRiskLevel());
+        map.put("risk_value", extractRiskValue(po.getIndicators()));
+        map.put("created_at", po.getCreatedAt());
+        map.put("updated_at", po.getUpdatedAt());
+        return map;
+    }
+
+    private Double extractRiskValue(String indicatorsJson) {
+        if (indicatorsJson == null || indicatorsJson.isBlank()) return null;
+        try {
+            Object parsed = parseJson(indicatorsJson);
+            if (parsed instanceof Map<?, ?> map) {
+                Object result = map.get("result");
+                if (result instanceof Number n) return n.doubleValue();
+            }
+            return null;
+        } catch (Exception e) {
+            return null;
+        }
+    }
+
+    private Map<String, Object> toMapDetail(RiskResultPO po) {
+        if (po == null) return null;
+        Map<String, Object> map = new LinkedHashMap<>();
+        map.put("id", po.getId());
+        map.put("run_id", po.getRunId());
+        map.put("task_id", po.getTaskId());
+        map.put("section_id", po.getSectionId());
+        map.put("section_name", po.getSectionName());
+        map.put("region_code", po.getRegionCode());
+        map.put("bank_id", po.getBankId());
+        map.put("risk_level", po.getRiskLevel());
+        map.put("risk_value", extractRiskValue(po.getIndicators()));
         map.put("indicators", parseJson(po.getIndicators()));
         map.put("created_at", po.getCreatedAt());
         map.put("updated_at", po.getUpdatedAt());
