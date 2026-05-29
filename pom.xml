@@ -25,6 +25,7 @@
     <modules>
         <module>bank-warning-core</module>
         <module>bank-warning-kafka</module>
+        <module>bank-warning-ai</module>
         <module>bank-warning-app</module>
     </modules>
 </project>

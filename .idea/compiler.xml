@@ -9,12 +9,17 @@
         <outputRelativeToContentRoot value="true" />
         <module name="bank-warning-app" />
         <module name="bank-warning-core" />
+        <module name="bank-warning-ai" />
         <module name="bank-warning-kafka" />
       </profile>
     </annotationProcessing>
+    <bytecodeTargetLevel>
+      <module name="bank-warning-parent" target="1.5" />
+    </bytecodeTargetLevel>
   </component>
   <component name="JavacSettings">
     <option name="ADDITIONAL_OPTIONS_OVERRIDE">
+      <module name="bank-warning-ai" options="-parameters" />
       <module name="bank-warning-app" options="-parameters" />
       <module name="bank-warning-core" options="-parameters" />
       <module name="bank-warning-kafka" options="-parameters" />
