@@ -34,12 +34,22 @@ public class Prompts {
             (Map<String, Object>) data.get("raw_values") : Collections.emptyMap();
         Map<String, Object> thresholds = data.get("thresholds") instanceof Map ? 
             (Map<String, Object>) data.get("thresholds") : Collections.emptyMap();
+        
+        // 地理信息
+        String bankName = String.valueOf(data.getOrDefault("bank_name", ""));
+        Map<String, Object> coords = data.get("coordinates") instanceof Map ?
+            (Map<String, Object>) data.get("coordinates") : Collections.emptyMap();
 
         return String.format("""
                 请根据以下数据生成河岸崩塌风险评估报告：
                 
-                【基本信息】
+                【位置信息】
                 - 断面名称：%s
+                - 所属岸段：%s
+                - 起点坐标：经度 %s，纬度 %s
+                - 终点坐标：经度 %s，纬度 %s
+                
+                【风险评估】
                 - 综合风险值：%s
                 - 风险等级：%s 级（1=低风险，2=中低，3=中高，4=高风险）
                 
@@ -58,7 +68,10 @@ public class Prompts {
                 - PL（坡度稳定性）：%s
                 - LC（承载能力）：%s
                 """,
-                sectionName, fmt(riskValue), fmt(riskLevel),
+                sectionName, bankName,
+                coords.getOrDefault("start_lng", "N/A"), coords.getOrDefault("start_lat", "N/A"),
+                coords.getOrDefault("end_lng", "N/A"), coords.getOrDefault("end_lat", "N/A"),
+                fmt(riskValue), fmt(riskLevel),
                 fmt(rawValues.get("Ky")), fmtThreshold(thresholds, "Ky"),
                 fmt(rawValues.get("PQ")), fmtThreshold(thresholds, "PQ"),
                 fmt(rawValues.get("Zd")), fmtThreshold(thresholds, "Zd"),
