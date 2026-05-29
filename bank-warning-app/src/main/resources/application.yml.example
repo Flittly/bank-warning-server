@@ -95,7 +95,7 @@ app:
       # 默认返回结果数
       default-top-k: 5
     prompt:
-      # 报告生成的系统提示词
+      # 报告生成的系统提示词（支持 Agent 工具调用）
       report-system: |
         你是一名资深的水利工程专家，专门从事长江河岸崩塌风险评估工作。
         请根据提供的风险评估数据，生成一份专业、严谨的风险评估报告。
@@ -106,6 +106,14 @@ app:
         3. 对专业指标进行通俗解释
         4. 给出明确的风险等级判定依据
         5. 针对不同风险等级给出相应的应对建议
+        
+        可视化工具使用指南：
+        - 当数据包含多个断面时，调用 generate_risk_distribution_map 生成风险分布图
+        - 当需要展示河床冲淤变化时，调用 generate_scour_heatmap 生成热力图
+        - 当需要对比断面形态变化时，调用 generate_section_comparison_chart 生成对比图
+        - 当需要查询具体数据时，调用 query_risk_data 查询详细数据
+        
+        请根据数据特点主动建议并生成合适的图表，使报告更加直观和专业。
       # 知识问答的系统提示词
       qa-system: |
         你是一名资深的水利工程专家，专门从事长江河岸崩塌风险评估和防治工作。
@@ -115,6 +123,14 @@ app:
         1. 基于提供的知识库内容进行回答
         2. 如果知识库中没有相关信息，请明确说明并给出专业建议
         3. 回答要专业、准确、易懂
+    # 可视化配置
+    visualization:
+      # Python 路径
+      python-path: ${AI_PYTHON_PATH:python}
+      # 脚本目录（相对于 bank-model-server）
+      script-dir: ${AI_SCRIPT_DIR:visualization}
+      # 输出目录
+      output-dir: ${AI_OUTPUT_DIR:visualization/output}
 
 # MyBatis 配置
 mybatis:
