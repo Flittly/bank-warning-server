@@ -1,0 +1,125 @@
+# ============================================================
+# 长江河岸崩塌风险评估系统 - 配置文件模板
+# ============================================================
+# 使用说明：
+# 1. 复制此文件为 application.yml
+# 2. 修改下面的配置项（特别是敏感信息）
+# 3. application.yml 不会提交到 Git
+# ============================================================
+
+server:
+  port: 8090
+
+spring:
+  application:
+    name: bank-warning-server
+  datasource:
+    url: ${BANK_DB_URL:jdbc:postgresql://localhost:5432/bank_risk_db}
+    username: ${BANK_DB_USERNAME:postgres}
+    password: ${BANK_DB_PASSWORD:123456}
+    driver-class-name: org.postgresql.Driver
+
+  servlet:
+    multipart:
+      max-file-size: 2GB
+      max-request-size: 2GB
+
+  # Kafka 配置（可选）
+  kafka:
+    bootstrap-servers: ${KAFKA_BOOTSTRAP_SERVERS:127.0.0.1:9092}
+    producer:
+      key-serializer: org.apache.kafka.common.serialization.StringSerializer
+      value-serializer: org.springframework.kafka.support.serializer.JsonSerializer
+      acks: all
+      retries: 10
+      properties:
+        enable.idempotence: true
+        max.in.flight.requests.per.connection: 5
+        delivery.timeout.ms: 120000
+        request.timeout.ms: 30000
+    consumer:
+      group-id: ${KAFKA_RESULT_GROUP_ID:bank-warning-result-consumer}
+      key-deserializer: org.apache.kafka.common.serialization.StringDeserializer
+      value-deserializer: org.springframework.kafka.support.serializer.JsonDeserializer
+      auto-offset-reset: earliest
+      enable-auto-commit: false
+      properties:
+        spring.json.trusted.packages: com.yangtze.bankwarning.dto.kafka
+        isolation.level: read_committed
+    listener:
+      ack-mode: manual
+      concurrency: 2
+
+# 自定义应用配置
+app:
+  model-service:
+    base-url: http://localhost:8088
+    default-model-api: /v0/mi/risk-level
+    connect-timeout: 5s
+    read-timeout: 600s
+  
+  kafka:
+    enabled: ${KAFKA_ENABLED:false}
+    task-topic: ${KAFKA_TASK_TOPIC:bank.model.task}
+    result-topic: ${KAFKA_RESULT_TOPIC:bank.model.result.v1}
+    result-dlt-topic: ${KAFKA_RESULT_DLT_TOPIC:bank.model.result.dlt.v1}
+    terrain-bucket: ${KAFKA_TERRAIN_BUCKET:yangtze-bank-warning-system}
+
+  # ============================================================
+  # AI 模块配置
+  # ============================================================
+  ai:
+    llm:
+      # 【必填】LLM API Key，从 https://cloud.siliconflow.cn 获取
+      api-key: ${AI_API_KEY:your-api-key-here}
+      # LLM API 地址
+      base-url: ${AI_BASE_URL:https://api.siliconflow.cn/v1}
+      # 使用的模型
+      model: ${AI_MODEL:Qwen/Qwen3.5-122B-A10B}
+      # 温度参数（0-1，越高越随机）
+      temperature: 0.7
+      # 最大输出 token 数
+      max-tokens: 2048
+      # API 调用超时（秒）
+      timeout: 60
+    embedding:
+      # Embedding 模型
+      model: ${AI_EMBEDDING_MODEL:BAAI/bge-large-zh-v1.5}
+      # 向量维度
+      dimensions: 1536
+      # API 调用超时（秒）
+      timeout: 30
+    vector:
+      # 相似度阈值（0-1，越高越严格）
+      similarity-threshold: 0.4
+      # 默认返回结果数
+      default-top-k: 5
+    prompt:
+      # 报告生成的系统提示词
+      report-system: |
+        你是一名资深的水利工程专家，专门从事长江河岸崩塌风险评估工作。
+        请根据提供的风险评估数据，生成一份专业、严谨的风险评估报告。
+        
+        报告要求：
+        1. 使用中文撰写，语言专业但易懂
+        2. 结构清晰：概述 → 指标分析 → 风险评估 → 建议措施
+        3. 对专业指标进行通俗解释
+        4. 给出明确的风险等级判定依据
+        5. 针对不同风险等级给出相应的应对建议
+      # 知识问答的系统提示词
+      qa-system: |
+        你是一名资深的水利工程专家，专门从事长江河岸崩塌风险评估和防治工作。
+        请根据提供的知识库内容，准确、专业地回答用户的问题。
+        
+        回答要求：
+        1. 基于提供的知识库内容进行回答
+        2. 如果知识库中没有相关信息，请明确说明并给出专业建议
+        3. 回答要专业、准确、易懂
+
+# MyBatis 配置
+mybatis:
+  mapper-locations: classpath*:mapper/**/*.xml
+  type-aliases-package: com.yangtze.bankwarning.domain.po
+  configuration:
+    map-underscore-to-camel-case: true
+    log-impl: org.apache.ibatis.logging.slf4j.Slf4jImpl
