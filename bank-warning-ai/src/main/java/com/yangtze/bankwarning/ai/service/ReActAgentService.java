@@ -112,6 +112,122 @@ public class ReActAgentService {
     }
 
     /**
+     * ReAct 驱动的任务报告生成
+     */
+    public Map<String, Object> generateReActTaskReport(String taskId) {
+        log.info("[react] generating for task={}", taskId);
+
+        // 1. 查询任务数据
+        List<Map<String, Object>> taskData = queryTaskData(taskId);
+        if (taskData.isEmpty()) {
+            return Map.of("success", false, "error", "未找到任务数据");
+        }
+
+        // 2. 构建初始消息
+        String systemPrompt = getReActSystemPrompt();
+        String userMessage = buildTaskUserMessage(taskId, taskData);
+        
+        List<String> messages = new ArrayList<>();
+        messages.add("System: " + systemPrompt);
+        messages.add("User: " + userMessage);
+
+        // 3. ReAct 循环
+        List<Map<String, String>> thoughtLog = new ArrayList<>();
+        List<Map<String, String>> toolCalls = new ArrayList<>();
+        
+        for (int i = 0; i < MAX_ITERATIONS; i++) {
+            log.info("[react] iteration {}", i + 1);
+            
+            String response = llmClient.chat(systemPrompt, String.join("\n\n", messages));
+            ReActResponse parsed = parseResponse(response);
+            
+            if (parsed.thought != null) {
+                thoughtLog.add(Map.of("iteration", String.valueOf(i + 1), "thought", parsed.thought));
+                log.info("[react] Thought: {}", parsed.thought);
+            }
+            
+            if (parsed.finalAnswer != null) {
+                log.info("[react] completed after {} iterations", i + 1);
+                return buildTaskResult(taskId, taskData.size(), parsed.finalAnswer, thoughtLog, toolCalls);
+            }
+            
+            if (parsed.action != null) {
+                log.info("[react] Action: {}", parsed.action);
+                
+                String toolResult = executeTool(parsed.action, parsed.actionInput);
+                toolCalls.add(Map.of(
+                    "iteration", String.valueOf(i + 1),
+                    "tool", parsed.action,
+                    "input", parsed.actionInput != null ? parsed.actionInput : "",
+                    "result", toolResult.length() > 200 ? toolResult.substring(0, 200) + "..." : toolResult
+                ));
+                
+                messages.add("Observation: " + toolResult);
+            } else {
+                messages.add("Assistant: " + response);
+            }
+        }
+        
+        log.warn("[react] reached max iterations {}", MAX_ITERATIONS);
+        return buildTaskResult(taskId, taskData.size(), "报告生成超时，请重试", thoughtLog, toolCalls);
+    }
+
+    /**
+     * 查询任务数据
+     */
+    private List<Map<String, Object>> queryTaskData(String taskId) {
+        return jdbcTemplate.queryForList(
+                "SELECT r.section_id, cs.section_name, r.risk_level, " +
+                "r.indicators->>'result' as risk_value, b.bank_name " +
+                "FROM bank_risk_results r " +
+                "LEFT JOIN cross_sections cs ON r.section_id = cs.section_id " +
+                "LEFT JOIN banks b ON cs.bank_id = b.bank_id " +
+                "WHERE r.task_id = ? AND r.deleted_at IS NULL " +
+                "ORDER BY r.risk_level DESC",
+                taskId
+        );
+    }
+
+    /**
+     * 构建任务级用户消息
+     */
+    private String buildTaskUserMessage(String taskId, List<Map<String, Object>> taskData) {
+        long highRisk = taskData.stream()
+                .filter(d -> d.get("risk_level") instanceof Number n && n.intValue() >= 3)
+                .count();
+
+        return String.format("""
+            请为任务 %s 生成风险评估汇总报告。
+            
+            任务包含 %d 个断面，其中高风险（3-4级）%d 个。
+            
+            【必须执行的步骤】
+            第一步：调用 query_risk_data 工具，参数 task_id=%s
+            第二步：调用 generate_risk_distribution_map 工具，参数 task_id=%s
+            第三步：根据工具返回的真实数据，撰写汇总报告
+            
+            请立即开始第一步：调用 query_risk_data 工具。
+            """, taskId, taskData.size(), highRisk, taskId, taskId);
+    }
+
+    /**
+     * 构建任务级结果
+     */
+    private Map<String, Object> buildTaskResult(String taskId, int sectionsCount, String finalAnswer,
+                                                 List<Map<String, String>> thoughtLog,
+                                                 List<Map<String, String>> toolCalls) {
+        Map<String, Object> result = new LinkedHashMap<>();
+        result.put("success", true);
+        result.put("task_id", taskId);
+        result.put("sections_count", sectionsCount);
+        result.put("report", finalAnswer);
+        result.put("thought_log", thoughtLog);
+        result.put("tool_calls", toolCalls);
+        result.put("iterations", thoughtLog.size());
+        return result;
+    }
+
+    /**
      * 解析 LLM 响应
      */
     private ReActResponse parseResponse(String response) {
@@ -202,44 +318,51 @@ public class ReActAgentService {
         return """
             你是一名资深的水利工程专家，专门从事长江河岸崩塌风险评估工作。
             
-            请用以下格式回答用户问题：
+            【重要规则】你必须严格按照以下格式回答，不能跳过任何步骤：
             
             Thought: 分析当前情况，决定下一步行动
             Action: 工具名称
-            Action Input: 参数（格式：key=value, key2=value2）
-            Observation: 工具返回的结果
-            ... (可以重复多轮)
-            Thought: 现在我可以得出结论了
+            Action Input: task_id=xxx 或 section_id=xxx
+            Observation: 工具返回的结果（等待系统填入）
+            ... (重复直到收集到足够数据)
+            Thought: 数据已收集完毕，现在生成报告
             Final Answer: 最终的完整报告
             
-            可用工具：
-            - generate_risk_distribution_map: 生成风险分布图（参数：task_id, bank_id）
-            - generate_scour_heatmap: 生成冲淤热力图（参数：section_id, task_id）
-            - generate_section_comparison_chart: 生成断面对比图（参数：section_id, task_id）
-            - query_risk_data: 查询风险数据（参数：task_id, bank_id, section_id）
+            【严格要求】
+            1. 你必须先调用 query_risk_data 工具获取真实数据
+            2. 你必须调用 generate_risk_distribution_map 生成图表
+            3. 只有在获得工具返回的真实数据后，才能写报告
+            4. 禁止编造数据或图表路径
+            5. 每次只能调用一个工具
+            6. 等待 Observation 结果后再继续
             
-            注意：
-            1. 每次只调用一个工具
-            2. 等待工具返回结果后再继续
-            3. 最终必须给出 Final Answer
+            可用工具：
+            - query_risk_data: 查询风险数据（参数：task_id=任务ID）
+            - generate_risk_distribution_map: 生成风险分布图（参数：task_id=任务ID）
             """;
     }
 
     /**
-     * 构建用户消息
+     * 构建单断面用户消息
      */
     @SuppressWarnings("unchecked")
     private String buildUserMessage(Map<String, Object> data) {
         String sectionName = String.valueOf(data.getOrDefault("section_name", "未知断面"));
         String bankName = String.valueOf(data.getOrDefault("bank_name", ""));
         Object riskLevel = data.get("risk_level");
+        String sectionId = String.valueOf(data.get("section_id"));
 
         return String.format("""
             请为断面 %s（%s）生成风险评估报告。
             当前风险等级：%s 级
+            断面ID：%s
             
-            请先查询详细数据，然后生成合适的图表，最后给出完整的分析报告。
-            """, sectionName, bankName, riskLevel);
+            【必须执行的步骤】
+            第一步：调用 query_risk_data 工具，参数 section_id=%s
+            第二步：根据工具返回的真实数据，撰写分析报告
+            
+            请立即开始第一步：调用 query_risk_data 工具。
+            """, sectionName, bankName, riskLevel, sectionId, sectionId);
     }
 
     /**
