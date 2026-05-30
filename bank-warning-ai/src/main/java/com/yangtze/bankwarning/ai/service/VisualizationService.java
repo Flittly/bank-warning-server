@@ -19,10 +19,7 @@ public class VisualizationService {
     private final JdbcTemplate jdbcTemplate;
     private final ObjectMapper objectMapper;
 
-    @Value("${app.ai.visualization.python-path:python}")
-    private String pythonPath;
-
-    @Value("${app.ai.visualization.script-dir:visualization}")
+    @Value("${app.ai.visualization.script-dir:../bank-model-server}")
     private String scriptDir;
 
     @Value("${app.ai.visualization.output-dir:visualization/output}")
@@ -228,21 +225,27 @@ public class VisualizationService {
                 writer.write(dataJson);
             }
 
-            // 构建命令
+            // 获取 bank-model-server 的绝对路径
+            File scriptBase = new File(scriptDir).getAbsoluteFile();
+            if (!scriptBase.exists()) {
+                scriptBase = new File(System.getProperty("user.dir"), scriptDir).getAbsoluteFile();
+            }
+            
+            // 构建命令 - 使用 uv run
             List<String> cmd = List.of(
-                    pythonPath,
-                    "-m", "visualization.main",
+                    "uv", "run", "python", "-m", "visualization.main",
                     command,
-                    "--data", dataFile,
+                    "--data", new File(dataFile).getAbsolutePath(),
                     "--title", title,
-                    "--output", outputDir
+                    "--output", new File(outputDir).getAbsolutePath()
             );
 
             log.info("[viz] executing: {}", String.join(" ", cmd));
+            log.info("[viz] working dir: {}", scriptBase.getAbsolutePath());
 
-            // 执行命令
+            // 执行命令 - 设置工作目录为 bank-model-server
             ProcessBuilder pb = new ProcessBuilder(cmd);
-            pb.directory(new File(scriptDir).getParentFile());
+            pb.directory(scriptBase);
             pb.redirectErrorStream(true);
 
             Process process = pb.start();
@@ -254,13 +257,21 @@ public class VisualizationService {
                 return Map.of("success", false, "error", "Python 脚本执行超时");
             }
 
+            log.info("[viz] Python output: {}", output);
+
             if (process.exitValue() != 0) {
-                log.error("[viz] Python failed: {}", output);
+                log.error("[viz] Python failed with exit code {}: {}", process.exitValue(), output);
                 return Map.of("success", false, "error", "Python 脚本执行失败: " + output);
             }
 
-            // 解析结果
-            return objectMapper.readValue(output, Map.class);
+            // 解析结果 - 尝试从输出中提取 JSON
+            String jsonOutput = extractJson(output);
+            if (jsonOutput == null) {
+                log.warn("[viz] No JSON found in output, using raw output");
+                return Map.of("success", false, "error", "Python 输出无有效 JSON: " + output);
+            }
+            
+            return objectMapper.readValue(jsonOutput, Map.class);
 
         } catch (Exception e) {
             log.error("[viz] execute failed", e);
@@ -270,7 +281,8 @@ public class VisualizationService {
 
     private String readProcessOutput(Process process) throws IOException {
         StringBuilder sb = new StringBuilder();
-        try (BufferedReader reader = new BufferedReader(new InputStreamReader(process.getInputStream()))) {
+        try (BufferedReader reader = new BufferedReader(
+                new InputStreamReader(process.getInputStream(), java.nio.charset.StandardCharsets.UTF_8))) {
             String line;
             while ((line = reader.readLine()) != null) {
                 sb.append(line).append("\n");
@@ -285,5 +297,22 @@ public class VisualizationService {
         } catch (JsonProcessingException e) {
             return "[]";
         }
+    }
+
+    /**
+     * 从输出中提取 JSON 字符串
+     */
+    private String extractJson(String output) {
+        if (output == null || output.isBlank()) return null;
+        
+        // 查找第一个 { 的位置
+        int start = output.indexOf('{');
+        if (start == -1) return null;
+        
+        // 从后往前找最后一个 }
+        int end = output.lastIndexOf('}');
+        if (end == -1 || end <= start) return null;
+        
+        return output.substring(start, end + 1);
     }
 }

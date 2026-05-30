@@ -127,8 +127,8 @@ app:
     visualization:
       # Python 路径
       python-path: ${AI_PYTHON_PATH:python}
-      # 脚本目录（相对于 bank-model-server）
-      script-dir: ${AI_SCRIPT_DIR:visualization}
+      # 脚本目录（bank-model-server 的绝对路径或相对于 bank-warning-server 的路径）
+      script-dir: ${AI_SCRIPT_DIR:../bank-model-server}
       # 输出目录
       output-dir: ${AI_OUTPUT_DIR:visualization/output}
 

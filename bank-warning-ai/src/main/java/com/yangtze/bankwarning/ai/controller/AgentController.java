@@ -1,6 +1,6 @@
 package com.yangtze.bankwarning.ai.controller;
 
-import com.yangtze.bankwarning.ai.service.AgentReportService;
+import com.yangtze.bankwarning.ai.service.ReActAgentService;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.web.bind.annotation.*;
@@ -8,37 +8,35 @@ import org.springframework.web.bind.annotation.*;
 import java.util.Map;
 
 /**
- * Agent 驱动的报告生成接口
- * LLM 自主决定是否生成图表
+ * Agent 报告生成接口
+ * 统一使用 ReAct 多轮推理模式
  */
 @RestController
-@RequestMapping("/v0/bank/ai")
+@RequestMapping("/v0/bank/ai/agent")
 public class AgentController {
 
     private static final Logger log = LoggerFactory.getLogger(AgentController.class);
-    private final AgentReportService agentReportService;
+    private final ReActAgentService reActAgentService;
 
-    public AgentController(AgentReportService agentReportService) {
-        this.agentReportService = agentReportService;
+    public AgentController(ReActAgentService reActAgentService) {
+        this.reActAgentService = reActAgentService;
     }
 
     /**
-     * Agent 驱动的单断面报告生成
-     * LLM 自主决定是否需要生成图表
+     * 单断面报告
      */
-    @PostMapping("/agent/report/{section_id}")
-    public Map<String, Object> generateAgentReport(@PathVariable("section_id") String sectionId) {
+    @PostMapping("/report/{section_id}")
+    public Map<String, Object> generateReport(@PathVariable("section_id") String sectionId) {
         log.info("[api] agent report for section={}", sectionId);
-        return agentReportService.generateAgentReport(sectionId);
+        return reActAgentService.generateReActReport(sectionId);
     }
 
     /**
-     * Agent 驱动的任务报告生成
-     * LLM 自主决定生成哪些图表
+     * 任务报告
      */
-    @PostMapping("/agent/report/task/{task_id}")
-    public Map<String, Object> generateAgentTaskReport(@PathVariable("task_id") String taskId) {
+    @PostMapping("/report/task/{task_id}")
+    public Map<String, Object> generateTaskReport(@PathVariable("task_id") String taskId) {
         log.info("[api] agent report for task={}", taskId);
-        return agentReportService.generateAgentTaskReport(taskId);
+        return reActAgentService.generateReActTaskReport(taskId);
     }
 }

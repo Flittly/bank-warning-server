@@ -99,15 +99,15 @@ public class VisualizationToolExecutors {
         );
 
         List<Object> params = new java.util.ArrayList<>();
-        if (taskId != null) {
+        if (taskId != null && !taskId.isBlank()) {
             sql.append(" AND r.task_id = ?");
             params.add(taskId);
         }
-        if (bankId != null) {
+        if (bankId != null && !bankId.isBlank()) {
             sql.append(" AND cs.bank_id = ?");
             params.add(bankId);
         }
-        if (sectionId != null) {
+        if (sectionId != null && !sectionId.isBlank()) {
             sql.append(" AND r.section_id = ?");
             params.add(sectionId);
         }
