@@ -69,6 +69,7 @@ public class ReActAgentService {
             
             // 调用 LLM
             String response = llmClient.chat(systemPrompt, String.join("\n\n", messages));
+            log.info("[react] raw response:\n{}", response);
             
             // 解析响应
             ReActResponse parsed = parseResponse(response);
@@ -99,10 +100,15 @@ public class ReActAgentService {
                 
                 // 将工具结果添加到消息中
                 messages.add("Observation: " + toolResult);
-            } else {
-                // 如果既没有 Final Answer 也没有 Action，可能是纯文本思考
-                // 将其添加到消息中继续
+            } else if (parsed.thought != null) {
+                // 只有 Thought 没有 Action，提示 LLM 继续
+                log.info("[react] Thought without Action, prompting to continue");
                 messages.add("Assistant: " + response);
+                messages.add("User: 请继续执行下一步。你必须输出 Action 和 Action Input，或者 Final Answer。");
+            } else {
+                // 无法解析，将原始响应加入消息
+                messages.add("Assistant: " + response);
+                messages.add("User: 请按照格式输出：Thought: ... Action: ... Action Input: ...");
             }
         }
         
@@ -139,6 +145,7 @@ public class ReActAgentService {
             log.info("[react] iteration {}", i + 1);
             
             String response = llmClient.chat(systemPrompt, String.join("\n\n", messages));
+            log.info("[react] raw response:\n{}", response);
             ReActResponse parsed = parseResponse(response);
             
             if (parsed.thought != null) {
@@ -163,8 +170,13 @@ public class ReActAgentService {
                 ));
                 
                 messages.add("Observation: " + toolResult);
+            } else if (parsed.thought != null) {
+                log.info("[react] Thought without Action, prompting to continue");
+                messages.add("Assistant: " + response);
+                messages.add("User: 请继续执行下一步。你必须输出 Action 和 Action Input，或者 Final Answer。");
             } else {
                 messages.add("Assistant: " + response);
+                messages.add("User: 请按照格式输出：Thought: ... Action: ... Action Input: ...");
             }
         }
         
@@ -192,22 +204,7 @@ public class ReActAgentService {
      * 构建任务级用户消息
      */
     private String buildTaskUserMessage(String taskId, List<Map<String, Object>> taskData) {
-        long highRisk = taskData.stream()
-                .filter(d -> d.get("risk_level") instanceof Number n && n.intValue() >= 3)
-                .count();
-
-        return String.format("""
-            请为任务 %s 生成风险评估汇总报告。
-            
-            任务包含 %d 个断面，其中高风险（3-4级）%d 个。
-            
-            【必须执行的步骤】
-            第一步：调用 query_risk_data 工具，参数 task_id=%s
-            第二步：调用 generate_risk_distribution_map 工具，参数 task_id=%s
-            第三步：根据工具返回的真实数据，撰写汇总报告
-            
-            请立即开始第一步：调用 query_risk_data 工具。
-            """, taskId, taskData.size(), highRisk, taskId, taskId);
+        return String.format("请生成任务 %s 的风险评估报告。", taskId);
     }
 
     /**
@@ -316,29 +313,48 @@ public class ReActAgentService {
      */
     private String getReActSystemPrompt() {
         return """
-            你是一名资深的水利工程专家，专门从事长江河岸崩塌风险评估工作。
+            你是一个水利工程 AI 助手，负责生成风险评估报告。
             
-            【重要规则】你必须严格按照以下格式回答，不能跳过任何步骤：
+            【核心规则】你必须使用工具获取真实数据，禁止编造数据。
             
-            Thought: 分析当前情况，决定下一步行动
-            Action: 工具名称
-            Action Input: task_id=xxx 或 section_id=xxx
-            Observation: 工具返回的结果（等待系统填入）
-            ... (重复直到收集到足够数据)
-            Thought: 数据已收集完毕，现在生成报告
-            Final Answer: 最终的完整报告
+            【回答格式】你必须严格按照以下格式回答，每行一个：
             
-            【严格要求】
-            1. 你必须先调用 query_risk_data 工具获取真实数据
-            2. 你必须调用 generate_risk_distribution_map 生成图表
-            3. 只有在获得工具返回的真实数据后，才能写报告
-            4. 禁止编造数据或图表路径
-            5. 每次只能调用一个工具
-            6. 等待 Observation 结果后再继续
+            Thought: 我需要查询数据
+            Action: query_risk_data
+            Action Input: task_id=task-xxx
             
-            可用工具：
-            - query_risk_data: 查询风险数据（参数：task_id=任务ID）
-            - generate_risk_distribution_map: 生成风险分布图（参数：task_id=任务ID）
+            然后等待系统返回 Observation，再继续：
+            
+            Thought: 数据已获取，现在生成图表
+            Action: generate_risk_distribution_map
+            Action Input: task_id=task-xxx
+            
+            最后：
+            
+            Thought: 所有数据和图表已准备好，现在写报告
+            Final Answer: （在这里写完整报告）
+            
+            【可用工具】
+            - query_risk_data: 查询风险数据，参数格式：task_id=任务ID
+            - generate_risk_distribution_map: 生成风险分布图，参数格式：task_id=任务ID
+            
+            【示例对话】
+            用户：请生成任务 task-001 的报告
+            
+            Thought: 我需要先查询任务的风险数据
+            Action: query_risk_data
+            Action Input: task_id=task-001
+            
+            （系统返回 Observation：查询到 73 个断面数据...）
+            
+            Thought: 数据已获取，现在生成风险分布图
+            Action: generate_risk_distribution_map
+            Action Input: task_id=task-001
+            
+            （系统返回 Observation：图表生成成功...）
+            
+            Thought: 数据和图表都已准备好，现在写报告
+            Final Answer: ## 风险评估报告...
             """;
     }
 
@@ -347,22 +363,8 @@ public class ReActAgentService {
      */
     @SuppressWarnings("unchecked")
     private String buildUserMessage(Map<String, Object> data) {
-        String sectionName = String.valueOf(data.getOrDefault("section_name", "未知断面"));
-        String bankName = String.valueOf(data.getOrDefault("bank_name", ""));
-        Object riskLevel = data.get("risk_level");
         String sectionId = String.valueOf(data.get("section_id"));
-
-        return String.format("""
-            请为断面 %s（%s）生成风险评估报告。
-            当前风险等级：%s 级
-            断面ID：%s
-            
-            【必须执行的步骤】
-            第一步：调用 query_risk_data 工具，参数 section_id=%s
-            第二步：根据工具返回的真实数据，撰写分析报告
-            
-            请立即开始第一步：调用 query_risk_data 工具。
-            """, sectionName, bankName, riskLevel, sectionId, sectionId);
+        return String.format("请生成断面 %s 的风险评估报告。", sectionId);
     }
 
     /**
