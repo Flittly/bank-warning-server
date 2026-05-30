@@ -42,10 +42,108 @@ public class VisualizationService {
             return Map.of("success", false, "error", "没有风险数据");
         }
 
-        // 调用 Python 脚本
-        String dataJson = toJson(riskData);
+        // 计算风险数据的经纬度范围
+        double minLng = Double.MAX_VALUE, maxLng = -Double.MAX_VALUE;
+        double minLat = Double.MAX_VALUE, maxLat = -Double.MAX_VALUE;
+        for (Map<String, Object> d : riskData) {
+            Object slng = d.get("start_lng"), slat = d.get("start_lat");
+            Object elng = d.get("end_lng"), elat = d.get("end_lat");
+            if (slng instanceof Number n) { minLng = Math.min(minLng, n.doubleValue()); maxLng = Math.max(maxLng, n.doubleValue()); }
+            if (slat instanceof Number n) { minLat = Math.min(minLat, n.doubleValue()); maxLat = Math.max(maxLat, n.doubleValue()); }
+            if (elng instanceof Number n) { minLng = Math.min(minLng, n.doubleValue()); maxLng = Math.max(maxLng, n.doubleValue()); }
+            if (elat instanceof Number n) { minLat = Math.min(minLat, n.doubleValue()); maxLat = Math.max(maxLat, n.doubleValue()); }
+        }
+        log.info("[viz] risk data extent: lng=[{}, {}], lat=[{}, {}]", minLng, maxLng, minLat, maxLat);
+
+        // 查询覆盖该范围的 DEM
+        String demPath = queryDemPathByExtent(minLng, minLat, maxLng, maxLat);
+        
+        // 构建请求数据
+        Map<String, Object> requestData = new LinkedHashMap<>();
+        requestData.put("sections", riskData);
+        requestData.put("dem_path", demPath);
+        
+        String dataJson = toJson(requestData);
         String title = bankId != null ? "岸段风险分布图" : "任务风险分布图";
         return executePython("risk-map", dataJson, title);
+    }
+
+    /**
+     * 根据经纬度范围查询覆盖的 DEM 文件路径
+     */
+    private String queryDemPathByExtent(double minLng, double minLat, double maxLng, double maxLat) {
+        try {
+            // 使用 PostGIS 空间查询，用 geom 列（WGS84）进行范围匹配
+            List<Map<String, Object>> tiffs = jdbcTemplate.queryForList(
+                    "SELECT tiff_key FROM tiff_bounds " +
+                    "WHERE ST_Intersects(geom, ST_MakeEnvelope(?, ?, ?, ?, 4326)) " +
+                    "ORDER BY id DESC LIMIT 1",
+                    minLng, minLat, maxLng, maxLat
+            );
+            
+            if (!tiffs.isEmpty()) {
+                String tiffKey = String.valueOf(tiffs.get(0).get("tiff_key"));
+                log.info("[viz] found covering DEM: {}", tiffKey);
+                
+                String relativePath = tiffKey.replace("tiff/", "resource/tiff/");
+                File scriptBase = new File(scriptDir).getAbsoluteFile();
+                if (!scriptBase.exists()) {
+                    scriptBase = new File(System.getProperty("user.dir"), scriptDir).getAbsoluteFile();
+                }
+                File demFile = new File(scriptBase, relativePath);
+                if (demFile.exists()) {
+                    return demFile.getAbsolutePath();
+                }
+                log.warn("[viz] DEM file not found: {}", demFile.getAbsolutePath());
+            }
+            
+            log.warn("[viz] no DEM found covering extent [{}, {}] - [{}, {}]", minLng, minLat, maxLng, maxLat);
+        } catch (Exception e) {
+            log.error("[viz] failed to query DEM by extent", e);
+        }
+        return null;
+    }
+
+    /**
+     * 查询剖面数据
+     */
+    private String queryDemPath(String taskId, String bankId) {
+        try {
+            // 从 tiff_bounds 表获取最新的 TIFF 路径
+            List<Map<String, Object>> tiffs = jdbcTemplate.queryForList(
+                    "SELECT tiff_key, min_x, min_y, max_x, max_y FROM tiff_bounds ORDER BY id DESC LIMIT 5"
+            );
+            log.info("[viz] found {} tiff records", tiffs.size());
+            
+            if (!tiffs.isEmpty()) {
+                for (Map<String, Object> tiff : tiffs) {
+                    String tiffKey = String.valueOf(tiff.get("tiff_key"));
+                    log.info("[viz] tiff_key: {}", tiffKey);
+                    
+                    // 转换为绝对路径：tiff/YZ/2012/standard/2012/2012-YZ.tif -> resource/tiff/...
+                    String relativePath = tiffKey.replace("tiff/", "resource/tiff/");
+                    
+                    // 获取 bank-model-server 的绝对路径
+                    File scriptBase = new File(scriptDir).getAbsoluteFile();
+                    if (!scriptBase.exists()) {
+                        scriptBase = new File(System.getProperty("user.dir"), scriptDir).getAbsoluteFile();
+                    }
+                    
+                    File demFile = new File(scriptBase, relativePath);
+                    log.info("[viz] DEM path: {} (exists: {})", demFile.getAbsolutePath(), demFile.exists());
+                    
+                    if (demFile.exists()) {
+                        return demFile.getAbsolutePath();
+                    }
+                }
+                log.warn("[viz] no valid DEM file found");
+            } else {
+                log.warn("[viz] tiff_bounds table is empty");
+            }
+        } catch (Exception e) {
+            log.error("[viz] failed to query DEM path", e);
+        }
+        return null;
     }
 
     /**
