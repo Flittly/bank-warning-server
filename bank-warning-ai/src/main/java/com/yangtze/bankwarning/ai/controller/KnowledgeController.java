@@ -1,50 +1,52 @@
 package com.yangtze.bankwarning.ai.controller;
 
-import com.yangtze.bankwarning.ai.model.RiskKnowledge;
-import com.yangtze.bankwarning.ai.service.KnowledgeService;
+import io.agentscope.core.message.TextBlock;
+import io.agentscope.core.rag.Knowledge;
+import io.agentscope.core.rag.model.Document;
+import io.agentscope.core.rag.model.DocumentMetadata;
+import io.agentscope.core.rag.model.RetrieveConfig;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.web.bind.annotation.*;
 
 import java.util.List;
 import java.util.Map;
+import java.util.stream.Collectors;
 
 @RestController
 @RequestMapping("/v0/bank/ai")
 public class KnowledgeController {
 
     private static final Logger log = LoggerFactory.getLogger(KnowledgeController.class);
-    private final KnowledgeService knowledgeService;
+    private final Knowledge knowledge;
 
-    public KnowledgeController(KnowledgeService knowledgeService) {
-        this.knowledgeService = knowledgeService;
-    }
-
-    @GetMapping("/ask")
-    public Map<String, Object> ask(@RequestParam("question") String question) {
-        log.info("[api] question: {}", question);
-        String answer = knowledgeService.ask(question);
-        return Map.of("success", true, "question", question, "answer", answer);
+    public KnowledgeController(Knowledge knowledge) {
+        this.knowledge = knowledge;
     }
 
     @PostMapping("/knowledge")
-    public Map<String, Object> importKnowledge(@RequestBody RiskKnowledge knowledge) {
-        log.info("[api] import type={}", knowledge.getType());
-        switch (knowledge.getType()) {
-            case "case" -> knowledgeService.importCase(knowledge);
-            case "standard" -> knowledgeService.importStandard(knowledge);
-            case "experience" -> knowledgeService.importExperience(knowledge);
-            default -> throw new IllegalArgumentException("未知类型: " + knowledge.getType());
-        }
-        return Map.of("success", true, "message", "导入成功");
+    public Map<String, Object> importKnowledge(@RequestBody Map<String, Object> body) {
+        String type = (String) body.get("type");
+        String title = (String) body.get("title");
+        String content = (String) body.get("content");
+        log.info("[api] import knowledge type={}, title={}", type, title);
+
+        DocumentMetadata metadata = DocumentMetadata.builder()
+                .content(TextBlock.builder().text(content).build())
+                .docId(title)
+                .addPayload("type", type)
+                .build();
+
+        Document doc = new Document(metadata);
+        knowledge.addDocuments(List.of(doc)).block();
+        return Map.of("success", true, "docId", title);
     }
 
     @PostMapping("/knowledge/import-history")
     public Map<String, Object> importHistoricalData(
             @RequestParam(name = "task_id", required = false) String taskId) {
         log.info("[api] import history, taskId={}", taskId);
-        int count = knowledgeService.importHistoricalRiskData(taskId);
-        return Map.of("success", true, "imported", count);
+        return Map.of("success", true, "message", "启动时自动导入历史数据，无需手动触发");
     }
 
     @GetMapping("/search")
@@ -52,11 +54,21 @@ public class KnowledgeController {
             @RequestParam("query") String query,
             @RequestParam(name = "type", required = false) String type,
             @RequestParam(name = "topK", defaultValue = "5") int topK) {
-        return knowledgeService.searchKnowledge(query, type, topK);
+        RetrieveConfig config = RetrieveConfig.builder()
+                .limit(topK)
+                .scoreThreshold(0.4)
+                .build();
+        List<Document> results = knowledge.retrieve(query, config).block();
+        if (results == null) return List.of();
+        return results.stream().map(doc -> Map.<String, Object>of(
+                "content", doc.getMetadata().getContent().toString(),
+                "score", doc.getScore(),
+                "docId", doc.getMetadata().getDocId()
+        )).collect(Collectors.toList());
     }
 
     @GetMapping("/knowledge/stats")
     public Map<String, Object> getStats() {
-        return knowledgeService.getStats();
+        return Map.of("totalDocuments", "N/A", "status", "InMemoryStore");
     }
 }

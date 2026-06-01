@@ -1,42 +1,69 @@
 package com.yangtze.bankwarning.ai.controller;
 
-import com.yangtze.bankwarning.ai.service.ReActAgentService;
+import com.yangtze.bankwarning.ai.hook.ReasoningTraceHook;
+import io.agentscope.core.ReActAgent;
+import io.agentscope.core.message.Msg;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.web.bind.annotation.*;
 
+import java.util.List;
 import java.util.Map;
 
-/**
- * Agent 报告生成接口
- * 统一使用 ReAct 多轮推理模式
- */
 @RestController
 @RequestMapping("/v0/bank/ai/agent")
 public class AgentController {
 
     private static final Logger log = LoggerFactory.getLogger(AgentController.class);
-    private final ReActAgentService reActAgentService;
+    private final ReActAgent reportAgent;
+    private final ReActAgent qaAgent;
+    private final ReasoningTraceHook traceHook;
 
-    public AgentController(ReActAgentService reActAgentService) {
-        this.reActAgentService = reActAgentService;
+    public AgentController(
+            @Qualifier("reportAgent") ReActAgent reportAgent,
+            @Qualifier("qaAgent") ReActAgent qaAgent,
+            ReasoningTraceHook traceHook) {
+        this.reportAgent = reportAgent;
+        this.qaAgent = qaAgent;
+        this.traceHook = traceHook;
     }
 
-    /**
-     * 单断面报告
-     */
     @PostMapping("/report/{section_id}")
     public Map<String, Object> generateReport(@PathVariable("section_id") String sectionId) {
         log.info("[api] agent report for section={}", sectionId);
-        return reActAgentService.generateReActReport(sectionId);
+        traceHook.clearLog();
+        Msg result = reportAgent.call(Msg.builder()
+                .textContent("请对断面 " + sectionId + " 进行风险评估报告生成").build()).block();
+        return Map.of("success", true, "data", result.getTextContent());
     }
 
-    /**
-     * 任务报告
-     */
     @PostMapping("/report/task/{task_id}")
     public Map<String, Object> generateTaskReport(@PathVariable("task_id") String taskId) {
         log.info("[api] agent report for task={}", taskId);
-        return reActAgentService.generateReActTaskReport(taskId);
+        traceHook.clearLog();
+        Msg result = reportAgent.call(Msg.builder()
+                .textContent("请对任务 " + taskId + " 进行风险评估报告生成").build()).block();
+        return Map.of("success", true, "data", result.getTextContent());
+    }
+
+    @PostMapping("/chat")
+    public Map<String, Object> chat(@RequestBody Map<String, String> body) {
+        String question = body.get("question");
+        log.info("[api] qa chat question={}", question);
+        traceHook.clearLog();
+        Msg result = qaAgent.call(Msg.builder().textContent(question).build()).block();
+        return Map.of("success", true, "data", result.getTextContent());
+    }
+
+    @GetMapping("/thoughts")
+    public List<ReasoningTraceHook.ThoughtLogEntry> getThoughts() {
+        return traceHook.getLog();
+    }
+
+    @DeleteMapping("/thoughts")
+    public Map<String, Object> clearThoughts() {
+        traceHook.clearLog();
+        return Map.of("success", true);
     }
 }
