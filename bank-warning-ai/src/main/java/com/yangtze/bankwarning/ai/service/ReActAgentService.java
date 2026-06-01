@@ -29,15 +29,18 @@ public class ReActAgentService {
     private final JdbcTemplate jdbcTemplate;
     private final ObjectMapper objectMapper;
     private final VisualizationToolExecutors toolExecutors;
+    private final MarkdownReportService markdownReportService;
 
     public ReActAgentService(LlmClient llmClient, Prompts prompts,
                               JdbcTemplate jdbcTemplate, ObjectMapper objectMapper,
-                              VisualizationToolExecutors toolExecutors) {
+                              VisualizationToolExecutors toolExecutors,
+                              MarkdownReportService markdownReportService) {
         this.llmClient = llmClient;
         this.prompts = prompts;
         this.jdbcTemplate = jdbcTemplate;
         this.objectMapper = objectMapper;
         this.toolExecutors = toolExecutors;
+        this.markdownReportService = markdownReportService;
     }
 
     /**
@@ -213,11 +216,21 @@ public class ReActAgentService {
     private Map<String, Object> buildTaskResult(String taskId, int sectionsCount, String finalAnswer,
                                                  List<Map<String, String>> thoughtLog,
                                                  List<Map<String, String>> toolCalls) {
+        // 生成 Markdown 报告
+        String markdownPath = null;
+        try {
+            markdownPath = markdownReportService.generateMarkdownReport(taskId, finalAnswer, toolCalls);
+            log.info("[react] markdown report generated: {}", markdownPath);
+        } catch (Exception e) {
+            log.warn("[react] failed to generate markdown report", e);
+        }
+        
         Map<String, Object> result = new LinkedHashMap<>();
         result.put("success", true);
         result.put("task_id", taskId);
         result.put("sections_count", sectionsCount);
         result.put("report", finalAnswer);
+        result.put("markdown_path", markdownPath);
         result.put("thought_log", thoughtLog);
         result.put("tool_calls", toolCalls);
         result.put("iterations", thoughtLog.size());
@@ -298,10 +311,20 @@ public class ReActAgentService {
     private Map<String, Object> buildResult(String sectionId, String finalAnswer, 
                                              List<Map<String, String>> thoughtLog,
                                              List<Map<String, String>> toolCalls) {
+        // 生成 Markdown 报告
+        String markdownPath = null;
+        try {
+            markdownPath = markdownReportService.generateMarkdownReport(sectionId, finalAnswer, toolCalls);
+            log.info("[react] markdown report generated: {}", markdownPath);
+        } catch (Exception e) {
+            log.warn("[react] failed to generate markdown report", e);
+        }
+        
         Map<String, Object> result = new LinkedHashMap<>();
         result.put("success", true);
         result.put("section_id", sectionId);
         result.put("report", finalAnswer);
+        result.put("markdown_path", markdownPath);
         result.put("thought_log", thoughtLog);
         result.put("tool_calls", toolCalls);
         result.put("iterations", thoughtLog.size());
