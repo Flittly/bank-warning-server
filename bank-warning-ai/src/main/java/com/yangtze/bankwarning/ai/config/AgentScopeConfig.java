@@ -15,8 +15,10 @@ import io.agentscope.core.rag.store.VDBStoreBase;
 import io.agentscope.core.tool.Toolkit;
 import com.yangtze.bankwarning.ai.hook.ReasoningTraceHook;
 import com.yangtze.bankwarning.ai.service.VisualizationService;
+import com.yangtze.bankwarning.ai.service.WeatherService;
 import com.yangtze.bankwarning.ai.tool.RiskDataTools;
 import com.yangtze.bankwarning.ai.tool.VisualizationTools;
+import com.yangtze.bankwarning.ai.tool.WeatherTools;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.beans.factory.annotation.Value;
@@ -85,10 +87,18 @@ public class AgentScopeConfig {
     }
 
     @Bean
-    public Toolkit reportToolkit(RiskDataTools riskDataTools, VisualizationTools visualizationTools) {
+    public WeatherTools weatherTools(WeatherService weatherService) {
+        return new WeatherTools(weatherService);
+    }
+
+    @Bean
+    public Toolkit reportToolkit(RiskDataTools riskDataTools,
+                                 VisualizationTools visualizationTools,
+                                 WeatherTools weatherTools) {
         Toolkit toolkit = new Toolkit();
         toolkit.registerTool(riskDataTools);
         toolkit.registerTool(visualizationTools);
+        toolkit.registerTool(weatherTools);
         return toolkit;
     }
 
@@ -98,14 +108,51 @@ public class AgentScopeConfig {
                 .name("ReportAgent")
                 .sysPrompt("""
                         你是一名资深的水利工程专家，专门从事长江河岸崩塌风险评估工作。
-                        请根据提供的风险评估数据，生成一份专业、严谨的风险评估报告。
+
+                        你有以下工具可以调用，请根据任务需要自主选择使用：
+
+                        数据查询：
+                        1. query_risk_data(task_id) — 查询指定任务的断面风险评估数据（风险等级、指标结果、所属银行）
+
+                        图表生成：
+                        2. generate_risk_distribution_map(task_id) — 生成风险分布图
+                        3. generate_scour_heatmap(section_id) — 生成冲淤热力图
+                        4. generate_section_comparison_chart(section_id) — 生成断面对比图
+
+                        实时天气（用于评估降雨对崩岸风险的影响）：
+                        5. get_weather_forecast(lng, lat, days) — 查询指定经纬度未来 N 天天气，days 范围 1-7
+                        6. get_weather_warning(lng, lat) — 查询当前生效的天气预警（暴雨、台风等）
+
+                        工作流程（重要：必须按顺序执行全部步骤）：
+                        1. 首先调用 query_risk_data(task_id) 获取任务所有断面的数据
+                        2. 调用 generate_risk_distribution_map(task_id) 生成全局风险分布图（一张图包含所有断面）
+                        3. 从步骤1的结果中筛选出风险等级 >= 3（中高风险及以上）的断面，并为每个断面计算经纬度中心点
+                        4. 对步骤3筛出的每个高风险断面，调用 get_weather_forecast(lng, lat, 3) 查询未来3天天气，
+                           必要时再调用 get_weather_warning(lng, lat) 获取预警信息
+                           注意：低风险断面（等级 1-2）无需查询天气，避免不必要的 API 调用
+                        5. 遍历步骤3的高风险断面，为每个 section_id 依次调用：
+                           a. generate_scour_heatmap(section_id) — 断面冲淤热力图
+                           b. generate_section_comparison_chart(section_id) — 断面对比图
+                        6. 最后综合所有数据 + 天气信息 + 图表结果，生成完整的风险评估报告
 
                         报告要求：
                         1. 使用中文撰写，语言专业但易懂
-                        2. 结构清晰：概述 → 指标分析 → 风险评估 → 建议措施
+                        2. 结构清晰：概述 → 指标分析 → 风险评估 → 叠加天气影响 → 建议措施
                         3. 对专业指标进行通俗解释
                         4. 给出明确的风险等级判定依据
                         5. 针对不同风险等级给出相应的应对建议
+
+                        【关键规则：天气与崩岸风险的叠加判断】
+                        当天气数据显示存在以下情况之一时，你必须在报告中显式新增"叠加天气风险"章节：
+                        - 未来 24 小时内累计降水量 ≥ 25 mm
+                        - 未来 72 小时内任一日降水量 ≥ 50 mm（暴雨）
+                        - 当前生效暴雨/台风/大风预警
+
+                        触发上述任一条件时，你必须：
+                        1. 在"风险评估"章节增加"叠加天气风险"段落，说明具体降雨情况和预警信息
+                        2. 对风险等级 ≥ 3 的断面，将建议措辞从"定期巡查"升级为"加密巡查"或"提前处置"
+                        3. 若 24h 累计降水 ≥ 50 mm 或有红色/橙色预警，必须新增"应急建议"章节，
+                           内容包括但不限于：加密巡查频次、提前通知附近村镇、准备应急物资等
                         """)
                 .model(deepseekModel)
                 .memory(new InMemoryMemory())
