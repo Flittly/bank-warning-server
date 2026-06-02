@@ -12,6 +12,9 @@ import io.agentscope.core.rag.knowledge.SimpleKnowledge;
 import io.agentscope.core.rag.model.RetrieveConfig;
 import io.agentscope.core.rag.store.InMemoryStore;
 import io.agentscope.core.rag.store.VDBStoreBase;
+import io.agentscope.core.skill.AgentSkill;
+import io.agentscope.core.skill.SkillBox;
+import io.agentscope.core.skill.repository.ClasspathSkillRepository;
 import io.agentscope.core.tool.Toolkit;
 import com.yangtze.bankwarning.ai.hook.ReasoningTraceHook;
 import com.yangtze.bankwarning.ai.service.VisualizationService;
@@ -103,7 +106,21 @@ public class AgentScopeConfig {
     }
 
     @Bean
-    public ReActAgent reportAgent(Model deepseekModel, Toolkit reportToolkit, ReasoningTraceHook traceHook) {
+    public SkillBox skillBox(Toolkit reportToolkit) throws Exception {
+        SkillBox skillBox = new SkillBox(reportToolkit);
+        try (ClasspathSkillRepository repo = new ClasspathSkillRepository("skills")) {
+            for (AgentSkill skill : repo.getAllSkills()) {
+                skillBox.registration().skill(skill).apply();
+                System.out.println("[SkillBox] registered: " + skill.getName());
+            }
+        }
+        return skillBox;
+    }
+
+    @Bean
+    public ReActAgent reportAgent(Model deepseekModel, Toolkit reportToolkit,
+                                  SkillBox skillBox, ReasoningTraceHook traceHook) {
+        String skillPrompt = skillBox.getSkillPrompt();
         return ReActAgent.builder()
                 .name("ReportAgent")
                 .sysPrompt("""
@@ -153,10 +170,11 @@ public class AgentScopeConfig {
                         2. 对风险等级 ≥ 3 的断面，将建议措辞从"定期巡查"升级为"加密巡查"或"提前处置"
                         3. 若 24h 累计降水 ≥ 50 mm 或有红色/橙色预警，必须新增"应急建议"章节，
                            内容包括但不限于：加密巡查频次、提前通知附近村镇、准备应急物资等
-                        """)
+                        """ + "\n\n" + skillPrompt)
                 .model(deepseekModel)
                 .memory(new InMemoryMemory())
                 .toolkit(reportToolkit)
+                .skillBox(skillBox)
                 .hook(traceHook)
                 .maxIters(15)
                 .build();
