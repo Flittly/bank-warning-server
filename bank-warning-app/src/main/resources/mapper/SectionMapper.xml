@@ -65,13 +65,23 @@
             section_geometry, vertical_foot_point, distance, basic_param_id,
             param_name, segment, current_timepoint, set_name, water_qs, tidal_level,
             bench_id, ref_id, hs, hc, protection_level, control_level,
-            comparison_timepoint, risk_thresholds, weights, other_params
+            comparison_timepoint, risk_thresholds, weights, other_params,
+            geom, start_point, end_point
         ) VALUES (
             #{taskId}, #{sectionId}, #{sectionName}, #{bankId}, #{regionCode}, #{segmentIndex},
             #{sectionGeometry}::jsonb, #{verticalFootPoint}::jsonb, #{distance}, #{basicParamId},
             #{paramName}, #{segment}, #{currentTimepoint}, #{setName}, #{waterQs}, #{tidalLevel},
             #{benchId}, #{refId}, #{hs}, #{hc}, #{protectionLevel}, #{controlLevel},
-            #{comparisonTimepoint}, #{riskThresholds}::jsonb, #{weights}::jsonb, #{otherParams}::jsonb
+            #{comparisonTimepoint}, #{riskThresholds}::jsonb, #{weights}::jsonb, #{otherParams}::jsonb,
+            CASE WHEN #{sectionGeometry} IS NOT NULL AND #{sectionGeometry} != ''
+                 THEN ST_SetSRID(ST_GeomFromGeoJSON(#{sectionGeometry}::json), 4326)
+                 ELSE NULL END,
+            CASE WHEN #{sectionGeometry} IS NOT NULL AND #{sectionGeometry} != ''
+                 THEN ST_StartPoint(ST_SetSRID(ST_GeomFromGeoJSON(#{sectionGeometry}::json), 4326))
+                 ELSE NULL END,
+            CASE WHEN #{sectionGeometry} IS NOT NULL AND #{sectionGeometry} != ''
+                 THEN ST_EndPoint(ST_SetSRID(ST_GeomFromGeoJSON(#{sectionGeometry}::json), 4326))
+                 ELSE NULL END
         )
     </insert>
 
@@ -100,7 +110,16 @@
             comparison_timepoint = COALESCE(#{comparisonTimepoint}, comparison_timepoint),
             risk_thresholds = COALESCE(#{riskThresholds}::jsonb, risk_thresholds),
             weights = COALESCE(#{weights}::jsonb, weights),
-            other_params = COALESCE(#{otherParams}::jsonb, other_params)
+            other_params = COALESCE(#{otherParams}::jsonb, other_params),
+            geom = CASE WHEN #{sectionGeometry} IS NOT NULL AND #{sectionGeometry} != ''
+                       THEN ST_SetSRID(ST_GeomFromGeoJSON(#{sectionGeometry}::json), 4326)
+                       ELSE geom END,
+            start_point = CASE WHEN #{sectionGeometry} IS NOT NULL AND #{sectionGeometry} != ''
+                              THEN ST_StartPoint(ST_SetSRID(ST_GeomFromGeoJSON(#{sectionGeometry}::json), 4326))
+                              ELSE start_point END,
+            end_point = CASE WHEN #{sectionGeometry} IS NOT NULL AND #{sectionGeometry} != ''
+                            THEN ST_EndPoint(ST_SetSRID(ST_GeomFromGeoJSON(#{sectionGeometry}::json), 4326))
+                            ELSE end_point END
         WHERE section_id = #{sectionId} AND deleted_at IS NULL
     </update>
 
