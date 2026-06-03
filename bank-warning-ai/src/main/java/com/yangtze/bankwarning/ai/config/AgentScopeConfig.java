@@ -28,6 +28,8 @@ import org.springframework.beans.factory.annotation.Value;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.jdbc.core.JdbcTemplate;
+import com.yangtze.bankwarning.ai.service.PdfService;
+import com.yangtze.bankwarning.ai.tool.PdfTools;
 
 @Configuration
 public class AgentScopeConfig {
@@ -95,13 +97,20 @@ public class AgentScopeConfig {
     }
 
     @Bean
+    public PdfTools pdfTools(PdfService pdfService) {
+        return new PdfTools(pdfService);
+    }
+
+    @Bean
     public Toolkit reportToolkit(RiskDataTools riskDataTools,
                                  VisualizationTools visualizationTools,
-                                 WeatherTools weatherTools) {
+                                 WeatherTools weatherTools,
+                                 PdfTools pdfTools) {
         Toolkit toolkit = new Toolkit();
         toolkit.registerTool(riskDataTools);
         toolkit.registerTool(visualizationTools);
         toolkit.registerTool(weatherTools);
+        toolkit.registerTool(pdfTools);
         return toolkit;
     }
 
