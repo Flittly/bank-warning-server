@@ -50,6 +50,34 @@ spring:
       ack-mode: manual
       concurrency: 2
 
+# AgentScope 多智能体配置
+agentscope:
+  openai:
+    # 【必填】DeepSeek API Key
+    api-key: ${DEEPSEEK_API_KEY:}
+    # DeepSeek API 地址
+    base-url: ${DEEPSEEK_BASE_URL:https://api.deepseek.com}
+    # 使用的模型
+    model-name: ${DEEPSEEK_MODEL:deepseek-chat}
+  dashscope:
+    # 【选填】DashScope API Key（用于文本嵌入，不填则仅用关键词检索）
+    api-key: ${DASHSCOPE_API_KEY:}
+    # 嵌入模型
+    embedding-model-name: text-embedding-v3
+    # 嵌入向量维度
+    embedding-dimensions: 1024
+  vector:
+    # 向量维度（需与 dashscope.embedding-dimensions 一致）
+    dimensions: 1024
+
+# 天气 API（和风天气，免费注册 https://dev.qweather.com）
+qweather:
+  # 【选填】和风天气 API Key
+  api-key: ${QWEATHER_API_KEY:}
+  base-url: https://devapi.qweather.com/v7
+  geo-url: https://geoapi.qweather.com/v2
+  cache-ttl-minutes: 30
+
 # 自定义应用配置
 app:
   model-service:
@@ -57,7 +85,7 @@ app:
     default-model-api: /v0/mi/risk-level
     connect-timeout: 5s
     read-timeout: 600s
-  
+
   kafka:
     enabled: ${KAFKA_ENABLED:false}
     task-topic: ${KAFKA_TASK_TOPIC:bank.model.task}
@@ -65,72 +93,19 @@ app:
     result-dlt-topic: ${KAFKA_RESULT_DLT_TOPIC:bank.model.result.dlt.v1}
     terrain-bucket: ${KAFKA_TERRAIN_BUCKET:yangtze-bank-warning-system}
 
-  # ============================================================
-  # AI 模块配置
-  # ============================================================
+  # AI 智能体模块配置
   ai:
-    llm:
-      # 【必填】LLM API Key，从 https://cloud.siliconflow.cn 获取
-      api-key: ${AI_API_KEY:your-api-key-here}
-      # LLM API 地址
-      base-url: ${AI_BASE_URL:https://api.siliconflow.cn/v1}
-      # 使用的模型
-      model: ${AI_MODEL:Qwen/Qwen3.5-122B-A10B}
-      # 温度参数（0-1，越高越随机）
-      temperature: 0.7
-      # 最大输出 token 数
-      max-tokens: 2048
-      # API 调用超时（秒）
-      timeout: 60
-    embedding:
-      # Embedding 模型
-      model: ${AI_EMBEDDING_MODEL:BAAI/bge-large-zh-v1.5}
-      # 向量维度
-      dimensions: 1536
-      # API 调用超时（秒）
-      timeout: 30
-    vector:
-      # 相似度阈值（0-1，越高越严格）
-      similarity-threshold: 0.4
-      # 默认返回结果数
-      default-top-k: 5
-    prompt:
-      # 报告生成的系统提示词（支持 Agent 工具调用）
-      report-system: |
-        你是一名资深的水利工程专家，专门从事长江河岸崩塌风险评估工作。
-        请根据提供的风险评估数据，生成一份专业、严谨的风险评估报告。
-        
-        报告要求：
-        1. 使用中文撰写，语言专业但易懂
-        2. 结构清晰：概述 → 指标分析 → 风险评估 → 建议措施
-        3. 对专业指标进行通俗解释
-        4. 给出明确的风险等级判定依据
-        5. 针对不同风险等级给出相应的应对建议
-        
-        可视化工具使用指南：
-        - 当数据包含多个断面时，调用 generate_risk_distribution_map 生成风险分布图
-        - 当需要展示河床冲淤变化时，调用 generate_scour_heatmap 生成热力图
-        - 当需要对比断面形态变化时，调用 generate_section_comparison_chart 生成对比图
-        - 当需要查询具体数据时，调用 query_risk_data 查询详细数据
-        
-        请根据数据特点主动建议并生成合适的图表，使报告更加直观和专业。
-      # 知识问答的系统提示词
-      qa-system: |
-        你是一名资深的水利工程专家，专门从事长江河岸崩塌风险评估和防治工作。
-        请根据提供的知识库内容，准确、专业地回答用户的问题。
-        
-        回答要求：
-        1. 基于提供的知识库内容进行回答
-        2. 如果知识库中没有相关信息，请明确说明并给出专业建议
-        3. 回答要专业、准确、易懂
-    # 可视化配置
+    pdf:
+      # PDF 技能脚本所在目录（Python 脚本路径）
+      scripts-dir: ${user.dir}/src/main/resources/skills/pdf/scripts
+      # Python 脚本执行超时（秒）
+      timeout-seconds: 120
+    # 可视化脚本配置
     visualization:
-      # Python 路径
-      python-path: ${AI_PYTHON_PATH:python}
-      # 脚本目录（bank-model-server 的绝对路径或相对于 bank-warning-server 的路径）
-      script-dir: ${AI_SCRIPT_DIR:../bank-model-server}
-      # 输出目录
-      output-dir: ${AI_OUTPUT_DIR:visualization/output}
+      # 脚本目录（bank-model-server 路径）
+      script-dir: ../bank-model-server
+      # 可视化输出目录
+      output-dir: visualization/output
 
 # MyBatis 配置
 mybatis:
