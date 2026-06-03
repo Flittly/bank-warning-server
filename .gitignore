@@ -9,4 +9,13 @@
 /验证单JVM.bat
 /bank-warning-app/target/
 
+# 敏感配置文件（包含 API Key、数据库密码等）
+bank-warning-app/src/main/resources/application.yml
+bank-warning-app/src/main/resources/application-*.yml
+!bank-warning-app/src/main/resources/application.yml.example
+
+# 环境变量文件
 .idea/
+.env
+.env.local
+.env.*.local
