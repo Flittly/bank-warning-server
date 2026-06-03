@@ -1,5 +1,6 @@
 package com.yangtze.bankwarning.service;
 
+import com.fasterxml.jackson.core.JsonParser;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.slf4j.Logger;
@@ -21,7 +22,8 @@ public class SectionProfileService {
 
     private final BusinessStoreService businessStoreService;
     private final ModelGatewayService modelGatewayService;
-    private final ObjectMapper objectMapper = new ObjectMapper();
+    private final ObjectMapper objectMapper = new ObjectMapper()
+            .configure(JsonParser.Feature.ALLOW_NON_NUMERIC_NUMBERS, true);
 
     public SectionProfileService(
             BusinessStoreService businessStoreService,

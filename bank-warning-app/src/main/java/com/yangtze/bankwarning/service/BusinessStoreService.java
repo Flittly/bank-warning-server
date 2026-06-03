@@ -594,8 +594,8 @@ public class BusinessStoreService {
         po.setTidalLevel(merged != null ? (String) merged.get("tidal_level") : payload.tidalLevel());
         po.setBenchId(merged != null ? (String) merged.get("bench_id") : payload.benchId());
         po.setRefId(merged != null ? (String) merged.get("ref_id") : payload.refId());
-        po.setHs(payload.hs());
-        po.setHc(payload.hc());
+        po.setHs(merged != null ? toDouble(merged.get("hs")) : payload.hs());
+        po.setHc(merged != null ? toDouble(merged.get("hc")) : payload.hc());
         po.setProtectionLevel(merged != null ? (String) merged.get("protection_level") : payload.protectionLevel());
         po.setControlLevel(merged != null ? (String) merged.get("control_level") : payload.controlLevel());
         po.setComparisonTimepoint(merged != null ? (String) merged.get("comparison_timepoint") : payload.comparisonTimepoint());
@@ -645,6 +645,14 @@ public class BusinessStoreService {
             return number.intValue();
         }
         return Integer.parseInt(String.valueOf(value));
+    }
+
+    private Double toDouble(Object value) {
+        if (value == null) return null;
+        if (value instanceof Number number) {
+            return number.doubleValue();
+        }
+        return Double.parseDouble(String.valueOf(value));
     }
 
     private String writeJson(Object value) {
