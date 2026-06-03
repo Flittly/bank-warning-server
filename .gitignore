@@ -19,3 +19,5 @@ bank-warning-app/src/main/resources/application-*.yml
 .env
 .env.local
 .env.*.local
+
+visualization/output
