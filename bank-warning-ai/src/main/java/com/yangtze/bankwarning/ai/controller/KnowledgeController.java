@@ -69,6 +69,6 @@ public class KnowledgeController {
 
     @GetMapping("/knowledge/stats")
     public Map<String, Object> getStats() {
-        return Map.of("totalDocuments", "N/A", "status", "InMemoryStore");
+        return Map.of("status", "PgVectorStore", "note", "统计信息请直接查询数据库 ai_knowledge_store 表");
     }
 }

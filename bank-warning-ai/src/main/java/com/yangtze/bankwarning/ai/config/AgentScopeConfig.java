@@ -10,7 +10,8 @@ import io.agentscope.core.rag.Knowledge;
 import io.agentscope.core.rag.RAGMode;
 import io.agentscope.core.rag.knowledge.SimpleKnowledge;
 import io.agentscope.core.rag.model.RetrieveConfig;
-import io.agentscope.core.rag.store.InMemoryStore;
+import io.agentscope.core.rag.exception.VectorStoreException;
+import io.agentscope.core.rag.store.PgVectorStore;
 import io.agentscope.core.rag.store.VDBStoreBase;
 import io.agentscope.core.skill.AgentSkill;
 import io.agentscope.core.skill.SkillBox;
@@ -61,10 +62,25 @@ public class AgentScopeConfig {
 
     @Bean
     public VDBStoreBase vectorStore(
-            @Value("${agentscope.vector.dimensions:1024}") int dimensions) {
-        return InMemoryStore.builder()
-                .dimensions(dimensions)
-                .build();
+            @Value("${agentscope.vector.dimensions:1024}") int dimensions,
+            @Value("${agentscope.vector.pgvector.jdbc-url:${BANK_DB_URL:jdbc:postgresql://localhost:5432/bank_risk_db}}") String jdbcUrl,
+            @Value("${agentscope.vector.pgvector.username:${BANK_DB_USERNAME:postgres}}") String username,
+            @Value("${agentscope.vector.pgvector.password:${BANK_DB_PASSWORD:123456}}") String password,
+            @Value("${agentscope.vector.pgvector.schema:public}") String schema,
+            @Value("${agentscope.vector.pgvector.table-name:ai_knowledge_store}") String tableName) {
+        try {
+            return PgVectorStore.builder()
+                    .jdbcUrl(jdbcUrl)
+                    .username(username)
+                    .password(password)
+                    .schema(schema)
+                    .tableName(tableName)
+                    .dimensions(dimensions)
+                    .distanceType(PgVectorStore.DistanceType.COSINE)
+                    .build();
+        } catch (VectorStoreException e) {
+            throw new RuntimeException("Failed to initialize pgvector store", e);
+        }
     }
 
     @Bean

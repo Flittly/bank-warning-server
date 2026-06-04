@@ -1,25 +1,21 @@
--- 启用向量扩展
-CREATE EXTENSION IF NOT EXISTS vector;
+-- ============================================================
+-- AgentScope PgVectorStore 自动建表 DDL（参考文档）
+-- ============================================================
+-- 注意：PgVectorStore Bean 启动时会自动执行以下 DDL，
+-- 无需手动运行此脚本。此文件仅作为表结构文档参考。
+-- ============================================================
 
--- 创建知识库存储表
-CREATE TABLE IF NOT EXISTS ai_knowledge_store (
-    id VARCHAR(255) PRIMARY KEY,
-    content TEXT NOT NULL,
-    metadata JSONB DEFAULT '{}',
-    embedding vector(1536),
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    deleted_at TIMESTAMP
-);
+-- 启用向量扩展（需手动执行一次）
+-- CREATE EXTENSION IF NOT EXISTS vector;
 
--- 创建向量索引
-CREATE INDEX IF NOT EXISTS idx_ai_knowledge_embedding 
-ON ai_knowledge_store USING hnsw (embedding vector_cosine_ops);
+-- PgVectorStore 自动创建的表结构：
+--   id         VARCHAR(64) PRIMARY KEY   — 唯一标识（uuid）
+--   vector     vector(N)                  — 嵌入向量（N 由 dimensions 配置决定）
+--   doc_id     VARCHAR(256)               — 文档 ID
+--   chunk_id   VARCHAR(256)               — 分块 ID
+--   content    TEXT                        — 文本内容
+--   payload    JSONB                       — 元数据
 
--- 创建元数据索引
-CREATE INDEX IF NOT EXISTS idx_ai_knowledge_metadata_type 
-ON ai_knowledge_store USING gin ((metadata->'type'));
-
--- 创建删除时间索引
-CREATE INDEX IF NOT EXISTS idx_ai_knowledge_deleted_at 
-ON ai_knowledge_store (deleted_at) WHERE deleted_at IS NULL;
+-- 自动创建的索引：
+--   idx_<table>_doc_id ON <table> (doc_id)
+--   idx_<table>_vector ON <table> USING hnsw (vector vector_cosine_ops)

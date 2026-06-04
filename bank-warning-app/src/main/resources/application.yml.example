@@ -69,6 +69,13 @@ agentscope:
   vector:
     # 向量维度（需与 dashscope.embedding-dimensions 一致）
     dimensions: 1024
+    # pgvector 持久化配置（默认复用主数据源配置）
+    pgvector:
+      jdbc-url: ${BANK_DB_URL:jdbc:postgresql://localhost:5432/bank_risk_db}
+      username: ${BANK_DB_USERNAME:postgres}
+      password: ${BANK_DB_PASSWORD:123456}
+      schema: public
+      table-name: ai_knowledge_store
 
 # 天气 API（和风天气，免费注册 https://dev.qweather.com）
 qweather:
