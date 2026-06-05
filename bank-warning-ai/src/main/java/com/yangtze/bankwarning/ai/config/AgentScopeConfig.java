@@ -29,11 +29,15 @@ import org.springframework.beans.factory.annotation.Value;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.jdbc.core.JdbcTemplate;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import com.yangtze.bankwarning.ai.service.PdfService;
 import com.yangtze.bankwarning.ai.tool.PdfTools;
 
 @Configuration
 public class AgentScopeConfig {
+
+    private static final Logger log = LoggerFactory.getLogger(AgentScopeConfig.class);
 
     @Bean
     public Model deepseekModel(
@@ -131,15 +135,66 @@ public class AgentScopeConfig {
     }
 
     @Bean
-    public SkillBox skillBox(Toolkit reportToolkit) throws Exception {
+    public SkillBox skillBox(Toolkit reportToolkit,
+                             org.springframework.beans.factory.ObjectProvider<NacosSkillRepositoryHolder> nacosHolderProvider,
+                             @Value("${app.ai.skill.cache-dir:${user.dir}/.skills-cache}") String cacheDir) throws Exception {
         SkillBox skillBox = new SkillBox(reportToolkit);
+        java.util.Set<String> registered = new java.util.HashSet<>();
+        java.nio.file.Path cacheBase = java.nio.file.Paths.get(cacheDir);
+
         try (ClasspathSkillRepository repo = new ClasspathSkillRepository("skills")) {
             for (AgentSkill skill : repo.getAllSkills()) {
-                skillBox.registration().skill(skill).apply();
-                System.out.println("[SkillBox] registered: " + skill.getName());
+                String name = skill.getName();
+                if (registered.add(name)) {
+                    materializeSkillScripts(skill, cacheBase);
+                    skillBox.registration().skill(skill).apply();
+                    log.info("[SkillBox] registered local: {}", name);
+                } else {
+                    log.warn("[SkillBox] duplicate local skill skipped: {}", name);
+                }
             }
         }
+
+        NacosSkillRepositoryHolder nacosHolder = nacosHolderProvider.getIfAvailable();
+        if (nacosHolder != null && nacosHolder.isAvailable()) {
+            for (AgentSkill skill : nacosHolder.getRepository().getAllSkills()) {
+                String name = skill.getName();
+                if (registered.add(name)) {
+                    materializeSkillScripts(skill, cacheBase);
+                    skillBox.registration().skill(skill).apply();
+                    log.info("[SkillBox] registered nacos: {}", name);
+                } else {
+                    log.info("[SkillBox] nacos skill '{}' skipped (local has higher priority)", name);
+                }
+            }
+        } else {
+            log.info("[SkillBox] Nacos not configured or unreachable, using local skills only");
+        }
         return skillBox;
+    }
+
+    private void materializeSkillScripts(AgentSkill skill, java.nio.file.Path cacheBase) {
+        java.util.Map<String, String> resources = skill.getResources();
+        if (resources == null || resources.isEmpty()) return;
+        java.nio.file.Path base = cacheBase.resolve(skill.getName());
+        for (java.util.Map.Entry<String, String> entry : resources.entrySet()) {
+            String relPath = entry.getKey();
+            String content = entry.getValue();
+            if (content == null) continue;
+            java.nio.file.Path target = base.resolve(relPath);
+            try {
+                java.nio.file.Files.createDirectories(target.getParent());
+                String decoded = content.startsWith("base64:")
+                        ? new String(java.util.Base64.getDecoder().decode(content.substring("base64:".length())))
+                        : content;
+                java.nio.file.Files.writeString(target, decoded,
+                        java.nio.file.StandardOpenOption.CREATE,
+                        java.nio.file.StandardOpenOption.TRUNCATE_EXISTING);
+                log.info("[SkillBox] materialized: {}", target);
+            } catch (Exception e) {
+                log.error("[SkillBox] failed to materialize {}: {}", target, e.getMessage());
+            }
+        }
     }
 
     @Bean
@@ -206,28 +261,59 @@ public class AgentScopeConfig {
     }
 
     @Bean
-    public ReActAgent qaAgent(Model deepseekModel, Knowledge knowledge) {
+    @Qualifier("chatAgent")
+    public ReActAgent chatAgent(Model deepseekModel, Toolkit reportToolkit,
+                                SkillBox skillBox, Knowledge knowledge,
+                                ReasoningTraceHook traceHook) {
+        String skillPrompt = skillBox.getSkillPrompt();
         return ReActAgent.builder()
-                .name("QAAgent")
+                .name("ChatAgent")
                 .sysPrompt("""
-                        你是一名资深的水利工程专家，专门从事长江河岸崩塌风险评估和防治工作。
-                        请根据提供的知识库内容，准确、专业地回答用户的问题。
+                        你是一名资深的水利工程专家，专门从事长江河岸崩塌风险评估工作。
+                        你拥有工具和知识库两套能力，请根据用户的问题自主选择使用。
 
-                        回答要求：
-                        1. 基于提供的知识库内容进行回答
-                        2. 如果知识库中没有相关信息，请明确说明并给出专业建议
-                        3. 回答要专业、准确、易懂
-                        """)
+                        === 工具能力（查询实时数据、生成图表） ===
+                        你有以下工具可以调用：
+
+                        1. query_risk_data(task_id) — 查询指定任务的断面风险评估数据
+                           用户可能在问题中直接提到任务编号（如"12345"），请从中提取 task_id 并调用
+                        2. generate_risk_distribution_map(task_id) — 生成风险分布图
+                        3. generate_scour_heatmap(section_id) — 生成冲淤热力图
+                        4. generate_section_comparison_chart(section_id) — 生成断面对比图
+                        5. get_weather_forecast(lng, lat, days) — 查询未来 N 天天气
+                        6. get_weather_warning(lng, lat) — 查询当前天气预警
+                        7. process_pdf(skillName, scriptName, filePath) — 处理 PDF 文件（skillName 必填，如 "pdf"）
+
+                        === 知识库能力（查询水利法规、规范、历史案例） ===
+                        如果用户询问的是法规条文、规范标准、专业术语解释等知识性问题，
+                        无需调用工具，直接使用知识库检索即可回答。
+
+                        === 报告生成流程 ===
+                        如果用户要求生成风险评估报告，请按以下步骤执行：
+                        1. 从用户问题中提取 task_id，调用 query_risk_data(task_id) 获取数据
+                        2. 调用 generate_risk_distribution_map(task_id) 生成风险分布图
+                        3. 筛选风险等级 >= 3 的断面，查询天气
+                        4. 为每个高风险断面生成热力图和对比图
+                        5. 综合数据生成完整的风险评估报告
+
+                        === 回答要求 ===
+                        1. 使用中文撰写，语言专业但易懂
+                        2. 如果用户问的是知识类问题，基于知识库回答
+                        3. 如果用户要求出报告，严格按照报告流程执行
+                        4. 对专业指标进行通俗解释
+                        """ + "\n\n" + skillPrompt)
                 .model(deepseekModel)
                 .memory(new InMemoryMemory())
-                .toolkit(new Toolkit())
+                .toolkit(reportToolkit)
+                .skillBox(skillBox)
                 .knowledge(knowledge)
                 .ragMode(RAGMode.AGENTIC)
                 .retrieveConfig(RetrieveConfig.builder()
                         .limit(5)
                         .scoreThreshold(0.4)
                         .build())
-                .maxIters(5)
+                .hook(traceHook)
+                .maxIters(15)
                 .build();
     }
 }

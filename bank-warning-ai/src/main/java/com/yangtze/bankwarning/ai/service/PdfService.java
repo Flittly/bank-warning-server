@@ -23,14 +23,17 @@ public class PdfService {
 
     private static final Logger log = LoggerFactory.getLogger(PdfService.class);
 
-    @Value("${app.ai.pdf.scripts-dir:${user.dir}/src/main/resources/skills/pdf/scripts}")
-    private String scriptsDir;
+    @Value("${app.ai.skill.cache-dir:${user.dir}/.skills-cache}")
+    private String cacheDir;
+
+    @Value("${app.ai.pdf.fallback-scripts-dir:${user.dir}/src/main/resources/skills/pdf/scripts}")
+    private String fallbackScriptsDir;
 
     @Value("${app.ai.pdf.timeout-seconds:120}")
     private int timeoutSeconds;
 
-    public Map<String, Object> processPdf(String scriptName, String filePath){
-        log.info("[pdf] processPdf, script={}, file={}", scriptName, filePath);
+    public Map<String, Object> processPdf(String skillName, String scriptName, String filePath){
+        log.info("[pdf] processPdf, skill={}, script={}, file={}", skillName, scriptName, filePath);
 
         Path pdfFile = Paths.get(filePath);
         if(!Files.exists(pdfFile)){
@@ -38,9 +41,12 @@ public class PdfService {
         }
 
         //解析脚本路径
-        File scriptFile = resolveScript(scriptName);
+        File scriptFile = resolveScript(skillName, scriptName);
         if(scriptFile == null || !scriptFile.exists()){
-            return Map.of("success", false, "error", "脚本不存在: " + scriptName);
+            return Map.of("success", false,
+                "error", "脚本不存在: skill=" + skillName + ", script=" + scriptName
+                    + "（查找目录：" + cacheDir + "/" + skillName + "/scripts, "
+                    + fallbackScriptsDir + "）");
         }
 
         try{
@@ -79,16 +85,22 @@ public class PdfService {
         }
     }
 
-    private File resolveScript(String scriptName){
-        // 尝试绝对路径
+    private File resolveScript(String skillName, String scriptName){
+        // 1. 尝试绝对路径
         File direct = new File(scriptName);
         if(direct.isAbsolute() && direct.exists()) return direct;
 
-        //尝试相对scriptsDir
-        File fromConfig = new File(scriptsDir, scriptName);
-        if(fromConfig.exists()) return fromConfig;
+        String skill = skillName == null || skillName.isBlank() ? "pdf" : skillName.trim();
 
-        //尝试相对于user.dir
+        // 2. 优先 .skills-cache/<skill>/scripts/ （Nacos/classpath 物化目录）
+        File fromCache = new File(Paths.get(cacheDir, skill, "scripts").toString(), scriptName);
+        if(fromCache.exists()) return fromCache;
+
+        // 3. Fallback: classpath 老目录（兼容本地 pdf skill 没经过物化的情况）
+        File fromFallback = new File(fallbackScriptsDir, scriptName);
+        if(fromFallback.exists()) return fromFallback;
+
+        // 4. Fallback: user.dir/src/main/resources/skills/pdf/scripts/
         File fromUserDir = new File(System.getProperty("user.dir"),
                 "src/main/resources/skills/pdf/scripts/" + scriptName);
         if (fromUserDir.exists()) return fromUserDir;

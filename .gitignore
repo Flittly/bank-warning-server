@@ -20,4 +20,6 @@ bank-warning-app/src/main/resources/application-*.yml
 .env.local
 .env.*.local
 
+.skills-cache
+
 visualization/output

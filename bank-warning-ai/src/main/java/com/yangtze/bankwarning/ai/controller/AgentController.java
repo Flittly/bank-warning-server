@@ -17,15 +17,15 @@ public class AgentController {
 
     private static final Logger log = LoggerFactory.getLogger(AgentController.class);
     private final ReActAgent reportAgent;
-    private final ReActAgent qaAgent;
+    private final ReActAgent chatAgent;
     private final ReasoningTraceHook traceHook;
 
     public AgentController(
             @Qualifier("reportAgent") ReActAgent reportAgent,
-            @Qualifier("qaAgent") ReActAgent qaAgent,
+            @Qualifier("chatAgent") ReActAgent chatAgent,
             ReasoningTraceHook traceHook) {
         this.reportAgent = reportAgent;
-        this.qaAgent = qaAgent;
+        this.chatAgent = chatAgent;
         this.traceHook = traceHook;
     }
 
@@ -50,9 +50,9 @@ public class AgentController {
     @PostMapping("/chat")
     public Map<String, Object> chat(@RequestBody Map<String, String> body) {
         String question = body.get("question");
-        log.info("[api] qa chat question={}", question);
+        log.info("[api] unified chat question={}", question);
         traceHook.clearLog();
-        Msg result = qaAgent.call(Msg.builder().textContent(question).build()).block();
+        Msg result = chatAgent.call(Msg.builder().textContent(question).build()).block();
         return Map.of("success", true, "data", result.getTextContent());
     }
 

@@ -76,6 +76,17 @@ agentscope:
       password: ${BANK_DB_PASSWORD:123456}
       schema: public
       table-name: ai_knowledge_store
+  # Nacos Skill Registry（3.2+ 提供 Skill 管理中心；关闭时仅使用本地 SKILL.md）
+  nacos:
+    # 是否启用 Nacos Skill 自动下载与发布
+    enabled: ${NACOS_ENABLED:false}
+    # Nacos 服务器地址
+    server-addr: ${NACOS_SERVER_ADDR:127.0.0.1:8848}
+    # 命名空间
+    namespace: ${NACOS_NAMESPACE:public}
+    # 鉴权（如果开启了 Nacos 鉴权）
+    username: ${NACOS_USERNAME:}
+    password: ${NACOS_PASSWORD:}
 
 # 天气 API（和风天气，免费注册 https://dev.qweather.com）
 qweather:
@@ -102,9 +113,13 @@ app:
 
   # AI 智能体模块配置
   ai:
+    skill:
+      # Skill 脚本物化缓存根目录（启动时把所有 skill 的 resources 物化到这里）
+      # <cache-dir>/<skill-name>/scripts/<file>
+      cache-dir: ${user.dir}/.skills-cache
     pdf:
-      # PDF 技能脚本所在目录（Python 脚本路径）
-      scripts-dir: ${user.dir}/src/main/resources/skills/pdf/scripts
+      # 兼容旧路径：仅当 cache 里找不到时回退到这里
+      fallback-scripts-dir: ${user.dir}/src/main/resources/skills/pdf/scripts
       # Python 脚本执行超时（秒）
       timeout-seconds: 120
     # 可视化脚本配置
