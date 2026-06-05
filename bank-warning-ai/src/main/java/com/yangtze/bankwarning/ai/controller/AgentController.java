@@ -1,6 +1,8 @@
 package com.yangtze.bankwarning.ai.controller;
 
 import com.yangtze.bankwarning.ai.hook.ReasoningTraceHook;
+import com.yangtze.bankwarning.ai.workflow.PlanProgress;
+import com.yangtze.bankwarning.ai.workflow.ReportWorkflowService;
 import io.agentscope.core.ReActAgent;
 import io.agentscope.core.message.Msg;
 import org.slf4j.Logger;
@@ -8,6 +10,7 @@ import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.web.bind.annotation.*;
 
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 
@@ -16,35 +19,54 @@ import java.util.Map;
 public class AgentController {
 
     private static final Logger log = LoggerFactory.getLogger(AgentController.class);
-    private final ReActAgent reportAgent;
     private final ReActAgent chatAgent;
+    private final ReportWorkflowService reportWorkflow;
     private final ReasoningTraceHook traceHook;
 
     public AgentController(
-            @Qualifier("reportAgent") ReActAgent reportAgent,
             @Qualifier("chatAgent") ReActAgent chatAgent,
+            ReportWorkflowService reportWorkflow,
             ReasoningTraceHook traceHook) {
-        this.reportAgent = reportAgent;
         this.chatAgent = chatAgent;
+        this.reportWorkflow = reportWorkflow;
         this.traceHook = traceHook;
-    }
-
-    @PostMapping("/report/{section_id}")
-    public Map<String, Object> generateReport(@PathVariable("section_id") String sectionId) {
-        log.info("[api] agent report for section={}", sectionId);
-        traceHook.clearLog();
-        Msg result = reportAgent.call(Msg.builder()
-                .textContent("请对断面 " + sectionId + " 进行风险评估报告生成").build()).block();
-        return Map.of("success", true, "data", result.getTextContent());
     }
 
     @PostMapping("/report/task/{task_id}")
     public Map<String, Object> generateTaskReport(@PathVariable("task_id") String taskId) {
-        log.info("[api] agent report for task={}", taskId);
-        traceHook.clearLog();
-        Msg result = reportAgent.call(Msg.builder()
-                .textContent("请对任务 " + taskId + " 进行风险评估报告生成").build()).block();
-        return Map.of("success", true, "data", result.getTextContent());
+        log.info("[api] workflow report for task={}", taskId);
+        try {
+            String report = reportWorkflow.executeTaskReport(taskId);
+            Map<String, Object> result = new HashMap<>();
+            result.put("success", true);
+            result.put("taskId", taskId);
+            result.put("data", report);
+            result.put("progress", reportWorkflow.getProgress(taskId));
+            return result;
+        } catch (Exception e) {
+            log.error("[api] workflow report failed: {}", e.getMessage(), e);
+            Map<String, Object> result = new HashMap<>();
+            result.put("success", false);
+            result.put("taskId", taskId);
+            result.put("error", e.getMessage());
+            result.put("progress", reportWorkflow.getProgress(taskId));
+            return result;
+        }
+    }
+
+    @GetMapping("/report/progress")
+    public Map<String, Object> getReportProgress(@RequestParam("taskId") String taskId) {
+        PlanProgress progress = reportWorkflow.getProgress(taskId);
+        Map<String, Object> result = new HashMap<>();
+        if (progress == null) {
+            result.put("success", false);
+            result.put("taskId", taskId);
+            result.put("error", "未找到该任务的工作流状态（可能尚未启动）");
+            return result;
+        }
+        result.put("success", true);
+        result.put("data", progress);
+        return result;
     }
 
     @PostMapping("/chat")
