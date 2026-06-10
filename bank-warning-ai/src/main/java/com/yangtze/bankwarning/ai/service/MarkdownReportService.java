@@ -76,21 +76,41 @@ public class MarkdownReportService {
     }
 
     /**
-     * 从 JSON 结果中提取文件路径
+     * 从工具返回中提取文件路径。支持三种格式：
+     *  1. JSON: {"file_path":"xxx.png"}
+     *  2. 纯文本: 图表生成成功，文件路径：xxx.png  (VisualizationTools.formatResult 的实际输出)
+     *  3. 行内 .png 路径
      */
-    private String extractFilePath(String resultJson) {
-        if (resultJson == null) return null;
-        
-        // 简单解析 JSON 获取 file_path
+    public static String extractFilePath(String resultJson) {
+        if (resultJson == null || resultJson.isEmpty()) return null;
+
+        // 1) JSON 格式
         int start = resultJson.indexOf("\"file_path\":\"");
-        if (start == -1) return null;
-        start += 13;
-        int end = resultJson.indexOf("\"", start);
-        if (end == -1) return null;
-        
-        String path = resultJson.substring(start, end);
-        // 处理转义的反斜杠
-        return path.replace("\\\\", "\\");
+        if (start != -1) {
+            start += 13;
+            int end = resultJson.indexOf("\"", start);
+            if (end != -1) {
+                return resultJson.substring(start, end).replace("\\\\", "\\");
+            }
+        }
+
+        // 2) 纯文本 "文件路径：xxx"
+        int idx = resultJson.indexOf("文件路径：");
+        if (idx != -1) {
+            String tail = resultJson.substring(idx + "文件路径：".length()).trim();
+            int end = tail.indexOf('\n');
+            String path = (end == -1 ? tail : tail.substring(0, end)).trim();
+            if (!path.isEmpty()) return path;
+        }
+
+        // 3) 行内 .png 路径兜底
+        int png = resultJson.indexOf(".png");
+        if (png != -1) {
+            int s = Math.max(0, Math.max(resultJson.lastIndexOf(' ', png), resultJson.lastIndexOf('"', png)) + 1);
+            return resultJson.substring(s, png + 4);
+        }
+
+        return null;
     }
 
     /**

@@ -8,7 +8,7 @@ import org.slf4j.LoggerFactory;
 import org.springframework.core.ParameterizedTypeReference;
 import org.springframework.http.MediaType;
 import org.springframework.stereotype.Service;
-import org.springframework.web.reactive.function.client.WebClient;
+import org.springframework.web.client.RestClient;
 
 import java.time.Duration;
 import java.util.LinkedHashMap;
@@ -19,28 +19,27 @@ import java.util.Map;
 public class ModelGatewayService {
 
     private static final Logger log = LoggerFactory.getLogger(ModelGatewayService.class);
-    private static final ParameterizedTypeReference<Map<String, Object>> MAP_TYPE = new ParameterizedTypeReference<>() {
+    private static final ParameterizedTypeReference<Map<String, Object>> MAP_TYPE = new ParameterizedTypeReference<Map<String, Object>>() {
     };
 
-    private final WebClient modelWebClient;
+    private final RestClient modelRestClient;
     private final ModelServiceProperties properties;
     private final ModelParameterService parameterService;
 
     public ModelGatewayService(
-            WebClient modelWebClient,
+            RestClient modelRestClient,
             ModelServiceProperties properties,
             ModelParameterService parameterService) {
-        this.modelWebClient = modelWebClient;
+        this.modelRestClient = modelRestClient;
         this.properties = properties;
         this.parameterService = parameterService;
     }
 
     public Map<String, Object> health() {
-        return modelWebClient.get()
+        return modelRestClient.get()
                 .uri("/api/v1/health")
                 .retrieve()
-                .bodyToMono(MAP_TYPE)
-                .block(properties.getConnectTimeout());
+                .body(MAP_TYPE);
     }
 
     public Map<String, Object> predict(ModelPredictRequest request) {
@@ -50,15 +49,14 @@ public class ModelGatewayService {
             effectiveParameters.putAll(request.payload());
         }
 
-        Map<String, Object> rawResult = modelWebClient.post()
+        Map<String, Object> rawResult = modelRestClient.post()
                 .uri("/api/v1/predict")
-                .bodyValue(Map.of(
+                .body(Map.of(
                         "model_api", modelApi,
                         "payload", effectiveParameters,
                         "timeout_seconds", request.timeoutSeconds()))
                 .retrieve()
-                .bodyToMono(MAP_TYPE)
-                .block(resolveTimeout(request.timeoutSeconds()));
+                .body(MAP_TYPE);
 
         return Map.of(
                 "modelApi", modelApi,
@@ -87,7 +85,7 @@ public class ModelGatewayService {
     }
 
     public String fetchModelCaseFile(String caseId, String filename) {
-        return modelWebClient.get()
+        return modelRestClient.get()
                 .uri(uriBuilder -> uriBuilder
                         .path("/v0/fs/result/file")
                         .queryParam("case_id", caseId)
@@ -95,8 +93,7 @@ public class ModelGatewayService {
                         .build())
                 .accept(MediaType.TEXT_PLAIN, MediaType.APPLICATION_OCTET_STREAM, MediaType.APPLICATION_JSON)
                 .retrieve()
-                .bodyToMono(String.class)
-                .block(properties.getConnectTimeout());
+                .body(String.class);
     }
 
     private Map<String, Object> submitLegacyModel(
@@ -104,12 +101,11 @@ public class ModelGatewayService {
             Map<String, Object> payload,
             Integer timeoutSeconds) {
         String normalizedModelApi = normalizeModelApi(modelApi);
-        return modelWebClient.post()
+        return modelRestClient.post()
                 .uri(normalizedModelApi)
-                .bodyValue(payload)
+                .body(payload)
                 .retrieve()
-                .bodyToMono(MAP_TYPE)
-                .block(resolveTimeout(timeoutSeconds));
+                .body(MAP_TYPE);
     }
 
     private Map<String, Object> waitForLegacyModelResult(
@@ -124,19 +120,17 @@ public class ModelGatewayService {
         long deadline = System.currentTimeMillis() + timeout.toMillis();
 
         while (System.currentTimeMillis() < deadline) {
-            Map<String, Object> status = modelWebClient.get()
+            Map<String, Object> status = modelRestClient.get()
                     .uri(uriBuilder -> uriBuilder.path("/v0/mc/status").queryParam("case_id", caseId).build())
                     .retrieve()
-                    .bodyToMono(MAP_TYPE)
-                    .block(properties.getConnectTimeout());
+                    .body(MAP_TYPE);
 
             String statusValue = String.valueOf(status.get("status"));
             if ("completed".equalsIgnoreCase(statusValue) || "COMPLETE".equalsIgnoreCase(statusValue)) {
-                Map<String, Object> result = modelWebClient.get()
+                Map<String, Object> result = modelRestClient.get()
                         .uri(uriBuilder -> uriBuilder.path("/v0/mc/result").queryParam("case_id", caseId).build())
                         .retrieve()
-                        .bodyToMono(MAP_TYPE)
-                        .block(properties.getConnectTimeout());
+                        .body(MAP_TYPE);
                 Object payloadResult = result.get("result");
                 if (payloadResult instanceof Map<?, ?> map) {
                     return castMap(map);
@@ -144,11 +138,10 @@ public class ModelGatewayService {
                 return new LinkedHashMap<>(submitResult);
             }
             if ("error".equalsIgnoreCase(statusValue) || "ERROR".equalsIgnoreCase(statusValue)) {
-                Map<String, Object> error = modelWebClient.get()
+                Map<String, Object> error = modelRestClient.get()
                         .uri(uriBuilder -> uriBuilder.path("/v0/mc/error").queryParam("case_id", caseId).build())
                         .retrieve()
-                        .bodyToMono(MAP_TYPE)
-                        .block(properties.getConnectTimeout());
+                        .body(MAP_TYPE);
                 log.error("[model-error] received error from model service, caseId={}, errorResponse={}", caseId, error);
                 throw new IllegalStateException(buildDetailedModelError(error));
             }

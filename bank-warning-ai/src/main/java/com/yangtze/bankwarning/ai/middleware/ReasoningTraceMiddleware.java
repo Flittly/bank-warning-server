@@ -1,44 +1,53 @@
-package com.yangtze.bankwarning.ai.hook;
+package com.yangtze.bankwarning.ai.middleware;
 
 import io.agentscope.core.agent.Agent;
-import io.agentscope.core.hook.Hook;
-import io.agentscope.core.hook.HookEvent;
-import io.agentscope.core.hook.PostActingEvent;
-import io.agentscope.core.hook.PreActingEvent;
+import io.agentscope.core.agent.RuntimeContext;
+import io.agentscope.core.event.AgentEvent;
+import io.agentscope.core.event.ToolResultEndEvent;
+import io.agentscope.core.event.ToolResultTextDeltaEvent;
+import io.agentscope.core.message.ToolUseBlock;
+import io.agentscope.core.middleware.ActingInput;
+import io.agentscope.core.middleware.MiddlewareBase;
 import org.springframework.stereotype.Component;
-import reactor.core.publisher.Mono;
+import reactor.core.publisher.Flux;
 
 import java.time.LocalDateTime;
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.function.Function;
 
 @Component
-public class ReasoningTraceHook implements Hook {
+public class ReasoningTraceMiddleware implements MiddlewareBase {
 
     private final List<ThoughtLogEntry> log = new CopyOnWriteArrayList<>();
 
     @Override
-    public <T extends HookEvent> Mono<T> onEvent(T event) {
-        if (event instanceof PreActingEvent preActingEvent) {
-            Agent agent = preActingEvent.getAgent();
-            String agentName = agent != null ? agent.getName() : "unknown";
-            String toolName = preActingEvent.getToolUse() != null ? preActingEvent.getToolUse().getName() : "";
-            String input = preActingEvent.getToolUse() != null
-                    ? String.valueOf(preActingEvent.getToolUse().getInput())
-                    : "";
+    public Flux<AgentEvent> onActing(Agent agent, RuntimeContext ctx, ActingInput input,
+                                     Function<ActingInput, Flux<AgentEvent>> next) {
+        String agentName = agent != null ? agent.getName() : "unknown";
+
+        for (ToolUseBlock toolUse : input.toolCalls()) {
             log.add(new ThoughtLogEntry(LocalDateTime.now(), agentName, "action",
-                    toolName + "(" + input + ")"));
-        } else if (event instanceof PostActingEvent postActingEvent) {
-            Agent agent = postActingEvent.getAgent();
-            String agentName = agent != null ? agent.getName() : "unknown";
-            String result = postActingEvent.getToolResult() != null
-                    ? String.valueOf(postActingEvent.getToolResult().getOutput())
-                    : "";
-            log.add(new ThoughtLogEntry(LocalDateTime.now(), agentName, "result", result));
+                    toolUse.getName() + "(" + toolUse.getInput() + ")"));
         }
-        return Mono.just(event);
+
+        Map<String, StringBuilder> resultBuffers = new HashMap<>();
+
+        return next.apply(input)
+                .doOnNext(event -> {
+                    if (event instanceof ToolResultTextDeltaEvent delta) {
+                        resultBuffers.computeIfAbsent(delta.getToolCallId(), k -> new StringBuilder())
+                                .append(delta.getDelta());
+                    } else if (event instanceof ToolResultEndEvent end) {
+                        StringBuilder buf = resultBuffers.remove(end.getToolCallId());
+                        String result = buf != null ? buf.toString() : "";
+                        log.add(new ThoughtLogEntry(LocalDateTime.now(), agentName, "result", result));
+                    }
+                });
     }
 
     public List<ThoughtLogEntry> getLog() {

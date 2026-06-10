@@ -1,10 +1,11 @@
 package com.yangtze.bankwarning.ai.controller;
 
-import com.yangtze.bankwarning.ai.hook.ReasoningTraceHook;
+import com.yangtze.bankwarning.ai.middleware.ReasoningTraceMiddleware;
 import com.yangtze.bankwarning.ai.workflow.PlanProgress;
 import com.yangtze.bankwarning.ai.workflow.ReportWorkflowService;
 import io.agentscope.core.ReActAgent;
 import io.agentscope.core.message.Msg;
+import io.agentscope.core.message.UserMessage;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Qualifier;
@@ -21,15 +22,15 @@ public class AgentController {
     private static final Logger log = LoggerFactory.getLogger(AgentController.class);
     private final ReActAgent chatAgent;
     private final ReportWorkflowService reportWorkflow;
-    private final ReasoningTraceHook traceHook;
+    private final ReasoningTraceMiddleware traceMiddleware;
 
     public AgentController(
             @Qualifier("chatAgent") ReActAgent chatAgent,
             ReportWorkflowService reportWorkflow,
-            ReasoningTraceHook traceHook) {
+            ReasoningTraceMiddleware traceMiddleware) {
         this.chatAgent = chatAgent;
         this.reportWorkflow = reportWorkflow;
-        this.traceHook = traceHook;
+        this.traceMiddleware = traceMiddleware;
     }
 
     @PostMapping("/report/task/{task_id}")
@@ -73,19 +74,19 @@ public class AgentController {
     public Map<String, Object> chat(@RequestBody Map<String, String> body) {
         String question = body.get("question");
         log.info("[api] unified chat question={}", question);
-        traceHook.clearLog();
-        Msg result = chatAgent.call(Msg.builder().textContent(question).build()).block();
+        traceMiddleware.clearLog();
+        Msg result = chatAgent.call(List.of(new UserMessage("user", question))).block();
         return Map.of("success", true, "data", result.getTextContent());
     }
 
     @GetMapping("/thoughts")
-    public List<ReasoningTraceHook.ThoughtLogEntry> getThoughts() {
-        return traceHook.getLog();
+    public List<ReasoningTraceMiddleware.ThoughtLogEntry> getThoughts() {
+        return traceMiddleware.getLog();
     }
 
     @DeleteMapping("/thoughts")
     public Map<String, Object> clearThoughts() {
-        traceHook.clearLog();
+        traceMiddleware.clearLog();
         return Map.of("success", true);
     }
 }

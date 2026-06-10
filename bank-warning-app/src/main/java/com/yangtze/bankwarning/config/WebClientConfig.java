@@ -2,13 +2,13 @@ package com.yangtze.bankwarning.config;
 
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
-import org.springframework.web.reactive.function.client.WebClient;
+import org.springframework.web.client.RestClient;
 
 @Configuration
 public class WebClientConfig {
 
     @Bean
-    WebClient modelWebClient(ModelServiceProperties properties) {
-        return WebClient.builder().baseUrl(properties.getBaseUrl()).build();
+    RestClient modelRestClient(ModelServiceProperties properties) {
+        return RestClient.builder().baseUrl(properties.getBaseUrl()).build();
     }
 }

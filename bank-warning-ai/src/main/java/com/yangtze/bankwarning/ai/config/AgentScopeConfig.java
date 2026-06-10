@@ -1,37 +1,50 @@
 package com.yangtze.bankwarning.ai.config;
 
+import com.fasterxml.jackson.core.JsonParser;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.yangtze.bankwarning.ai.middleware.ReasoningTraceMiddleware;
+import com.yangtze.bankwarning.ai.service.PdfService;
+import com.yangtze.bankwarning.ai.service.VisualizationService;
+import com.yangtze.bankwarning.ai.service.WeatherService;
+import com.yangtze.bankwarning.ai.tool.PdfTools;
+import com.yangtze.bankwarning.ai.tool.RiskDataTools;
+import com.yangtze.bankwarning.ai.tool.VisualizationTools;
+import com.yangtze.bankwarning.ai.tool.WeatherTools;
 import io.agentscope.core.ReActAgent;
 import io.agentscope.core.embedding.EmbeddingModel;
 import io.agentscope.core.embedding.dashscope.DashScopeTextEmbedding;
-import io.agentscope.core.memory.InMemoryMemory;
 import io.agentscope.core.model.Model;
 import io.agentscope.core.model.OpenAIChatModel;
 import io.agentscope.core.rag.Knowledge;
 import io.agentscope.core.rag.RAGMode;
+import io.agentscope.core.rag.exception.VectorStoreException;
 import io.agentscope.core.rag.knowledge.SimpleKnowledge;
 import io.agentscope.core.rag.model.RetrieveConfig;
-import io.agentscope.core.rag.exception.VectorStoreException;
 import io.agentscope.core.rag.store.PgVectorStore;
 import io.agentscope.core.rag.store.VDBStoreBase;
 import io.agentscope.core.skill.AgentSkill;
-import io.agentscope.core.skill.SkillBox;
+import io.agentscope.core.skill.repository.AgentSkillRepository;
 import io.agentscope.core.skill.repository.ClasspathSkillRepository;
 import io.agentscope.core.tool.Toolkit;
-import com.yangtze.bankwarning.ai.hook.ReasoningTraceHook;
-import com.yangtze.bankwarning.ai.service.VisualizationService;
-import com.yangtze.bankwarning.ai.service.WeatherService;
-import com.yangtze.bankwarning.ai.tool.RiskDataTools;
-import com.yangtze.bankwarning.ai.tool.VisualizationTools;
-import com.yangtze.bankwarning.ai.tool.WeatherTools;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.jdbc.core.JdbcTemplate;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
-import com.yangtze.bankwarning.ai.service.PdfService;
-import com.yangtze.bankwarning.ai.tool.PdfTools;
+
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.Paths;
+import java.nio.file.StandardOpenOption;
+import java.util.ArrayList;
+import java.util.Base64;
+import java.util.HashSet;
+import java.util.List;
+import java.util.Map;
+import java.util.Set;
 
 @Configuration
 public class AgentScopeConfig {
@@ -95,6 +108,13 @@ public class AgentScopeConfig {
     }
 
     @Bean
+    public ObjectMapper objectMapper() {
+        ObjectMapper mapper = new ObjectMapper();
+        mapper.configure(JsonParser.Feature.ALLOW_NON_NUMERIC_NUMBERS, true);
+        return mapper;
+    }
+
+    @Bean
     public RiskDataTools riskDataTools(JdbcTemplate jdbcTemplate) {
         return new RiskDataTools(jdbcTemplate);
     }
@@ -128,25 +148,25 @@ public class AgentScopeConfig {
     }
 
     @Bean
-    public SkillBox skillBox(Toolkit reportToolkit,
-                             org.springframework.beans.factory.ObjectProvider<NacosSkillRepositoryHolder> nacosHolderProvider,
-                             @Value("${app.ai.skill.cache-dir:${user.dir}/.skills-cache}") String cacheDir) throws Exception {
-        SkillBox skillBox = new SkillBox(reportToolkit);
-        java.util.Set<String> registered = new java.util.HashSet<>();
-        java.nio.file.Path cacheBase = java.nio.file.Paths.get(cacheDir);
+    public List<AgentSkillRepository> agentSkillRepositories(
+            Toolkit reportToolkit,
+            ObjectProvider<NacosSkillRepositoryHolder> nacosHolderProvider,
+            @Value("${app.ai.skill.cache-dir:${user.dir}/.skills-cache}") String cacheDir) throws Exception {
+        List<AgentSkillRepository> repos = new ArrayList<>();
+        Set<String> registered = new HashSet<>();
+        Path cacheBase = Paths.get(cacheDir);
 
-        try (ClasspathSkillRepository repo = new ClasspathSkillRepository("skills")) {
-            for (AgentSkill skill : repo.getAllSkills()) {
-                String name = skill.getName();
-                if (registered.add(name)) {
-                    materializeSkillScripts(skill, cacheBase);
-                    skillBox.registration().skill(skill).apply();
-                    log.info("[SkillBox] registered local: {}", name);
-                } else {
-                    log.warn("[SkillBox] duplicate local skill skipped: {}", name);
-                }
+        ClasspathSkillRepository classpathRepo = new ClasspathSkillRepository("skills");
+        for (AgentSkill skill : classpathRepo.getAllSkills()) {
+            String name = skill.getName();
+            if (registered.add(name)) {
+                materializeSkillScripts(skill, cacheBase);
+                log.info("[SkillRepo] registered local: {}", name);
+            } else {
+                log.warn("[SkillRepo] duplicate local skill skipped: {}", name);
             }
         }
+        repos.add(classpathRepo);
 
         NacosSkillRepositoryHolder nacosHolder = nacosHolderProvider.getIfAvailable();
         if (nacosHolder != null && nacosHolder.isAvailable()) {
@@ -154,38 +174,38 @@ public class AgentScopeConfig {
                 String name = skill.getName();
                 if (registered.add(name)) {
                     materializeSkillScripts(skill, cacheBase);
-                    skillBox.registration().skill(skill).apply();
-                    log.info("[SkillBox] registered nacos: {}", name);
+                    log.info("[SkillRepo] registered nacos: {}", name);
                 } else {
-                    log.info("[SkillBox] nacos skill '{}' skipped (local has higher priority)", name);
+                    log.info("[SkillRepo] nacos skill '{}' skipped (local has higher priority)", name);
                 }
             }
+            repos.add(nacosHolder.getRepository());
         } else {
-            log.info("[SkillBox] Nacos not configured or unreachable, using local skills only");
+            log.info("[SkillRepo] Nacos not configured or unreachable, using local skills only");
         }
-        return skillBox;
+        return repos;
     }
 
-    private void materializeSkillScripts(AgentSkill skill, java.nio.file.Path cacheBase) {
-        java.util.Map<String, String> resources = skill.getResources();
+    private void materializeSkillScripts(AgentSkill skill, Path cacheBase) {
+        Map<String, String> resources = skill.getResources();
         if (resources == null || resources.isEmpty()) return;
-        java.nio.file.Path base = cacheBase.resolve(skill.getName());
-        for (java.util.Map.Entry<String, String> entry : resources.entrySet()) {
+        Path base = cacheBase.resolve(skill.getName());
+        for (Map.Entry<String, String> entry : resources.entrySet()) {
             String relPath = entry.getKey();
             String content = entry.getValue();
             if (content == null) continue;
-            java.nio.file.Path target = base.resolve(relPath);
+            Path target = base.resolve(relPath);
             try {
-                java.nio.file.Files.createDirectories(target.getParent());
+                Files.createDirectories(target.getParent());
                 String decoded = content.startsWith("base64:")
-                        ? new String(java.util.Base64.getDecoder().decode(content.substring("base64:".length())))
+                        ? new String(Base64.getDecoder().decode(content.substring("base64:".length())))
                         : content;
-                java.nio.file.Files.writeString(target, decoded,
-                        java.nio.file.StandardOpenOption.CREATE,
-                        java.nio.file.StandardOpenOption.TRUNCATE_EXISTING);
-                log.info("[SkillBox] materialized: {}", target);
+                Files.writeString(target, decoded,
+                        StandardOpenOption.CREATE,
+                        StandardOpenOption.TRUNCATE_EXISTING);
+                log.info("[SkillRepo] materialized: {}", target);
             } catch (Exception e) {
-                log.error("[SkillBox] failed to materialize {}: {}", target, e.getMessage());
+                log.error("[SkillRepo] failed to materialize {}: {}", target, e.getMessage());
             }
         }
     }
@@ -193,9 +213,9 @@ public class AgentScopeConfig {
     @Bean
     @Qualifier("chatAgent")
     public ReActAgent chatAgent(Model deepseekModel, Toolkit reportToolkit,
-                                SkillBox skillBox, Knowledge knowledge,
-                                ReasoningTraceHook traceHook) {
-        String skillPrompt = skillBox.getSkillPrompt();
+                                List<AgentSkillRepository> agentSkillRepositories,
+                                Knowledge knowledge,
+                                ReasoningTraceMiddleware traceMiddleware) {
         return ReActAgent.builder()
                 .name("ChatAgent")
                 .sysPrompt("""
@@ -231,18 +251,17 @@ public class AgentScopeConfig {
                         2. 如果用户问的是知识类问题，基于知识库回答
                         3. 如果用户要求出报告，严格按照报告流程执行
                         4. 对专业指标进行通俗解释
-                        """ + "\n\n" + skillPrompt)
+                        """)
                 .model(deepseekModel)
-                .memory(new InMemoryMemory())
                 .toolkit(reportToolkit)
-                .skillBox(skillBox)
+                .skillRepositories(agentSkillRepositories)
                 .knowledge(knowledge)
                 .ragMode(RAGMode.AGENTIC)
                 .retrieveConfig(RetrieveConfig.builder()
                         .limit(5)
                         .scoreThreshold(0.4)
                         .build())
-                .hook(traceHook)
+                .middleware(traceMiddleware)
                 .maxIters(15)
                 .build();
     }
