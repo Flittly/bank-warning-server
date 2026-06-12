@@ -33,7 +33,14 @@ public class MarkdownReportService {
      * 生成包含图表的 Markdown 报告
      */
     public String generateMarkdownReport(String taskId, String reportText, List<Map<String, String>> charts) {
-        log.info("[markdown] generating report for task={}", taskId);
+        String content = buildMarkdownContent(taskId, reportText, charts);
+        String mdFilePath = saveMarkdownFile(taskId, content);
+        log.info("[markdown] report saved to: {}", mdFilePath);
+        return mdFilePath;
+    }
+
+    public String buildMarkdownContent(String taskId, String reportText, List<Map<String, String>> charts) {
+        log.info("[markdown] building content for task={}", taskId);
 
         StringBuilder md = new StringBuilder();
         
@@ -48,31 +55,45 @@ public class MarkdownReportService {
         
         // 如果有图表，添加图表部分
         if (charts != null && !charts.isEmpty()) {
-            md.append("---\n\n");
-            md.append("## 附录：评估图表\n\n");
-            
-            for (Map<String, String> chart : charts) {
-                String tool = chart.get("tool");
-                String resultJson = chart.get("result");
-                
-                // 从 result JSON 中提取文件路径
-                String filePath = extractFilePath(resultJson);
-                if (filePath != null) {
-                    String chartTitle = getChartTitle(tool);
-                    md.append("### ").append(chartTitle).append("\n\n");
-                    
-                    // 使用相对路径引用图片
-                    String relativePath = getRelativePath(filePath);
-                    md.append("![").append(chartTitle).append("](").append(relativePath).append(")\n\n");
-                }
+            appendChartsAppendix(md, charts);
+        } else {
+            appendDirectoryImages(md);
+        }
+
+        return md.toString();
+    }
+
+    private void appendChartsAppendix(StringBuilder md, List<Map<String, String>> charts) {
+        md.append("---\n\n");
+        md.append("## 附录：评估图表\n\n");
+        for (Map<String, String> chart : charts) {
+            String tool = chart.get("tool");
+            String resultJson = chart.get("result");
+            String filePath = extractFilePath(resultJson);
+            if (filePath != null) {
+                String chartTitle = getChartTitle(tool);
+                md.append("### ").append(chartTitle).append("\n\n");
+                String relativePath = getRelativePath(filePath);
+                md.append("![").append(chartTitle).append("](").append(relativePath).append(")\n\n");
             }
         }
-        
-        // 保存 Markdown 文件
-        String mdFilePath = saveMarkdownFile(taskId, md.toString());
-        log.info("[markdown] report saved to: {}", mdFilePath);
-        
-        return mdFilePath;
+    }
+
+    private void appendDirectoryImages(StringBuilder md) {
+        String taskDir = VisualizationService.getCurrentTaskOutputDir();
+        if (taskDir == null) return;
+        java.io.File dir = new java.io.File(taskDir);
+        java.io.File[] pngs = dir.listFiles((d, name) -> name.toLowerCase().endsWith(".png"));
+        if (pngs == null || pngs.length == 0) return;
+        md.append("---\n\n");
+        md.append("## 附录：评估图表\n\n");
+        for (java.io.File png : pngs) {
+            String name = png.getName();
+            String title = name.replace(".png", "").replace("_", " ");
+            String folder = dir.getName();
+            md.append("### ").append(title).append("\n\n");
+            md.append("![").append(title).append("](./").append(folder).append("/").append(name).append(")\n\n");
+        }
     }
 
     /**
@@ -131,13 +152,10 @@ public class MarkdownReportService {
      */
     private String getRelativePath(String absolutePath) {
         try {
-            // Markdown 文件在 output/reports/ 目录
-            // 图片在 output/ 目录
-            // 所以相对路径是 ../filename.png
             File imageFile = new File(absolutePath);
-            return "../" + imageFile.getName();
+            String folder = imageFile.getParentFile().getName();
+            return "./" + folder + "/" + imageFile.getName();
         } catch (Exception e) {
-            // 如果无法计算相对路径，返回文件名
             return new File(absolutePath).getName();
         }
     }
@@ -147,18 +165,15 @@ public class MarkdownReportService {
      */
     private String saveMarkdownFile(String taskId, String content) {
         try {
-            // 确保输出目录存在
             File dir = new File(outputDir, "reports");
             if (!dir.exists()) {
                 dir.mkdirs();
             }
             
-            // 生成文件名
             String timestamp = LocalDateTime.now().format(DateTimeFormatter.ofPattern("yyyyMMdd_HHmmss"));
             String fileName = String.format("report_%s_%s.md", taskId, timestamp);
             File file = new File(dir, fileName);
             
-            // 写入文件
             try (FileWriter writer = new FileWriter(file)) {
                 writer.write(content);
             }

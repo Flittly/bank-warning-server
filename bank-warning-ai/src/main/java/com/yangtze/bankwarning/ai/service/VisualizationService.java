@@ -25,6 +25,25 @@ public class VisualizationService {
     @Value("${app.ai.visualization.output-dir:visualization/output}")
     private String outputDir;
 
+    private static volatile String currentTaskOutputDir;
+
+    public static void beginTask(String taskOutputDir) {
+        currentTaskOutputDir = taskOutputDir;
+        new java.io.File(taskOutputDir).mkdirs();
+    }
+
+    public static void endTask() {
+        currentTaskOutputDir = null;
+    }
+
+    public static String getCurrentTaskOutputDir() {
+        return currentTaskOutputDir;
+    }
+
+    private String resolveOutputDir() {
+        return currentTaskOutputDir != null ? currentTaskOutputDir : outputDir;
+    }
+
     public VisualizationService(JdbcTemplate jdbcTemplate, ObjectMapper objectMapper) {
         this.jdbcTemplate = jdbcTemplate;
         this.objectMapper = objectMapper;
@@ -316,9 +335,10 @@ public class VisualizationService {
      */
     private Map<String, Object> executePython(String command, String dataJson, String title) {
         try {
+            String dir = resolveOutputDir();
             // 写入临时数据文件
-            String dataFile = outputDir + "/temp_data.json";
-            new File(outputDir).mkdirs();
+            String dataFile = dir + "/temp_data.json";
+            new File(dir).mkdirs();
             try (FileWriter writer = new FileWriter(dataFile)) {
                 writer.write(dataJson);
             }
@@ -335,7 +355,7 @@ public class VisualizationService {
                     command,
                     "--data", new File(dataFile).getAbsolutePath(),
                     "--title", title,
-                    "--output", new File(outputDir).getAbsolutePath()
+                    "--output", new File(dir).getAbsolutePath()
             );
 
             log.info("[viz] executing: {}", String.join(" ", cmd));

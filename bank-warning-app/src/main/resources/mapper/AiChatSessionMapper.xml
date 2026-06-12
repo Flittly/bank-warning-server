@@ -1,0 +1,35 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN" "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="com.yangtze.bankwarning.mapper.AiChatSessionMapper">
+
+    <resultMap id="SessionResultMap" type="com.yangtze.bankwarning.domain.po.AiChatSessionPO">
+        <id property="id" column="id"/>
+        <result property="sessionId" column="session_id"/>
+        <result property="title" column="title"/>
+        <result property="createdAt" column="created_at"/>
+        <result property="updatedAt" column="updated_at"/>
+    </resultMap>
+
+    <select id="selectAll" resultMap="SessionResultMap">
+        SELECT * FROM ai_chat_sessions ORDER BY updated_at DESC
+    </select>
+
+    <select id="selectBySessionId" resultMap="SessionResultMap">
+        SELECT * FROM ai_chat_sessions WHERE session_id = #{sessionId}
+    </select>
+
+    <insert id="insert" parameterType="com.yangtze.bankwarning.domain.po.AiChatSessionPO"
+            useGeneratedKeys="true" keyProperty="id">
+        INSERT INTO ai_chat_sessions (session_id, title)
+        VALUES (#{sessionId}, #{title})
+    </insert>
+
+    <delete id="deleteBySessionId">
+        DELETE FROM ai_chat_sessions WHERE session_id = #{sessionId}
+    </delete>
+
+    <update id="updateTitle">
+        UPDATE ai_chat_sessions SET title = #{title}, updated_at = CURRENT_TIMESTAMP
+        WHERE session_id = #{sessionId}
+    </update>
+</mapper>

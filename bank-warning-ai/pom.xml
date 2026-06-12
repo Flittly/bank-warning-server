@@ -71,6 +71,10 @@
             <artifactId>agentscope-extensions-nacos-skill</artifactId>
         </dependency>
         <dependency>
+            <groupId>io.agentscope</groupId>
+            <artifactId>agentscope-harness</artifactId>
+        </dependency>
+        <dependency>
             <groupId>com.alibaba.nacos</groupId>
             <artifactId>nacos-client</artifactId>
             <version>3.2.1-2026.03.30</version>

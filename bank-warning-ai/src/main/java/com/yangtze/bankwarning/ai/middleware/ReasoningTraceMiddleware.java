@@ -8,7 +8,7 @@ import io.agentscope.core.event.ToolResultTextDeltaEvent;
 import io.agentscope.core.message.ToolUseBlock;
 import io.agentscope.core.middleware.ActingInput;
 import io.agentscope.core.middleware.MiddlewareBase;
-import org.springframework.stereotype.Component;
+
 import reactor.core.publisher.Flux;
 
 import java.time.LocalDateTime;
@@ -20,7 +20,6 @@ import java.util.Map;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.function.Function;
 
-@Component
 public class ReasoningTraceMiddleware implements MiddlewareBase {
 
     private final List<ThoughtLogEntry> log = new CopyOnWriteArrayList<>();

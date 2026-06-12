@@ -14,6 +14,7 @@ import io.agentscope.core.skill.repository.AgentSkillRepository;
 import io.agentscope.core.tool.Toolkit;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.stereotype.Service;
 
 import java.util.ArrayList;
@@ -72,7 +73,7 @@ public class ReportWorkflowService {
                                  VisualizationTools visualizationTools,
                                  WeatherTools weatherTools,
                                  List<AgentSkillRepository> skillRepositories,
-                                 ReasoningTraceMiddleware traceMiddleware,
+                                 @Qualifier("reportTraceMiddleware") ReasoningTraceMiddleware traceMiddleware,
                                  MarkdownReportService markdownReportService) {
         this.model = model;
         this.riskDataTools = riskDataTools;
@@ -87,6 +88,16 @@ public class ReportWorkflowService {
         log.info("[workflow] start report generation, taskId={}", taskId);
         traceMiddleware.clearLog();
 
+        String ts = java.time.LocalDateTime.now()
+                .format(java.time.format.DateTimeFormatter.ofPattern("yyyyMMdd_HHmmss"));
+        String reportFileName = "report_" + taskId + "_" + ts + ".md";
+        String taskDir = System.getProperty("user.dir") + "/visualization/output/report_"
+                + taskId + "_" + ts;
+        new java.io.File(taskDir).mkdirs();
+        log.info("[workflow] task output dir: {}", taskDir);
+        com.yangtze.bankwarning.ai.service.VisualizationService.beginTask(taskDir);
+
+        try {
         WorkflowState state = workflows.computeIfAbsent(taskId, k -> new WorkflowState());
         state.context.put("taskId", taskId);
 
@@ -114,6 +125,9 @@ public class ReportWorkflowService {
         String finalReport = (String) state.context.getOrDefault("finalReport", "");
         log.info("[workflow] finished, total length={}", finalReport.length());
 
+        String mdContent = markdownReportService.buildMarkdownContent(
+                taskId, finalReport, collectCharts(state));
+
         try {
             String mdPath = markdownReportService.generateMarkdownReport(
                     taskId, finalReport, collectCharts(state));
@@ -122,7 +136,18 @@ public class ReportWorkflowService {
             log.error("[workflow] failed to save markdown report: {}", e.getMessage(), e);
         }
 
-        return finalReport;
+        return mdContent;
+        } finally {
+            com.yangtze.bankwarning.ai.service.VisualizationService.endTask();
+            var wf = workflows.get(taskId);
+            if (wf != null) wf.context.put("reportFileName", reportFileName);
+        }
+    }
+
+    public String getReportFileName(String taskId) {
+        WorkflowState wf = workflows.get(taskId);
+        if (wf == null) return null;
+        return (String) wf.context.get("reportFileName");
     }
 
     public PlanProgress getProgress(String taskId) {
