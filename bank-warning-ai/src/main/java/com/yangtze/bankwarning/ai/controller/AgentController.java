@@ -73,15 +73,23 @@ public class AgentController {
         return result;
     }
 
+    @SuppressWarnings("unchecked")
     @PostMapping("/chat")
-    public Map<String, Object> chat(@RequestBody Map<String, String> body) {
-        String question = body.get("question");
-        String sessionId = body.get("sessionId");
+    public Map<String, Object> chat(@RequestBody Map<String, Object> body) {
+        String question = (String) body.get("question");
+        String sessionId = (String) body.get("sessionId");
+        List<String> skills = (List<String>) body.get("skills");
         RuntimeContext ctx = RuntimeContext.builder()
                 .sessionId(sessionId)
                 .build();
+        String prompt = question;
+        if (skills != null && !skills.isEmpty()) {
+            prompt = "以下是用户本次对话中启用的技能，请优先使用这些技能来回答问题：\n- "
+                    + String.join("\n- ", skills)
+                    + "\n\n用户问题：" + question;
+        }
         Msg response = chatAgent.call(
-                List.of(new UserMessage("user", question)),
+                List.of(new UserMessage("user", prompt)),
                 ctx
         ).block();
         return Map.of("success", true, "data", extractText(response));

@@ -24,7 +24,9 @@ import org.springframework.web.client.RestTemplate;
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
 import java.util.Base64;
+import java.util.List;
 import java.util.Map;
 import java.util.Properties;
 import java.util.concurrent.atomic.AtomicReference;
@@ -52,6 +54,8 @@ public class NacosSkillRepositoryHolder {
     private final ObjectMapper json = new ObjectMapper();
     private final AtomicReference<String> tokenCache = new AtomicReference<>();
     private volatile long tokenExpiresAt = 0L;
+    private final java.util.concurrent.ConcurrentHashMap<String, String> cachedSkillNames = new java.util.concurrent.ConcurrentHashMap<>();
+    private com.alibaba.nacos.api.ai.AiService aiService;
 
     public NacosSkillRepositoryHolder(
             @Value("${agentscope.nacos.server-addr:127.0.0.1:8848}") String serverAddr,
@@ -77,9 +81,12 @@ public class NacosSkillRepositoryHolder {
             AiService aiService = new NacosAiService(props);
             repo = new NacosSkillRepository(aiService, namespace);
             ok = true;
+            this.aiService = aiService;
             log.info("[NacosSkill] connected to {} namespace={}", serverAddr, namespace);
+            tryWarmupCache();
         } catch (NacosException | RuntimeException e) {
             log.warn("[NacosSkill] failed to connect to Nacos, skills will fall back to local: {}", e.getMessage());
+            this.aiService = null;
         }
         this.repository = repo;
         this.available = ok;
@@ -91,6 +98,110 @@ public class NacosSkillRepositoryHolder {
 
     public boolean isAvailable() {
         return available;
+    }
+
+    /**
+     * 通过 Nacos HTTP API 获取所有 skill 名称列表。
+     * NacosSkillRepository.getAllSkillNames() 不支持列表，所以直接调 HTTP。
+     */
+    public List<String> listNacosSkillNames() {
+        return new ArrayList<>(cachedSkillNames.keySet());
+    }
+
+    public String getNacosSkillDesc(String name) {
+        return cachedSkillNames.getOrDefault(name, "");
+    }
+
+    public void trackSkill(String name) {
+        cachedSkillNames.put(name, "");
+    }
+
+    public void untrackSkill(String name) {
+        cachedSkillNames.remove(name);
+    }
+
+    public void downloadSkillToLocal(String skillName) throws Exception {
+        if (aiService == null) throw new IllegalStateException("Nacos AI service not available");
+        byte[] zip;
+        // 优先用 SDK，SDK 内部自动处理 auth 和路径
+        try {
+            zip = aiService.downloadSkillZip(skillName);
+        } catch (Exception sdkEx) {
+            // SDK 失败则降级用 Admin API + accessToken
+            log.warn("[NacosSkill] SDK download failed, fallback to Admin API: {}", sdkEx.getMessage());
+            zip = downloadViaAdmin(skillName);
+        }
+        if (zip == null || zip.length == 0) throw new RuntimeException("下载到空内容");
+        java.io.File skillsDir = new java.io.File("src/main/resources/skills/" + skillName);
+        if (!skillsDir.exists()) skillsDir.mkdirs();
+        try (java.util.zip.ZipInputStream zis = new java.util.zip.ZipInputStream(
+                new java.io.ByteArrayInputStream(zip))) {
+            java.util.zip.ZipEntry entry;
+            while ((entry = zis.getNextEntry()) != null) {
+                String name = entry.getName();
+                if (name.contains("/")) name = name.substring(name.indexOf('/') + 1);
+                if (name.isEmpty()) continue;
+                java.io.File outFile = new java.io.File(skillsDir, name);
+                if (entry.isDirectory()) outFile.mkdirs();
+                else {
+                    outFile.getParentFile().mkdirs();
+                    java.nio.file.Files.write(outFile.toPath(), zis.readAllBytes());
+                }
+                zis.closeEntry();
+            }
+        }
+        log.info("[NacosSkill] downloaded {} to {}", skillName, skillsDir.getAbsolutePath());
+    }
+
+    private byte[] downloadViaAdmin(String skillName) throws Exception {
+        String token = ensureToken();
+        HttpHeaders headers = new HttpHeaders();
+        headers.set("accessToken", token);
+        // 尝试列表拿版本号
+        String listUrl = "http://" + serverAddr + "/nacos/v3/admin/ai/skills/list?pageNo=1&pageSize=1"
+                + "&namespaceId=" + namespace
+                + "&skillName=" + java.net.URLEncoder.encode(skillName, "UTF-8") + "&search=accurate";
+        ResponseEntity<String> listResp = http.exchange(listUrl, org.springframework.http.HttpMethod.GET,
+                new HttpEntity<>(headers), String.class);
+        JsonNode items = json.readTree(listResp.getBody()).path("data").path("pageItems");
+        String version = (items.isArray() && !items.isEmpty())
+                ? items.get(0).path("version").asText("1.0.0") : "1.0.0";
+        HttpEntity<Void> req = new HttpEntity<>(headers);
+        // 控制台 API 路径
+        String dlUrl = "http://" + serverAddr + "/nacos/v1/console/ai/skills/download"
+                + "?namespaceId=" + namespace
+                + "&skillName=" + java.net.URLEncoder.encode(skillName, "UTF-8")
+                + "&version=" + java.net.URLEncoder.encode(version, "UTF-8");
+        ResponseEntity<byte[]> dlResp = http.exchange(dlUrl, org.springframework.http.HttpMethod.GET,
+                req, byte[].class);
+        if (dlResp.getBody() != null) return dlResp.getBody();
+        throw new RuntimeException("控制台下载无响应");
+    }
+
+    private void tryWarmupCache() {
+        try {
+            String token = ensureToken();
+            String url = "http://" + serverAddr + "/nacos/v3/admin/ai/skills/list?pageNo=1&pageSize=100&namespaceId="
+                    + namespace + "&search=blur";
+            HttpHeaders headers = new HttpHeaders();
+            headers.set("accessToken", token);
+            HttpEntity<Void> req = new HttpEntity<>(headers);
+            ResponseEntity<String> resp = http.exchange(url, org.springframework.http.HttpMethod.GET, req, String.class);
+            JsonNode root = json.readTree(resp.getBody());
+            JsonNode items = root.path("data").path("pageItems");
+            if (items.isArray()) {
+                for (JsonNode item : items) {
+                    String name = item.path("name").asText("");
+                    if (!name.isBlank()) {
+                        cachedSkillNames.put(name, item.path("description").asText(""));
+                        log.info("[NacosSkill] warmup: {}", name);
+                    }
+                }
+            }
+            log.info("[NacosSkill] warmup complete, {} skills cached", cachedSkillNames.size());
+        } catch (Exception e) {
+            log.info("[NacosSkill] cache warmup not available: {}", e.getMessage());
+        }
     }
 
     /**
@@ -126,6 +237,7 @@ public class NacosSkillRepositoryHolder {
             ResponseEntity<String> resp = http.postForEntity(url, req, String.class);
             String respBody = resp.getBody();
             log.info("[NacosSkill] upload {} status={} body={}", name, resp.getStatusCode(), respBody);
+            trackSkill(name);
 
             JsonNode root = json.readTree(respBody);
             int code = root.path("code").asInt(-1);

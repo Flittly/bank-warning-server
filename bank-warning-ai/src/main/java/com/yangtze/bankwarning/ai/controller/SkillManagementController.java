@@ -2,38 +2,91 @@ package com.yangtze.bankwarning.ai.controller;
 
 import com.yangtze.bankwarning.ai.config.NacosSkillRepositoryHolder;
 import io.agentscope.core.skill.AgentSkill;
+import io.agentscope.core.skill.repository.AgentSkillRepository;
 import io.agentscope.core.skill.repository.ClasspathSkillRepository;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.ObjectProvider;
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.web.bind.annotation.*;
 
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 
-/**
- * Skill 管理端点（仅当 Nacos 启用时生效；未启用时返回 503）。
- *
- * 注意：NacosSkillRepository.save() 是 no-op（SDK 3.2.1 还没出 skill 上传 API），
- * 本 Controller 绕开 SDK，直接调 Nacos admin HTTP API（POST /nacos/v3/admin/ai/skills/upload）。
- */
 @RestController
 @RequestMapping("/v0/bank/ai/skill")
 public class SkillManagementController {
 
     private static final Logger log = LoggerFactory.getLogger(SkillManagementController.class);
     private final NacosSkillRepositoryHolder holder;
+    private final List<AgentSkillRepository> allRepos;
 
-    public SkillManagementController(ObjectProvider<NacosSkillRepositoryHolder> holderProvider) {
+    public SkillManagementController(ObjectProvider<NacosSkillRepositoryHolder> holderProvider,
+                                      @Qualifier("agentSkillRepositories") List<AgentSkillRepository> allRepos) {
         this.holder = holderProvider.getIfAvailable();
+        this.allRepos = allRepos;
     }
 
     @GetMapping("/list")
     public Map<String, Object> list() {
+        List<Map<String, Object>> skills = new ArrayList<>();
+        java.util.Set<String> seen = new java.util.HashSet<>();
+        java.util.Set<String> nacoNames = holder != null ? new java.util.HashSet<>(holder.listNacosSkillNames()) : java.util.Set.of();
+        for (AgentSkillRepository repo : allRepos) {
+            if (repo instanceof ClasspathSkillRepository) {
+                for (AgentSkill skill : repo.getAllSkills()) {
+                    String name = skill.getName();
+                    seen.add(name);
+                    Map<String, Object> item = new LinkedHashMap<>();
+                    item.put("name", name);
+                    item.put("description", skill.getDescription());
+                    item.put("source", nacoNames.contains(name) ? "synced" : "local");
+                    skills.add(item);
+                }
+            }
+        }
+        // Nacos-独有的 skills（不在 local 中）
+        for (String name : nacoNames) {
+            if (!seen.contains(name)) {
+                Map<String, Object> item = new LinkedHashMap<>();
+                item.put("name", name);
+                item.put("description", holder.getNacosSkillDesc(name));
+                item.put("source", "nacos");
+                skills.add(item);
+            }
+        }
+        return Map.of("success", true, "skills", skills);
+    }
+
+    @PostMapping("/download/{name}")
+    public Map<String, Object> downloadSkill(@PathVariable String name) {
         if (!isReady()) return unavailable();
-        List<String> names = holder.getRepository().getAllSkillNames();
-        return Map.of("success", true, "source", "nacos", "skills", names);
+        try {
+            holder.downloadSkillToLocal(name);
+            return Map.of("success", true, "name", name, "downloaded", true);
+        } catch (Exception e) {
+            log.error("[skill] download failed for '{}': {}", name, e.getMessage());
+            return Map.of("success", false, "error", "下载失败: " + e.getMessage());
+        }
+    }
+
+    @PostMapping("/upload/{name}")
+    public Map<String, Object> uploadOneSkill(@PathVariable String name) {
+        if (!isReady()) return unavailable();
+        try (ClasspathSkillRepository local = new ClasspathSkillRepository("skills")) {
+            AgentSkill skill = local.getSkill(name);
+            if (skill == null) return Map.of("success", false, "error", "本地 Skill 不存在");
+            String fullMd = "---\nname: " + skill.getName()
+                    + "\ndescription: " + (skill.getDescription() != null ? skill.getDescription() : "")
+                    + "\n---\n\n" + (skill.getSkillContent() != null ? skill.getSkillContent() : "");
+            holder.uploadSkill(skill.getName(), fullMd, skill.getResources());
+            return Map.of("success", true, "name", name, "uploaded", true);
+        } catch (Exception e) {
+            log.error("[skill] upload failed for '{}': {}", name, e.getMessage());
+            return Map.of("success", false, "error", "上传失败: " + e.getMessage());
+        }
     }
 
     @PostMapping("/sync-local")
@@ -49,7 +102,10 @@ public class SkillManagementController {
             List<String> failed = new ArrayList<>();
             for (AgentSkill s : skills) {
                 try {
-                    String n = holder.uploadSkill(s.getName(), s.getSkillContent(), s.getResources());
+                    String fullMd = "---\nname: " + s.getName()
+                            + "\ndescription: " + (s.getDescription() != null ? s.getDescription() : "")
+                            + "\n---\n\n" + (s.getSkillContent() != null ? s.getSkillContent() : "");
+                    String n = holder.uploadSkill(s.getName(), fullMd, s.getResources());
                     uploaded.add(n);
                     log.info("[skill] sync-local: uploaded {} (resources={})", n,
                             s.getResources() == null ? 0 : s.getResources().size());

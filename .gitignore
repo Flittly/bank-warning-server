@@ -21,5 +21,6 @@ bank-warning-app/src/main/resources/application-*.yml
 .env.*.local
 
 .skills-cache
+bank-warning-ai/src/main/resources/skills
 
 visualization/output

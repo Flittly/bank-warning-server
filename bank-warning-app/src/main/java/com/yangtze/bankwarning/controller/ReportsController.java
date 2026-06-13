@@ -89,4 +89,25 @@ public class ReportsController {
             return Map.of("success", false, "error", "保存失败: " + e.getMessage());
         }
     }
+
+    @PostMapping("/reports/save")
+    public Map<String, Object> saveReport(@RequestBody Map<String, String> body) {
+        String content = body.get("content");
+        if (content == null || content.isBlank()) {
+            return Map.of("success", false, "error", "content 不能为空");
+        }
+        String taskId = body.getOrDefault("taskId", "chat");
+        String ts = java.time.LocalDateTime.now()
+                .format(java.time.format.DateTimeFormatter.ofPattern("yyyyMMdd_HHmmss"));
+        String filename = "report_" + taskId + "_" + ts + ".md";
+        File dir = new File(outputDir, "reports");
+        if (!dir.exists()) dir.mkdirs();
+        try {
+            java.nio.file.Files.writeString(new File(dir, filename).toPath(), content,
+                    java.nio.charset.StandardCharsets.UTF_8);
+            return Map.of("success", true, "filename", filename);
+        } catch (IOException e) {
+            return Map.of("success", false, "error", "保存失败: " + e.getMessage());
+        }
+    }
 }

@@ -22,8 +22,9 @@ public class AiChatSessionService {
 
     public AiChatSessionPO createSession(String title) {
         AiChatSessionPO po = new AiChatSessionPO();
-        po.setSessionId(UUID.randomUUID().toString());
-        po.setTitle(title != null && !title.isBlank() ? title : "新会话");
+        String uuid = UUID.randomUUID().toString();
+        po.setSessionId(uuid);
+        po.setTitle(title != null && !title.isBlank() ? title : "会话-" + uuid.substring(0, 8));
         mapper.insert(po);
         return po;
     }
