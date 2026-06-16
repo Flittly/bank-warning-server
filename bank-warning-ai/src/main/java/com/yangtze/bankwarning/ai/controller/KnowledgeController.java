@@ -8,15 +8,13 @@ import io.agentscope.core.rag.model.DocumentMetadata;
 import io.agentscope.core.rag.model.RetrieveConfig;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.web.bind.annotation.*;
 import org.springframework.web.multipart.MultipartFile;
 
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.util.ArrayList;
-import java.util.List;
-import java.util.Map;
-import java.util.UUID;
+import java.util.*;
 import java.util.stream.Collectors;
 
 @RestController
@@ -26,12 +24,14 @@ public class KnowledgeController {
     private static final Logger log = LoggerFactory.getLogger(KnowledgeController.class);
     private final Knowledge knowledge;
     private final PdfService pdfService;
+    private final JdbcTemplate jdbcTemplate;
 
     private static final int MAX_CHUNK_SIZE = 500;
 
-    public KnowledgeController(Knowledge knowledge, PdfService pdfService) {
+    public KnowledgeController(Knowledge knowledge, PdfService pdfService, JdbcTemplate jdbcTemplate) {
         this.knowledge = knowledge;
         this.pdfService = pdfService;
+        this.jdbcTemplate = jdbcTemplate;
     }
 
     @PostMapping("/knowledge")
@@ -118,6 +118,65 @@ public class KnowledgeController {
         return Map.of("success", true, "message", "启动时自动导入历史数据，无需手动触发");
     }
 
+    @GetMapping("/knowledge/list")
+    public List<Map<String, Object>> listDocuments() {
+        String sql = "SELECT DISTINCT doc_id, payload FROM ai_knowledge_store ORDER BY doc_id";
+        List<Map<String, Object>> rows = jdbcTemplate.queryForList(sql);
+        Map<String, Map<String, Object>> grouped = new LinkedHashMap<>();
+        for (Map<String, Object> row : rows) {
+            String docId = (String) row.get("doc_id");
+            Map<String, Object> meta = grouped.computeIfAbsent(docId, k -> new LinkedHashMap<>());
+            meta.putIfAbsent("docId", docId);
+            Object payload = row.get("payload");
+            if (payload instanceof Map) {
+                @SuppressWarnings("unchecked")
+                Map<String, Object> p = (Map<String, Object>) payload;
+                meta.putIfAbsent("type", p.getOrDefault("type", ""));
+                meta.putIfAbsent("fileName", p.getOrDefault("fileName", docId));
+            }
+            Integer chunks = jdbcTemplate.queryForObject(
+                    "SELECT COUNT(*) FROM ai_knowledge_store WHERE doc_id = ?", Integer.class, docId);
+            meta.put("chunks", chunks != null ? chunks : 0);
+        }
+        return new ArrayList<>(grouped.values());
+    }
+
+    @GetMapping("/knowledge/{id}")
+    public Map<String, Object> getDocument(@PathVariable("id") String id) {
+        List<Map<String, Object>> rows = jdbcTemplate.queryForList(
+                "SELECT content, chunk_id, payload FROM ai_knowledge_store WHERE doc_id = ? ORDER BY chunk_id", id);
+        if (rows.isEmpty()) {
+            return Map.of("success", false, "error", "文档不存在");
+        }
+        String fullText = rows.stream()
+                .map(r -> (String) r.get("content"))
+                .collect(Collectors.joining("\n\n---\n\n"));
+        Map<String, Object> firstPayload = null;
+        if (!rows.isEmpty()) {
+            Object p = rows.get(0).get("payload");
+            if (p instanceof Map) {
+                @SuppressWarnings("unchecked")
+                Map<String, Object> mp = (Map<String, Object>) p;
+                firstPayload = mp;
+            }
+        }
+        return Map.of("success", true, "docId", id,
+                "content", fullText,
+                "chunks", rows.size(),
+                "type", firstPayload != null ? firstPayload.getOrDefault("type", "") : "",
+                "fileName", firstPayload != null ? firstPayload.getOrDefault("fileName", id) : id);
+    }
+
+    @DeleteMapping("/knowledge/{id}")
+    public Map<String, Object> deleteDocument(@PathVariable("id") String id) {
+        int deleted = jdbcTemplate.update("DELETE FROM ai_knowledge_store WHERE doc_id = ?", id);
+        if (deleted == 0) {
+            return Map.of("success", false, "error", "文档不存在");
+        }
+        log.info("[api] deleted knowledge, docId={}, rows={}", id, deleted);
+        return Map.of("success", true, "deleted", deleted);
+    }
+
     @GetMapping("/search")
     public List<Map<String, Object>> search(
             @RequestParam("query") String query,
@@ -162,6 +221,11 @@ public class KnowledgeController {
 
     @GetMapping("/knowledge/stats")
     public Map<String, Object> getStats() {
-        return Map.of("status", "PgVectorStore", "note", "统计信息请直接查询数据库 ai_knowledge_store 表");
+        Integer docCount = jdbcTemplate.queryForObject(
+                "SELECT COUNT(DISTINCT doc_id) FROM ai_knowledge_store", Integer.class);
+        Integer chunkCount = jdbcTemplate.queryForObject(
+                "SELECT COUNT(*) FROM ai_knowledge_store", Integer.class);
+        return Map.of("store", "PgVectorStore", "documents", docCount != null ? docCount : 0,
+                "chunks", chunkCount != null ? chunkCount : 0, "dimensions", 1024);
     }
 }

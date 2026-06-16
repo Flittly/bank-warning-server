@@ -1,6 +1,7 @@
 package com.yangtze.bankwarning.ai.controller;
 
 import com.yangtze.bankwarning.ai.middleware.ReasoningTraceMiddleware;
+import com.yangtze.bankwarning.ai.service.ModelService;
 import com.yangtze.bankwarning.ai.workflow.PlanProgress;
 import com.yangtze.bankwarning.ai.workflow.ReportWorkflowService;
 import io.agentscope.harness.agent.HarnessAgent;
@@ -13,6 +14,7 @@ import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.web.bind.annotation.*;
 
+import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -22,15 +24,18 @@ import java.util.Map;
 public class AgentController {
 
     private static final Logger log = LoggerFactory.getLogger(AgentController.class);
-    private final HarnessAgent chatAgent;
+    private final HarnessAgent defaultChatAgent;
+    private final ModelService modelService;
     private final ReportWorkflowService reportWorkflow;
     private final ReasoningTraceMiddleware traceMiddleware;
 
     public AgentController(
-            @Qualifier("chatAgent") HarnessAgent chatAgent,
+            @Qualifier("chatAgent") HarnessAgent defaultChatAgent,
+            ModelService modelService,
             ReportWorkflowService reportWorkflow,
             @Qualifier("chatTraceMiddleware") ReasoningTraceMiddleware traceMiddleware) {
-        this.chatAgent = chatAgent;
+        this.defaultChatAgent = defaultChatAgent;
+        this.modelService = modelService;
         this.reportWorkflow = reportWorkflow;
         this.traceMiddleware = traceMiddleware;
     }
@@ -78,7 +83,10 @@ public class AgentController {
     public Map<String, Object> chat(@RequestBody Map<String, Object> body) {
         String question = (String) body.get("question");
         String sessionId = (String) body.get("sessionId");
+        String modelKey = (String) body.getOrDefault("model", "");
         List<String> skills = (List<String>) body.get("skills");
+        HarnessAgent agent = modelService.getOrCreateAgent(modelKey, defaultChatAgent);
+        if (agent == null) agent = defaultChatAgent;
         RuntimeContext ctx = RuntimeContext.builder()
                 .sessionId(sessionId)
                 .build();
@@ -88,7 +96,7 @@ public class AgentController {
                     + String.join("\n- ", skills)
                     + "\n\n用户问题：" + question;
         }
-        Msg response = chatAgent.call(
+        Msg response = agent.call(
                 List.of(new UserMessage("user", prompt)),
                 ctx
         ).block();

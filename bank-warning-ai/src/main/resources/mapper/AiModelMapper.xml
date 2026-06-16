@@ -1,0 +1,33 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN" "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="com.yangtze.bankwarning.mapper.AiModelMapper">
+    <resultMap id="ModelResultMap" type="com.yangtze.bankwarning.ai.domain.AiModelPO">
+        <id property="id" column="id"/>
+        <result property="modelKey" column="model_key"/>
+        <result property="label" column="label"/>
+        <result property="apiKey" column="api_key"/>
+        <result property="baseUrl" column="base_url"/>
+        <result property="modelName" column="model_name"/>
+        <result property="isDefault" column="is_default"/>
+        <result property="createdAt" column="created_at"/>
+    </resultMap>
+    <select id="selectAll" resultMap="ModelResultMap">
+        SELECT * FROM ai_models ORDER BY is_default DESC, id ASC
+    </select>
+    <select id="selectByKey" resultMap="ModelResultMap">
+        SELECT * FROM ai_models WHERE model_key = #{modelKey}
+    </select>
+    <insert id="insert" useGeneratedKeys="true" keyProperty="id">
+        INSERT INTO ai_models (model_key, label, api_key, base_url, model_name, is_default)
+        VALUES (#{modelKey}, #{label}, #{apiKey}, #{baseUrl}, #{modelName}, #{isDefault})
+    </insert>
+    <delete id="deleteByKey">
+        DELETE FROM ai_models WHERE model_key = #{modelKey}
+    </delete>
+    <update id="clearDefault">
+        UPDATE ai_models SET is_default = false
+    </update>
+    <update id="setDefault">
+        UPDATE ai_models SET is_default = true WHERE model_key = #{modelKey}
+    </update>
+</mapper>
