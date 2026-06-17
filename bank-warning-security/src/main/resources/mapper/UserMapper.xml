@@ -1,0 +1,50 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN" "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="com.yangtze.bankwarning.security.mapper.UserMapper">
+
+    <resultMap id="UserResultMap" type="com.yangtze.bankwarning.security.domain.po.UserPO">
+        <id column="id" property="id"/>
+        <result column="username" property="username"/>
+        <result column="password" property="password"/>
+        <result column="phone" property="phone"/>
+        <result column="email" property="email"/>
+        <result column="real_name" property="realName"/>
+        <result column="avatar" property="avatar"/>
+        <result column="role" property="role"/>
+        <result column="status" property="status"/>
+        <result column="created_at" property="createdAt"/>
+        <result column="updated_at" property="updatedAt"/>
+        <result column="deleted_at" property="deletedAt"/>
+    </resultMap>
+
+    <select id="findByUsername" resultMap="UserResultMap">
+        SELECT * FROM users WHERE username = #{username} AND deleted_at IS NULL
+    </select>
+
+    <select id="findByPhone" resultMap="UserResultMap">
+        SELECT * FROM users WHERE phone = #{phone} AND deleted_at IS NULL
+    </select>
+
+    <select id="findById" resultMap="UserResultMap">
+        SELECT * FROM users WHERE id = #{id} AND deleted_at IS NULL
+    </select>
+
+    <insert id="insert" useGeneratedKeys="true" keyProperty="id">
+        INSERT INTO users (username, password, phone, email, real_name, avatar, role, status, created_at, updated_at)
+        VALUES (#{username}, #{password}, #{phone}, #{email}, #{realName}, #{avatar}, #{role}, #{status}, NOW(), NOW())
+    </insert>
+
+    <update id="update">
+        UPDATE users
+        SET phone = #{phone}, email = #{email}, real_name = #{realName}, avatar = #{avatar}, updated_at = NOW()
+        WHERE id = #{id} AND deleted_at IS NULL
+    </update>
+
+    <update id="updateStatus">
+        UPDATE users SET status = #{status}, updated_at = NOW() WHERE id = #{id} AND deleted_at IS NULL
+    </update>
+
+    <update id="updateRole">
+        UPDATE users SET role = #{role}, updated_at = NOW() WHERE id = #{id} AND deleted_at IS NULL
+    </update>
+</mapper>
