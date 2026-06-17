@@ -136,3 +136,18 @@ mybatis:
   configuration:
     map-underscore-to-camel-case: true
     log-impl: org.apache.ibatis.logging.slf4j.Slf4jImpl
+
+# 安全配置
+security:
+  jwt:
+    secret: ${JWT_SECRET:your-256-bit-secret-key-here-must-be-at-least-32-bytes-long}
+    expiration: 86400000  # 24小时
+    refreshExpiration: 604800000  # 7天
+  
+  sms:
+    enabled: ${SMS_ENABLED:false}
+    provider: ${SMS_PROVIDER:aliyun}
+    access-key: ${SMS_ACCESS_KEY:}
+    access-secret: ${SMS_ACCESS_SECRET:}
+    sign-name: ${SMS_SIGN_NAME:长江崩岸预警系统}
+    template-code: ${SMS_TEMPLATE_CODE:}
