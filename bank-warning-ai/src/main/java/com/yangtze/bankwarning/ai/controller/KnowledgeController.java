@@ -1,8 +1,8 @@
 package com.yangtze.bankwarning.ai.controller;
 
+import com.yangtze.bankwarning.ai.service.KnowledgeService;
 import com.yangtze.bankwarning.ai.service.PdfService;
 import io.agentscope.core.message.TextBlock;
-import io.agentscope.core.rag.Knowledge;
 import io.agentscope.core.rag.model.Document;
 import io.agentscope.core.rag.model.DocumentMetadata;
 import io.agentscope.core.rag.model.RetrieveConfig;
@@ -19,17 +19,18 @@ import java.util.stream.Collectors;
 
 @RestController
 @RequestMapping("/v0/bank/ai")
+@SuppressWarnings({"deprecation", "removal"})
 public class KnowledgeController {
 
     private static final Logger log = LoggerFactory.getLogger(KnowledgeController.class);
-    private final Knowledge knowledge;
+    private final KnowledgeService knowledgeService;
     private final PdfService pdfService;
     private final JdbcTemplate jdbcTemplate;
 
     private static final int MAX_CHUNK_SIZE = 500;
 
-    public KnowledgeController(Knowledge knowledge, PdfService pdfService, JdbcTemplate jdbcTemplate) {
-        this.knowledge = knowledge;
+    public KnowledgeController(KnowledgeService knowledgeService, PdfService pdfService, JdbcTemplate jdbcTemplate) {
+        this.knowledgeService = knowledgeService;
         this.pdfService = pdfService;
         this.jdbcTemplate = jdbcTemplate;
     }
@@ -44,11 +45,12 @@ public class KnowledgeController {
         DocumentMetadata metadata = DocumentMetadata.builder()
                 .content(TextBlock.builder().text(content).build())
                 .docId(title)
+                .chunkId(title + "_chunk_0")
                 .addPayload("type", type)
                 .build();
 
         Document doc = new Document(metadata);
-        knowledge.addDocuments(List.of(doc)).block();
+        knowledgeService.addDocuments(List.of(doc)).block();
         return Map.of("success", true, "docId", title);
     }
 
@@ -57,29 +59,46 @@ public class KnowledgeController {
             @RequestParam("file") MultipartFile file,
             @RequestParam(name = "type", defaultValue = "文档") String type,
             @RequestParam(name = "title", required = false) String title) {
-        log.info("[api] upload pdf, fileName={}, size={}, type={}", file.getOriginalFilename(), file.getSize(), type);
+        log.info("[api] upload knowledge file, fileName={}, size={}, type={}", file.getOriginalFilename(), file.getSize(), type);
 
         if (file.isEmpty()) {
             return Map.of("success", false, "error", "上传文件为空");
         }
         String fileName = file.getOriginalFilename();
-        if (fileName == null || !fileName.toLowerCase().endsWith(".pdf")) {
-            return Map.of("success", false, "error", "仅支持 PDF 文件");
+        if (fileName == null) {
+            return Map.of("success", false, "error", "文件名无效");
         }
+
+        String lowerName = fileName.toLowerCase();
+        String skillName;
+        String scriptName;
+        String suffix;
+        if (lowerName.endsWith(".pdf")) {
+            skillName = "pdf";
+            scriptName = "extract_text.py";
+            suffix = ".pdf";
+        } else if (lowerName.endsWith(".docx")) {
+            skillName = "word";
+            scriptName = "extract_text_docx.py";
+            suffix = ".docx";
+        } else {
+            return Map.of("success", false, "error", "仅支持 PDF 和 DOCX 文件");
+        }
+
         String docTitle = (title != null && !title.isBlank()) ? title : fileName;
 
         Path tempFile = null;
         try {
-            tempFile = Files.createTempFile("knowledge-", ".pdf");
+            tempFile = Files.createTempFile("knowledge-", suffix);
             file.transferTo(tempFile.toFile());
 
-            Map<String, Object> result = pdfService.processPdf("pdf", "extract_text.py", tempFile.toString());
+            Map<String, Object> result = pdfService.processPdf(skillName, scriptName, tempFile.toString());
             if (!Boolean.TRUE.equals(result.get("success"))) {
                 return result;
             }
             String text = (String) result.get("content");
             if (text == null || text.isBlank()) {
-                return Map.of("success", false, "error", "PDF 中未提取到文本内容（可能是扫描件，暂不支持 OCR）");
+                return Map.of("success", false, "error", "文件中未提取到文本内容");
             }
 
             List<String> chunks = chunkText(text);
@@ -88,6 +107,7 @@ public class KnowledgeController {
                 DocumentMetadata metadata = DocumentMetadata.builder()
                         .content(TextBlock.builder().text(chunks.get(i)).build())
                         .docId(docTitle)
+                        .chunkId(docTitle + "_chunk_" + i)
                         .addPayload("type", type)
                         .addPayload("chunkIndex", String.valueOf(i))
                         .addPayload("fileName", fileName)
@@ -96,8 +116,8 @@ public class KnowledgeController {
                 docs.add(new Document(metadata));
             }
 
-            knowledge.addDocuments(docs).block();
-            log.info("[api] pdf imported, title={}, chunks={}", docTitle, chunks.size());
+            knowledgeService.addDocuments(docs).block();
+            log.info("[api] knowledge imported, title={}, chunks={}, file={}", docTitle, chunks.size(), fileName);
 
             return Map.of("success", true, "docId", docTitle, "chunks", chunks.size(), "type", type);
 
@@ -186,7 +206,7 @@ public class KnowledgeController {
                 .limit(topK)
                 .scoreThreshold(0.4)
                 .build();
-        List<Document> results = knowledge.retrieve(query, config).block();
+        List<Document> results = knowledgeService.retrieve(query, config).block();
         if (results == null) return List.of();
         return results.stream().map(doc -> Map.<String, Object>of(
                 "content", doc.getMetadata().getContent().toString(),

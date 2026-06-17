@@ -50,9 +50,13 @@ public class PdfService {
         }
 
         try{
+            Path skillDir = Paths.get(cacheDir, skillName);
             List<String> cmd = new ArrayList<>();
             cmd.add("uv");
             cmd.add("run");
+            cmd.add("--quiet");
+            cmd.add("--project");
+            cmd.add(skillDir.toString());
             cmd.add("python");
             cmd.add(scriptFile.getAbsolutePath());
             cmd.add(filePath);
@@ -60,24 +64,39 @@ public class PdfService {
             log.info("[pdf] executing: {}", String.join(" ", cmd));
 
             ProcessBuilder pb = new ProcessBuilder(cmd);
-            pb.redirectErrorStream(true);
+            pb.environment().put("PYTHONIOENCODING", "utf-8");
 
             Process process = pb.start();
-            String output = readOutput(process);
+            StringBuilder stdoutSb = new StringBuilder();
+            StringBuilder stderrSb = new StringBuilder();
+            Thread stdoutThread = new Thread(() -> {
+                try { readStreamInto(process.getInputStream(), stdoutSb); } catch (IOException ignored) {}
+            });
+            Thread stderrThread = new Thread(() -> {
+                try { readStreamInto(process.getErrorStream(), stderrSb); } catch (IOException ignored) {}
+            });
+            stdoutThread.start();
+            stderrThread.start();
             boolean completed = process.waitFor(timeoutSeconds, TimeUnit.SECONDS);
 
             if(!completed){
                 process.destroyForcibly();
                 return Map.of("success", false, "error", "脚本执行超时");
             }
+            stdoutThread.join(5000);
+            stderrThread.join(5000);
 
-            log.info("[pdf] exit code: {}, output length: {}", process.exitValue(), output.length());
+            String stdout = stdoutSb.toString().trim();
+            String stderr = stderrSb.toString().trim();
+
+            log.info("[pdf] exit code: {}, stdout length: {}, stderr length: {}",
+                    process.exitValue(), stdout.length(), stderr.length());
 
             if (process.exitValue() != 0) {
-                return Map.of("success", false, "error", "脚本执行失败: " + output);
+                return Map.of("success", false, "error", "脚本执行失败: " + stderr);
             }
 
-            return Map.of("success", true, "content", output);
+            return Map.of("success", true, "content", stdout);
 
         } catch (Exception e) {
             log.error("[pdf] execute failed", e);
@@ -108,15 +127,13 @@ public class PdfService {
         return null;
     }
 
-    private String readOutput(Process process) throws IOException {
-        StringBuilder sb = new StringBuilder();
+    private void readStreamInto(java.io.InputStream is, StringBuilder sb) throws IOException {
         try (BufferedReader reader = new BufferedReader(
-                new InputStreamReader(process.getInputStream(), StandardCharsets.UTF_8))) {
+                new InputStreamReader(is, StandardCharsets.UTF_8))) {
             String line;
             while ((line = reader.readLine()) != null) {
                 sb.append(line).append("\n");
             }
         }
-        return sb.toString().trim();
     }
 }

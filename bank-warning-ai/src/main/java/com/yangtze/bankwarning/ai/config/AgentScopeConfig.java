@@ -3,6 +3,7 @@ package com.yangtze.bankwarning.ai.config;
 import com.fasterxml.jackson.core.JsonParser;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.yangtze.bankwarning.ai.middleware.ReasoningTraceMiddleware;
+import com.yangtze.bankwarning.ai.service.KnowledgeService;
 import com.yangtze.bankwarning.ai.service.PdfService;
 import com.yangtze.bankwarning.ai.service.VisualizationService;
 import com.yangtze.bankwarning.ai.service.WeatherService;
@@ -18,9 +19,7 @@ import io.agentscope.core.embedding.EmbeddingModel;
 import io.agentscope.core.embedding.dashscope.DashScopeTextEmbedding;
 import io.agentscope.core.model.Model;
 import io.agentscope.core.model.OpenAIChatModel;
-import io.agentscope.core.rag.Knowledge;
 import io.agentscope.core.rag.exception.VectorStoreException;
-import io.agentscope.core.rag.knowledge.SimpleKnowledge;
 import io.agentscope.core.rag.store.PgVectorStore;
 import io.agentscope.core.rag.store.VDBStoreBase;
 import io.agentscope.core.skill.AgentSkill;
@@ -68,9 +67,12 @@ public class AgentScopeConfig {
 
     @Bean
     public EmbeddingModel embeddingModel(
-            @Value("${agentscope.dashscope.api-key:${DASHSCOPE_API_KEY:}}") String apiKey,
+            @Value("${agentscope.dashscope.api-key:}") String apiKey,
             @Value("${agentscope.dashscope.embedding-model-name:text-embedding-v3}") String modelName,
             @Value("${agentscope.dashscope.embedding-dimensions:1024}") int dimensions) {
+        log.info("[config] DashScope apiKey={}, modelName={}, dimensions={}",
+                apiKey != null ? apiKey.substring(0, Math.min(8, apiKey.length())) + "..." : "null",
+                modelName, dimensions);
         return DashScopeTextEmbedding.builder()
                 .apiKey(apiKey)
                 .modelName(modelName)
@@ -102,14 +104,6 @@ public class AgentScopeConfig {
     }
 
     @Bean
-    public Knowledge knowledge(EmbeddingModel embeddingModel, VDBStoreBase vectorStore) {
-        return SimpleKnowledge.builder()
-                .embeddingModel(embeddingModel)
-                .embeddingStore(vectorStore)
-                .build();
-    }
-
-    @Bean
     public ObjectMapper objectMapper() {
         ObjectMapper mapper = new ObjectMapper();
         mapper.configure(JsonParser.Feature.ALLOW_NON_NUMERIC_NUMBERS, true);
@@ -137,8 +131,8 @@ public class AgentScopeConfig {
     }
 
     @Bean
-    public KnowledgeQueryTool knowledgeQueryTool(Knowledge knowledge) {
-        return new KnowledgeQueryTool(knowledge);
+    public KnowledgeQueryTool knowledgeQueryTool(KnowledgeService knowledgeService) {
+        return new KnowledgeQueryTool(knowledgeService);
     }
 
     @Bean
