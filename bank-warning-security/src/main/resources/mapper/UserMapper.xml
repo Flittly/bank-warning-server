@@ -29,6 +29,10 @@
         SELECT * FROM users WHERE id = #{id} AND deleted_at IS NULL
     </select>
 
+    <select id="findAll" resultMap="UserResultMap">
+        SELECT * FROM users WHERE deleted_at IS NULL ORDER BY created_at DESC
+    </select>
+
     <insert id="insert" useGeneratedKeys="true" keyProperty="id">
         INSERT INTO users (username, password, phone, email, real_name, avatar, role, status, created_at, updated_at)
         VALUES (#{username}, #{password}, #{phone}, #{email}, #{realName}, #{avatar}, #{role}, #{status}, NOW(), NOW())

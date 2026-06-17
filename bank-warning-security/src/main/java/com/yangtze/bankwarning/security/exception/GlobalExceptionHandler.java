@@ -3,11 +3,14 @@ package com.yangtze.bankwarning.security.exception;
 import com.yangtze.bankwarning.security.exception.business.InvalidCredentialsException;
 import com.yangtze.bankwarning.security.exception.business.UserNotFoundException;
 import org.springframework.http.ResponseEntity;
+import org.springframework.validation.FieldError;
+import org.springframework.web.bind.MethodArgumentNotValidException;
 import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.RestControllerAdvice;
 
 import java.util.HashMap;
 import java.util.Map;
+import java.util.stream.Collectors;
 
 @RestControllerAdvice
 public class GlobalExceptionHandler {
@@ -26,6 +29,19 @@ public class GlobalExceptionHandler {
         error.put("code", "INVALID_CREDENTIALS");
         error.put("message", e.getMessage());
         return ResponseEntity.status(401).body(error);
+    }
+
+    @ExceptionHandler(MethodArgumentNotValidException.class)
+    public ResponseEntity<Map<String, String>> handleValidationExceptions(MethodArgumentNotValidException e) {
+        Map<String, String> error = new HashMap<>();
+        error.put("code", "VALIDATION_ERROR");
+        
+        String errorMessage = e.getBindingResult().getFieldErrors().stream()
+                .map(FieldError::getDefaultMessage)
+                .collect(Collectors.joining(", "));
+        error.put("message", errorMessage);
+        
+        return ResponseEntity.status(400).body(error);
     }
 
     @ExceptionHandler(Exception.class)

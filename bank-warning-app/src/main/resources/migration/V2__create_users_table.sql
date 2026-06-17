@@ -33,7 +33,6 @@ CREATE INDEX idx_users_status ON users(status);
 CREATE INDEX idx_user_login_logs_user_id ON user_login_logs(user_id);
 CREATE INDEX idx_user_login_logs_login_time ON user_login_logs(login_time);
 
--- 插入默认管理员用户（密码：admin123）
-INSERT INTO users (username, password, phone, email, real_name, role, status)
-VALUES ('admin', '$2a$10$N.zmdr9k7uOCQb376NoUnuTJ8iAt6Z5EHsM8lE9lBOsl7iAt6Z5EH', '13800138000', 'admin@yangtze.com', '系统管理员', 'ADMIN', 'ACTIVE')
-ON CONFLICT (username) DO NOTHING;
+-- 注意：默认管理员用户由应用启动时通过代码创建
+-- 不在迁移脚本中插入，避免密码明文暴露在代码库中
+-- 首次启动时会自动创建默认管理员用户（admin/admin123）

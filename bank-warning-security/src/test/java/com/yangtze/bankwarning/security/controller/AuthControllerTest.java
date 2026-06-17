@@ -102,10 +102,19 @@ class AuthControllerTest {
                 Collections.singletonList(new SimpleGrantedAuthority("ROLE_USER")));
         SecurityContextHolder.getContext().setAuthentication(auth);
 
+        UserResponse userResponse = new UserResponse();
+        userResponse.setId(1L);
+        userResponse.setUsername("testuser");
+        userResponse.setPhone("13800138000");
+        userResponse.setRole("USER");
+
+        when(authService.getUserInfoByUsername("testuser")).thenReturn(userResponse);
+
         ResponseEntity<UserResponse> response = authController.getUserInfo();
 
         assertNotNull(response);
         assertEquals(200, response.getStatusCode().value());
         assertEquals("testuser", response.getBody().getUsername());
+        assertEquals("13800138000", response.getBody().getPhone());
     }
 }

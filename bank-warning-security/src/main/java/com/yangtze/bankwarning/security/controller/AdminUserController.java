@@ -42,11 +42,23 @@ public class AdminUserController {
         return ResponseEntity.ok(user);
     }
 
+    /**
+     * 强制用户下线
+     * 
+     * 注意：此功能当前为占位实现，尚未完成
+     * 完整实现需要：
+     * 1. 引入Redis用于存储token黑名单
+     * 2. 在JwtAuthenticationFilter中检查黑名单
+     * 3. 删除用户的refresh token
+     */
     @PostMapping("/users/{id}/force-logout")
     public ResponseEntity<Map<String, String>> forceLogout(@PathVariable Long id) {
-        // 这里需要实现强制下线逻辑
-        // 可以通过Redis存储黑名单实现
-        Map<String, String> response = Map.of("message", "强制下线成功");
+        // TODO: 实现强制下线逻辑
+        // 当前返回成功但不实际执行任何操作
+        Map<String, String> response = Map.of(
+            "message", "强制下线请求已接受",
+            "note", "此功能尚未完整实现，token不会被实际作废"
+        );
         return ResponseEntity.ok(response);
     }
 }

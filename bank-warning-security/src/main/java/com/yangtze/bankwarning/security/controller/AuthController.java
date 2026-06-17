@@ -60,10 +60,12 @@ public class AuthController {
     public ResponseEntity<UserResponse> getUserInfo() {
         Authentication authentication = SecurityContextHolder.getContext().getAuthentication();
         String username = authentication.getName();
-
-        UserResponse user = new UserResponse();
-        user.setUsername(username);
-
+        
+        // 从数据库获取完整用户信息
+        // 注意：这里需要从UserDetails中获取用户ID，简化处理
+        // 实际项目中应该在UserDetails中存储用户ID
+        UserResponse user = authService.getUserInfoByUsername(username);
+        
         return ResponseEntity.ok(user);
     }
 }

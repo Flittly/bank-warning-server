@@ -140,7 +140,10 @@ mybatis:
 # 安全配置
 security:
   jwt:
-    secret: ${JWT_SECRET:your-256-bit-secret-key-here-must-be-at-least-32-bytes-long}
+    # 【重要】生产环境必须通过环境变量 JWT_SECRET 设置真实密钥
+    # 密钥长度至少32字节（256位），建议使用随机生成的密钥
+    # 生成密钥命令：openssl rand -base64 32
+    secret: ${JWT_SECRET:}
     expiration: 86400000  # 24小时
     refreshExpiration: 604800000  # 7天
   
@@ -151,3 +154,8 @@ security:
     access-secret: ${SMS_ACCESS_SECRET:}
     sign-name: ${SMS_SIGN_NAME:长江崩岸预警系统}
     template-code: ${SMS_TEMPLATE_CODE:}
+
+# CORS配置
+app:
+  cors:
+    allowed-origins: ${CORS_ALLOWED_ORIGINS:http://localhost:5173}

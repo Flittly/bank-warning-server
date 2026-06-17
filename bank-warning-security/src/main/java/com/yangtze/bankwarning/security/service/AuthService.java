@@ -69,6 +69,14 @@ public class AuthService {
         return convertToResponse(user);
     }
 
+    public UserResponse getUserInfoByUsername(String username) {
+        UserPO user = userMapper.findByUsername(username);
+        if (user == null) {
+            throw new UserNotFoundException("用户不存在");
+        }
+        return convertToResponse(user);
+    }
+
     public UserResponse updateUserInfo(Long userId, UserResponse userInfo) {
         UserPO user = userMapper.findById(userId);
         if (user == null) {

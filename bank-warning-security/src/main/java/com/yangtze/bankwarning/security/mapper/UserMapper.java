@@ -4,6 +4,8 @@ import com.yangtze.bankwarning.security.domain.po.UserPO;
 import org.apache.ibatis.annotations.Mapper;
 import org.apache.ibatis.annotations.Param;
 
+import java.util.List;
+
 @Mapper
 public interface UserMapper {
     
@@ -12,6 +14,8 @@ public interface UserMapper {
     UserPO findByPhone(@Param("phone") String phone);
     
     UserPO findById(@Param("id") Long id);
+    
+    List<UserPO> findAll();
     
     int insert(UserPO user);
     
