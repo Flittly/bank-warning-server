@@ -11,15 +11,16 @@ public interface RiskResultMapper {
 
     List<RiskResultPO> selectByTaskIdAndBankIdAndRegionCode(@Param("taskId") String taskId,
                                                             @Param("bankId") String bankId,
-                                                            @Param("regionCode") String regionCode);
+                                                            @Param("regionCode") String regionCode,
+                                                            @Param("userId") Long userId);
 
-    RiskResultPO selectLatestBySectionId(@Param("sectionId") String sectionId);
+    RiskResultPO selectLatestBySectionId(@Param("sectionId") String sectionId, @Param("userId") Long userId);
 
     int insert(RiskResultPO result);
 
-    int countByTaskId(@Param("taskId") String taskId);
+    int countByTaskId(@Param("taskId") String taskId, @Param("userId") Long userId);
 
-    int deleteByTaskId(@Param("taskId") String taskId);
+    int deleteByTaskId(@Param("taskId") String taskId, @Param("userId") Long userId);
 
-    boolean existsByRunIdAndSectionId(@Param("runId") String runId, @Param("sectionId") String sectionId);
+    boolean existsByRunIdAndSectionId(@Param("runId") String runId, @Param("sectionId") String sectionId, @Param("userId") Long userId);
 }

@@ -7,6 +7,7 @@ import com.yangtze.bankwarning.domain.dto.SectionPayload;
 import com.yangtze.bankwarning.domain.dto.TaskPayload;
 import com.yangtze.bankwarning.mapper.*;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.yangtze.bankwarning.security.security.SecurityUtils;
 import org.springframework.stereotype.Service;
 
 import java.util.LinkedHashMap;
@@ -43,25 +44,29 @@ public class BusinessStoreService {
     // ==================== Bank ====================
 
     public Map<String, Object> saveBank(BankPayload payload, boolean overwrite) {
+        Long userId = SecurityUtils.getCurrentUserIdForDataFilter();
         if (overwrite) {
-            BankPO existing = bankMapper.selectByBankId(payload.bankId());
+            BankPO existing = bankMapper.selectByBankId(payload.bankId(), userId);
             if (existing != null) {
                 BankPO po = toBankPO(payload);
                 bankMapper.update(po);
-                return toMap(bankMapper.selectByBankId(payload.bankId()));
+                return toMap(bankMapper.selectByBankId(payload.bankId(), userId));
             }
         }
         BankPO po = toBankPO(payload);
+        po.setUserId(SecurityUtils.getCurrentUserId());
         bankMapper.insert(po);
-        return toMap(bankMapper.selectByBankId(payload.bankId()));
+        return toMap(bankMapper.selectByBankId(payload.bankId(), userId));
     }
 
     public List<Map<String, Object>> listBanks(String regionCode) {
-        return bankMapper.selectAll(regionCode).stream().map(this::toMap).collect(Collectors.toList());
+        Long userId = SecurityUtils.getCurrentUserIdForDataFilter();
+        return bankMapper.selectAll(regionCode, userId).stream().map(this::toMap).collect(Collectors.toList());
     }
 
     public Map<String, Object> getBank(String bankId) {
-        BankPO po = bankMapper.selectByBankId(bankId);
+        Long userId = SecurityUtils.getCurrentUserIdForDataFilter();
+        BankPO po = bankMapper.selectByBankId(bankId, userId);
         if (po == null) {
             throw new IllegalArgumentException("Bank not found: " + bankId);
         }
@@ -69,6 +74,7 @@ public class BusinessStoreService {
     }
 
     public void updateBank(String bankId, BankPayload payload) {
+        Long userId = SecurityUtils.getCurrentUserIdForDataFilter();
         getBank(bankId);
         BankPO po = toBankPO(payload);
         po.setBankId(bankId);
@@ -76,7 +82,8 @@ public class BusinessStoreService {
     }
 
     public void deleteBank(String bankId) {
-        if (bankMapper.deleteByBankId(bankId) == 0) {
+        Long userId = SecurityUtils.getCurrentUserIdForDataFilter();
+        if (bankMapper.deleteByBankId(bankId, userId) == 0) {
             throw new IllegalArgumentException("Bank not found: " + bankId);
         }
     }
@@ -84,25 +91,29 @@ public class BusinessStoreService {
     // ==================== Task ====================
 
     public Map<String, Object> saveTask(TaskPayload payload, boolean overwrite) {
+        Long userId = SecurityUtils.getCurrentUserIdForDataFilter();
         if (overwrite) {
-            TaskPO existing = taskMapper.selectByTaskId(payload.taskId());
+            TaskPO existing = taskMapper.selectByTaskId(payload.taskId(), userId);
             if (existing != null) {
                 TaskPO po = toTaskPO(payload);
                 taskMapper.update(po);
-                return toMap(taskMapper.selectByTaskId(payload.taskId()));
+                return toMap(taskMapper.selectByTaskId(payload.taskId(), userId));
             }
         }
         TaskPO po = toTaskPO(payload);
+        po.setUserId(SecurityUtils.getCurrentUserId());
         taskMapper.insert(po);
-        return toMap(taskMapper.selectByTaskId(payload.taskId()));
+        return toMap(taskMapper.selectByTaskId(payload.taskId(), userId));
     }
 
     public List<Map<String, Object>> listTasks() {
-        return taskMapper.selectAll().stream().map(this::toMap).collect(Collectors.toList());
+        Long userId = SecurityUtils.getCurrentUserIdForDataFilter();
+        return taskMapper.selectAll(userId).stream().map(this::toMap).collect(Collectors.toList());
     }
 
     public Map<String, Object> getTask(String taskId) {
-        TaskPO po = taskMapper.selectByTaskId(taskId);
+        Long userId = SecurityUtils.getCurrentUserIdForDataFilter();
+        TaskPO po = taskMapper.selectByTaskId(taskId, userId);
         if (po == null) {
             throw new IllegalArgumentException("Task not found: " + taskId);
         }
@@ -110,28 +121,34 @@ public class BusinessStoreService {
     }
 
     public void updateTaskStatus(String taskId, String status, String runStartedAt, String runCompletedAt, String errorMessage) {
+        Long userId = SecurityUtils.getCurrentUserIdForDataFilter();
         getTask(taskId);
-        taskMapper.updateStatus(taskId, status, runStartedAt, runCompletedAt, errorMessage);
+        taskMapper.updateStatus(taskId, status, runStartedAt, runCompletedAt, errorMessage, userId);
     }
 
     public void markTaskRunning(String taskId) {
-        taskMapper.markRunning(taskId);
+        Long userId = SecurityUtils.getCurrentUserIdForDataFilter();
+        taskMapper.markRunning(taskId, userId);
     }
 
     public void markTaskCompleted(String taskId) {
-        taskMapper.markCompleted(taskId);
+        Long userId = SecurityUtils.getCurrentUserIdForDataFilter();
+        taskMapper.markCompleted(taskId, userId);
     }
 
     public void markTaskError(String taskId, String errorMessage) {
-        taskMapper.markError(taskId, errorMessage);
+        Long userId = SecurityUtils.getCurrentUserIdForDataFilter();
+        taskMapper.markError(taskId, errorMessage, userId);
     }
 
     public void markTaskPartialFailed(String taskId, String errorMessage) {
-        taskMapper.markPartialFailed(taskId, errorMessage);
+        Long userId = SecurityUtils.getCurrentUserIdForDataFilter();
+        taskMapper.markPartialFailed(taskId, errorMessage, userId);
     }
 
     public void deleteTask(String taskId) {
-        if (taskMapper.deleteByTaskId(taskId) == 0) {
+        Long userId = SecurityUtils.getCurrentUserIdForDataFilter();
+        if (taskMapper.deleteByTaskId(taskId, userId) == 0) {
             throw new IllegalArgumentException("Task not found: " + taskId);
         }
     }
@@ -139,25 +156,29 @@ public class BusinessStoreService {
     // ==================== BasicParam ====================
 
     public Map<String, Object> saveBasicParam(BasicParamPayload payload, boolean overwrite) {
+        Long userId = SecurityUtils.getCurrentUserIdForDataFilter();
         if (overwrite) {
-            BasicParamPO existing = basicParamMapper.selectByParamId(payload.paramId());
+            BasicParamPO existing = basicParamMapper.selectByParamId(payload.paramId(), userId);
             if (existing != null) {
                 BasicParamPO po = toBasicParamPO(payload);
                 basicParamMapper.update(po);
-                return toMap(basicParamMapper.selectByParamId(payload.paramId()));
+                return toMap(basicParamMapper.selectByParamId(payload.paramId(), userId));
             }
         }
         BasicParamPO po = toBasicParamPO(payload);
+        po.setUserId(SecurityUtils.getCurrentUserId());
         basicParamMapper.insert(po);
-        return toMap(basicParamMapper.selectByParamId(payload.paramId()));
+        return toMap(basicParamMapper.selectByParamId(payload.paramId(), userId));
     }
 
     public List<Map<String, Object>> listBasicParams() {
-        return basicParamMapper.selectAll().stream().map(this::toMap).collect(Collectors.toList());
+        Long userId = SecurityUtils.getCurrentUserIdForDataFilter();
+        return basicParamMapper.selectAll(userId).stream().map(this::toMap).collect(Collectors.toList());
     }
 
     public Map<String, Object> getBasicParam(String paramId) {
-        BasicParamPO po = basicParamMapper.selectByParamId(paramId);
+        Long userId = SecurityUtils.getCurrentUserIdForDataFilter();
+        BasicParamPO po = basicParamMapper.selectByParamId(paramId, userId);
         if (po == null) {
             throw new IllegalArgumentException("Basic parameter not found: " + paramId);
         }
@@ -165,6 +186,7 @@ public class BusinessStoreService {
     }
 
     public void updateBasicParam(String paramId, BasicParamPayload payload) {
+        Long userId = SecurityUtils.getCurrentUserIdForDataFilter();
         getBasicParam(paramId);
         BasicParamPO po = toBasicParamPO(payload);
         po.setParamId(paramId);
@@ -174,7 +196,8 @@ public class BusinessStoreService {
     // ==================== Section ====================
 
     public Map<String, Object> saveSection(String taskId, SectionPayload payload, boolean inheritFromBasicParam, boolean overwrite) {
-        if (overwrite && sectionMapper.existsBySectionId(payload.sectionId())) {
+        Long userId = SecurityUtils.getCurrentUserIdForDataFilter();
+        if (overwrite && sectionMapper.existsBySectionId(payload.sectionId(), userId)) {
             updateSection(payload.sectionId(), payload);
             return getSection(payload.sectionId());
         }
@@ -182,21 +205,24 @@ public class BusinessStoreService {
         String taskCode = getTaskCode(taskId);
         Integer basicParamId = payload.basicParamId();
         Map<String, Object> baseParams = inheritFromBasicParam && basicParamId != null
-                ? toMap(basicParamMapper.selectById(basicParamId))
+                ? toMap(basicParamMapper.selectById(basicParamId, userId))
                 : new LinkedHashMap<>();
         Map<String, Object> merged = mergeSectionParams(baseParams, payload);
         SectionPO po = toSectionPO(taskCode, basicParamId, merged, payload);
+        po.setUserId(SecurityUtils.getCurrentUserId());
         sectionMapper.insert(po);
-        return toMap(sectionMapper.selectBySectionId(payload.sectionId()));
+        return toMap(sectionMapper.selectBySectionId(payload.sectionId(), userId));
     }
 
     public List<Map<String, Object>> listSections(String taskId, String bankId) {
+        Long userId = SecurityUtils.getCurrentUserIdForDataFilter();
         String taskCode = taskId == null ? null : getTaskCode(taskId);
-        return sectionMapper.selectByTaskIdAndBankId(taskCode, bankId).stream().map(this::toMap).collect(Collectors.toList());
+        return sectionMapper.selectByTaskIdAndBankId(taskCode, bankId, userId).stream().map(this::toMap).collect(Collectors.toList());
     }
 
     public Map<String, Object> getSection(String sectionId) {
-        SectionPO po = sectionMapper.selectBySectionId(sectionId);
+        Long userId = SecurityUtils.getCurrentUserIdForDataFilter();
+        SectionPO po = sectionMapper.selectBySectionId(sectionId, userId);
         if (po == null) {
             throw new IllegalArgumentException("Section not found: " + sectionId);
         }
@@ -204,6 +230,7 @@ public class BusinessStoreService {
     }
 
     public void updateSection(String sectionId, SectionPayload payload) {
+        Long userId = SecurityUtils.getCurrentUserIdForDataFilter();
         getSection(sectionId);
         SectionPO po = toSectionPO(null, null, null, payload);
         po.setSectionId(sectionId);
@@ -211,7 +238,8 @@ public class BusinessStoreService {
     }
 
     public void deleteSection(String sectionId) {
-        if (sectionMapper.deleteBySectionId(sectionId) == 0) {
+        Long userId = SecurityUtils.getCurrentUserIdForDataFilter();
+        if (sectionMapper.deleteBySectionId(sectionId, userId) == 0) {
             throw new IllegalArgumentException("Section not found: " + sectionId);
         }
     }
@@ -223,30 +251,34 @@ public class BusinessStoreService {
     }
 
     public Map<String, Integer> clearTaskData(String taskId) {
+        Long userId = SecurityUtils.getCurrentUserIdForDataFilter();
         String taskCode = getTaskCode(taskId);
-        int resultCount = riskResultMapper.countByTaskId(taskCode);
-        int sectionCount = sectionMapper.countByTaskId(taskCode);
-        riskResultMapper.deleteByTaskId(taskCode);
-        sectionMapper.deleteByTaskId(taskCode);
+        int resultCount = riskResultMapper.countByTaskId(taskCode, userId);
+        int sectionCount = sectionMapper.countByTaskId(taskCode, userId);
+        riskResultMapper.deleteByTaskId(taskCode, userId);
+        sectionMapper.deleteByTaskId(taskCode, userId);
         return Map.of("sections", sectionCount, "results", resultCount);
     }
 
     public void clearTaskResults(String taskId) {
+        Long userId = SecurityUtils.getCurrentUserIdForDataFilter();
         String taskCode = getTaskCode(taskId);
-        riskResultMapper.deleteByTaskId(taskCode);
-        sectionProfileMapper.deleteByTaskId(taskCode);
+        riskResultMapper.deleteByTaskId(taskCode, userId);
+        sectionProfileMapper.deleteByTaskId(taskCode, userId);
     }
 
     // ==================== RiskResult ====================
 
     public List<Map<String, Object>> listRiskResults(String taskId, String bankId, String regionCode) {
+        Long userId = SecurityUtils.getCurrentUserIdForDataFilter();
         String taskCode = taskId == null ? null : getTaskCode(taskId);
-        return riskResultMapper.selectByTaskIdAndBankIdAndRegionCode(taskCode, bankId, regionCode)
+        return riskResultMapper.selectByTaskIdAndBankIdAndRegionCode(taskCode, bankId, regionCode, userId)
                 .stream().map(this::toMap).collect(Collectors.toList());
     }
 
     public Map<String, Object> getRiskResultBySectionId(String sectionId) {
-        RiskResultPO po = riskResultMapper.selectLatestBySectionId(sectionId);
+        Long userId = SecurityUtils.getCurrentUserIdForDataFilter();
+        RiskResultPO po = riskResultMapper.selectLatestBySectionId(sectionId, userId);
         if (po == null) {
             throw new IllegalArgumentException("Risk result not found for section_id: " + sectionId);
         }
@@ -262,7 +294,9 @@ public class BusinessStoreService {
             Integer riskLevel,
             Map<String, Object> indicators,
             Map<String, Object> geometry) {
+        Long userId = SecurityUtils.getCurrentUserIdForDataFilter();
         RiskResultPO po = new RiskResultPO();
+        po.setUserId(SecurityUtils.getCurrentUserId());
         po.setTaskId(taskId);
         po.setSectionId(sectionId);
         po.setSectionName(sectionName);
@@ -279,11 +313,13 @@ public class BusinessStoreService {
             String sectionId,
             Integer riskLevel,
             Map<String, Object> indicators) {
-        if (riskResultMapper.existsByRunIdAndSectionId(runId, sectionId)) {
+        Long userId = SecurityUtils.getCurrentUserIdForDataFilter();
+        if (riskResultMapper.existsByRunIdAndSectionId(runId, sectionId, userId)) {
             return;
         }
         Map<String, Object> section = getSectionForResult(sectionId);
         RiskResultPO po = new RiskResultPO();
+        po.setUserId(SecurityUtils.getCurrentUserId());
         po.setRunId(runId);
         po.setTaskId(taskId);
         po.setSectionId(sectionId);
@@ -298,12 +334,14 @@ public class BusinessStoreService {
     // ==================== SectionProfile ====================
 
     public List<Map<String, Object>> listSectionProfiles(String taskId) {
-        return sectionProfileMapper.selectByTaskId(getTaskCode(taskId))
+        Long userId = SecurityUtils.getCurrentUserIdForDataFilter();
+        return sectionProfileMapper.selectByTaskId(getTaskCode(taskId), userId)
                 .stream().map(this::toMap).collect(Collectors.toList());
     }
 
     public Map<String, Object> getSectionProfile(String sectionId) {
-        SectionProfilePO po = sectionProfileMapper.selectLatestBySectionId(sectionId);
+        Long userId = SecurityUtils.getCurrentUserIdForDataFilter();
+        SectionProfilePO po = sectionProfileMapper.selectLatestBySectionId(sectionId, userId);
         if (po == null) {
             throw new IllegalArgumentException("Section profile not found for section_id: " + sectionId);
         }
@@ -324,7 +362,9 @@ public class BusinessStoreService {
             Integer pointCount,
             Map<String, Object> profileData,
             Map<String, Object> geometry) {
+        Long userId = SecurityUtils.getCurrentUserIdForDataFilter();
         SectionProfilePO po = new SectionProfilePO();
+        po.setUserId(SecurityUtils.getCurrentUserId());
         po.setTaskId(taskId);
         po.setSectionId(sectionId);
         po.setSectionName(sectionName);

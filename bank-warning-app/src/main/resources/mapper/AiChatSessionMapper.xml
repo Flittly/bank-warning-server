@@ -8,28 +8,29 @@
         <result property="title" column="title"/>
         <result property="createdAt" column="created_at"/>
         <result property="updatedAt" column="updated_at"/>
+        <result property="userId" column="user_id"/>
     </resultMap>
 
     <select id="selectAll" resultMap="SessionResultMap">
-        SELECT * FROM ai_chat_sessions ORDER BY updated_at DESC
+        SELECT * FROM ai_chat_sessions WHERE (user_id = #{userId} OR #{userId} IS NULL) ORDER BY updated_at DESC
     </select>
 
     <select id="selectBySessionId" resultMap="SessionResultMap">
-        SELECT * FROM ai_chat_sessions WHERE session_id = #{sessionId}
+        SELECT * FROM ai_chat_sessions WHERE session_id = #{sessionId} AND (user_id = #{userId} OR #{userId} IS NULL)
     </select>
 
     <insert id="insert" parameterType="com.yangtze.bankwarning.domain.po.AiChatSessionPO"
             useGeneratedKeys="true" keyProperty="id">
-        INSERT INTO ai_chat_sessions (session_id, title)
-        VALUES (#{sessionId}, #{title})
+        INSERT INTO ai_chat_sessions (session_id, title, user_id)
+        VALUES (#{sessionId}, #{title}, #{userId})
     </insert>
 
     <delete id="deleteBySessionId">
-        DELETE FROM ai_chat_sessions WHERE session_id = #{sessionId}
+        DELETE FROM ai_chat_sessions WHERE session_id = #{sessionId} AND (user_id = #{userId} OR #{userId} IS NULL)
     </delete>
 
     <update id="updateTitle">
         UPDATE ai_chat_sessions SET title = #{title}, updated_at = CURRENT_TIMESTAMP
-        WHERE session_id = #{sessionId}
+        WHERE session_id = #{sessionId} AND (user_id = #{userId} OR #{userId} IS NULL)
     </update>
 </mapper>

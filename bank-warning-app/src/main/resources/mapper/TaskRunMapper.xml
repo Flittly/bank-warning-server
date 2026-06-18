@@ -15,45 +15,46 @@
         <result property="startedAt" column="started_at"/>
         <result property="completedAt" column="completed_at"/>
         <result property="updatedAt" column="updated_at"/>
+        <result property="userId" column="user_id"/>
     </resultMap>
 
     <insert id="insert" parameterType="com.yangtze.bankwarning.domain.po.TaskRunPO" useGeneratedKeys="true" keyProperty="id">
-        INSERT INTO task_runs (run_id, task_id, status, expected_count, completed_count, failed_count)
-        VALUES (#{runId}, #{taskId}, 'submitted', #{expectedCount}, 0, 0)
+        INSERT INTO task_runs (run_id, task_id, status, expected_count, completed_count, failed_count, user_id)
+        VALUES (#{runId}, #{taskId}, 'submitted', #{expectedCount}, 0, 0, #{userId})
     </insert>
 
     <select id="selectByRunId" resultMap="TaskRunResultMap">
-        SELECT * FROM task_runs WHERE run_id = #{runId}
+        SELECT * FROM task_runs WHERE run_id = #{runId} AND (user_id = #{userId} OR #{userId} IS NULL)
     </select>
 
     <update id="markSubmittedToRunning">
         UPDATE task_runs SET status = 'running'
-        WHERE run_id = #{runId} AND status = 'submitted'
+        WHERE run_id = #{runId} AND status = 'submitted' AND (user_id = #{userId} OR #{userId} IS NULL)
     </update>
 
     <update id="incrementCompleted">
         UPDATE task_runs SET completed_count = completed_count + 1, status = 'running'
-        WHERE run_id = #{runId}
+        WHERE run_id = #{runId} AND (user_id = #{userId} OR #{userId} IS NULL)
     </update>
 
     <update id="incrementFailed">
         UPDATE task_runs SET failed_count = failed_count + 1, status = 'running', error_message = #{errorMessage}
-        WHERE run_id = #{runId}
+        WHERE run_id = #{runId} AND (user_id = #{userId} OR #{userId} IS NULL)
     </update>
 
     <update id="markCompleted">
         UPDATE task_runs SET status = 'completed', completed_at = CURRENT_TIMESTAMP
-        WHERE run_id = #{runId}
+        WHERE run_id = #{runId} AND (user_id = #{userId} OR #{userId} IS NULL)
     </update>
 
     <update id="markError">
         UPDATE task_runs SET status = 'error', completed_at = CURRENT_TIMESTAMP, error_message = #{errorMessage}
-        WHERE run_id = #{runId}
+        WHERE run_id = #{runId} AND (user_id = #{userId} OR #{userId} IS NULL)
     </update>
 
     <update id="markPartialFailed">
         UPDATE task_runs SET status = 'partial_failed', completed_at = CURRENT_TIMESTAMP, error_message = #{errorMessage}
-        WHERE run_id = #{runId}
+        WHERE run_id = #{runId} AND (user_id = #{userId} OR #{userId} IS NULL)
     </update>
 
 </mapper>

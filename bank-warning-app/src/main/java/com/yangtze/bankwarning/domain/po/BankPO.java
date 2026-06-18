@@ -7,6 +7,7 @@ import java.time.LocalDateTime;
 @Data
 public class BankPO {
     private Long id;
+    private Long userId;
     private String bankId;
     private String bankName;
     private String regionCode;

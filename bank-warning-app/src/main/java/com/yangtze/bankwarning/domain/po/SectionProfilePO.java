@@ -7,6 +7,7 @@ import java.time.LocalDateTime;
 @Data
 public class SectionProfilePO {
     private Long id;
+    private Long userId;
     private String taskId;
     private String sectionId;
     private String sectionName;

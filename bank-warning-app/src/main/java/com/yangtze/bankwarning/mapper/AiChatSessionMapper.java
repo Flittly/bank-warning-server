@@ -7,9 +7,9 @@ import java.util.List;
 
 @Mapper
 public interface AiChatSessionMapper {
-    List<AiChatSessionPO> selectAll();
-    AiChatSessionPO selectBySessionId(@Param("sessionId") String sessionId);
+    List<AiChatSessionPO> selectAll(@Param("userId") Long userId);
+    AiChatSessionPO selectBySessionId(@Param("sessionId") String sessionId, @Param("userId") Long userId);
     int insert(AiChatSessionPO po);
-    int deleteBySessionId(@Param("sessionId") String sessionId);
-    int updateTitle(@Param("sessionId") String sessionId, @Param("title") String title);
+    int deleteBySessionId(@Param("sessionId") String sessionId, @Param("userId") Long userId);
+    int updateTitle(@Param("sessionId") String sessionId, @Param("title") String title, @Param("userId") Long userId);
 }

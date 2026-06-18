@@ -7,6 +7,7 @@ import java.time.LocalDateTime;
 @Data
 public class BasicParamPO {
     private Long id;
+    private Long userId;
     private String paramId;
     private String paramName;
     private String segment;

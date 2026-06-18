@@ -7,6 +7,7 @@ import java.time.LocalDateTime;
 @Data
 public class TiffBoundsPO {
     private Long id;
+    private Long userId;
     private String tiffKey;
     private String regionCode;
     private String year;

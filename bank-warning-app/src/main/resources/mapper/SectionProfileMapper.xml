@@ -19,17 +19,18 @@
         <result property="createdAt" column="created_at"/>
         <result property="updatedAt" column="updated_at"/>
         <result property="deletedAt" column="deleted_at"/>
+        <result property="userId" column="user_id"/>
     </resultMap>
 
     <select id="selectByTaskId" resultMap="SectionProfileResultMap">
         SELECT * FROM section_profiles
-        WHERE task_id = #{taskId} AND deleted_at IS NULL
+        WHERE task_id = #{taskId} AND deleted_at IS NULL AND (user_id = #{userId} OR #{userId} IS NULL)
         ORDER BY id
     </select>
 
     <select id="selectLatestBySectionId" resultMap="SectionProfileResultMap">
         SELECT * FROM section_profiles
-        WHERE section_id = #{sectionId} AND deleted_at IS NULL
+        WHERE section_id = #{sectionId} AND deleted_at IS NULL AND (user_id = #{userId} OR #{userId} IS NULL)
         ORDER BY id DESC LIMIT 1
     </select>
 
@@ -37,11 +38,11 @@
         INSERT INTO section_profiles (
             task_id, section_id, section_name, region_code, bank_id, dem_id,
             source_case_id, interval, deepest_index, slope_foot_index, point_count,
-            profile_data
+            profile_data, user_id
         ) VALUES (
             #{taskId}, #{sectionId}, #{sectionName}, #{regionCode}, #{bankId}, #{demId},
             #{sourceCaseId}, #{interval}, #{deepestIndex}, #{slopeFootIndex}, #{pointCount},
-            #{profileData}::jsonb
+            #{profileData}::jsonb, #{userId}
         )
         ON CONFLICT (task_id, section_id) DO UPDATE SET
             section_name = EXCLUDED.section_name,
@@ -54,12 +55,13 @@
             slope_foot_index = EXCLUDED.slope_foot_index,
             point_count = EXCLUDED.point_count,
             profile_data = EXCLUDED.profile_data,
-            updated_at = CURRENT_TIMESTAMP
+            updated_at = CURRENT_TIMESTAMP,
+            user_id = EXCLUDED.user_id
     </insert>
 
     <update id="deleteByTaskId">
         UPDATE section_profiles SET deleted_at = CURRENT_TIMESTAMP
-        WHERE task_id = #{taskId} AND deleted_at IS NULL
+        WHERE task_id = #{taskId} AND deleted_at IS NULL AND (user_id = #{userId} OR #{userId} IS NULL)
     </update>
 
 </mapper>

@@ -7,6 +7,7 @@ import java.time.LocalDateTime;
 @Data
 public class TaskPO {
     private Long id;
+    private Long userId;
     private String taskId;
     private String taskName;
     private String bankIds;

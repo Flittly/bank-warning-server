@@ -2,6 +2,7 @@ package com.yangtze.bankwarning.service;
 
 import com.yangtze.bankwarning.domain.po.TiffBoundsPO;
 import com.yangtze.bankwarning.mapper.TiffBoundsMapper;
+import com.yangtze.bankwarning.security.security.SecurityUtils;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
@@ -36,7 +37,8 @@ public class TiffService {
     }
 
     public List<Map<String, Object>> listTiffs() {
-        return tiffBoundsMapper.selectAll().stream().map(this::toMap).collect(Collectors.toList());
+        Long userId = SecurityUtils.getCurrentUserIdForDataFilter();
+        return tiffBoundsMapper.selectAll(userId).stream().map(this::toMap).collect(Collectors.toList());
     }
 
     public Map<String, Object> uploadTiff(MultipartFile file, String segment, String year, String timepoint) {

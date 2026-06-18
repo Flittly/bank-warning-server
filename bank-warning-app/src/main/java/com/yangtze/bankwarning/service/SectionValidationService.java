@@ -3,6 +3,7 @@ package com.yangtze.bankwarning.service;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.yangtze.bankwarning.repository.support.AbstractJdbcRepository;
+import com.yangtze.bankwarning.security.security.SecurityUtils;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
@@ -175,12 +176,14 @@ public class SectionValidationService extends AbstractJdbcRepository {
             Map<String, Object> args = new LinkedHashMap<>();
             args.put("geometry", geometryJson);
             args.put("tiffKey", tiffKey);
+            args.put("userId", SecurityUtils.getCurrentUserIdForDataFilter());
             // tiff_bounds.geom 已经是 4326 坐标（存储时已转换）
             return queryInt(
                     """
                             SELECT CASE WHEN COUNT(*) > 0 THEN 1 ELSE 0 END
                             FROM tiff_bounds
                             WHERE tiff_key = :tiffKey
+                              AND (user_id = :userId OR :userId IS NULL)
                               AND ST_Within(
                                   ST_SetSRID(ST_GeomFromGeoJSON(:geometry), 4326),
                                   geom
@@ -198,13 +201,17 @@ public class SectionValidationService extends AbstractJdbcRepository {
      * 获取 tiff 边界信息
      */
     public TiffBounds getTiffBounds(String tiffKey) {
+        Long userId = SecurityUtils.getCurrentUserIdForDataFilter();
+        Map<String, Object> params = new LinkedHashMap<>();
+        params.put("tiffKey", tiffKey);
+        params.put("userId", userId);
         Map<String, Object> row = queryOne(
                 """
                         SELECT tiff_key, min_x, min_y, max_x, max_y
                         FROM tiff_bounds
-                        WHERE tiff_key = :tiffKey
+                        WHERE tiff_key = :tiffKey AND (user_id = :userId OR :userId IS NULL)
                         """,
-                params("tiffKey", tiffKey)
+                params
         );
         if (row == null) {
             return null;
@@ -223,13 +230,15 @@ public class SectionValidationService extends AbstractJdbcRepository {
      */
     public void saveTiffBounds(String tiffKey, String regionCode, String year, String timepoint,
                                double minX, double minY, double maxX, double maxY, String geomWkt) {
+        Long userId = SecurityUtils.getCurrentUserId();
         update(
                 """
                         INSERT INTO tiff_bounds (tiff_key, region_code, year, timepoint,
-                                                 min_x, min_y, max_x, max_y, geom)
+                                                 min_x, min_y, max_x, max_y, geom, user_id)
                         VALUES (:tiffKey, :regionCode, :year, :timepoint,
-                                :minX, :minY, :maxX, :maxY, ST_GeomFromText(:geomWkt, 4326))
+                                :minX, :minY, :maxX, :maxY, ST_GeomFromText(:geomWkt, 4326), :userId)
                         ON CONFLICT (tiff_key) DO UPDATE SET
+                            user_id = :userId,
                             region_code = EXCLUDED.region_code,
                             year = EXCLUDED.year,
                             timepoint = EXCLUDED.timepoint,
@@ -250,6 +259,7 @@ public class SectionValidationService extends AbstractJdbcRepository {
                     put("maxX", maxX);
                     put("maxY", maxY);
                     put("geomWkt", geomWkt);
+                    put("userId", userId);
                 }}
         );
     }
@@ -266,12 +276,14 @@ public class SectionValidationService extends AbstractJdbcRepository {
                             validation_message = :validationMessage,
                             updated_at = CURRENT_TIMESTAMP
                         WHERE section_id = :sectionId
+                          AND (user_id = :userId OR :userId IS NULL)
                         """,
                 new LinkedHashMap<>() {{
                     put("isValid", isValid);
                     put("validationStatus", validationStatus);
                     put("validationMessage", validationMessage);
                     put("sectionId", sectionId);
+                    put("userId", SecurityUtils.getCurrentUserIdForDataFilter());
                 }}
         );
     }

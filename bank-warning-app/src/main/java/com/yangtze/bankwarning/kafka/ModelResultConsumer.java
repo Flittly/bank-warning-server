@@ -1,6 +1,9 @@
 package com.yangtze.bankwarning.kafka;
 
 import com.yangtze.bankwarning.dto.kafka.ModelResult;
+import com.yangtze.bankwarning.mapper.TaskMapper;
+import com.yangtze.bankwarning.domain.po.TaskPO;
+import com.yangtze.bankwarning.security.security.CustomUserDetails;
 import com.yangtze.bankwarning.service.BusinessStoreService;
 import com.yangtze.bankwarning.service.SectionProfileService;
 import com.yangtze.bankwarning.service.async.TaskRunStatePort;
@@ -9,6 +12,8 @@ import org.slf4j.LoggerFactory;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.kafka.annotation.KafkaListener;
 import org.springframework.kafka.support.Acknowledgment;
+import org.springframework.security.authentication.UsernamePasswordAuthenticationToken;
+import org.springframework.security.core.context.SecurityContextHolder;
 import org.springframework.stereotype.Component;
 
 import java.util.Map;
@@ -23,14 +28,17 @@ public class ModelResultConsumer {
     private final BusinessStoreService businessStoreService;
     private final TaskRunStatePort taskRunStatePort;
     private final SectionProfileService sectionProfileService;
+    private final TaskMapper taskMapper;
 
     public ModelResultConsumer(
             BusinessStoreService businessStoreService,
             TaskRunStatePort taskRunStatePort,
-            SectionProfileService sectionProfileService) {
+            SectionProfileService sectionProfileService,
+            TaskMapper taskMapper) {
         this.businessStoreService = businessStoreService;
         this.taskRunStatePort = taskRunStatePort;
         this.sectionProfileService = sectionProfileService;
+        this.taskMapper = taskMapper;
     }
 
     // 监听结果 Topic
@@ -45,6 +53,22 @@ public class ModelResultConsumer {
                 result.getSectionId(),
                 result.getStatus());
 
+        Long ownerUserId = null;
+        try {
+            TaskPO task = taskMapper.selectByTaskId(result.getTaskId(), null);
+            if (task != null) {
+                ownerUserId = task.getUserId();
+            }
+        } catch (Exception e) {
+            log.warn("[kafka-result-consume] 查询任务用户ID失败，结果将无归属: {}", e.getMessage());
+        }
+
+        if (ownerUserId != null) {
+            var auth = new UsernamePasswordAuthenticationToken(
+                new CustomUserDetails(ownerUserId, "kafka", "", java.util.List.of()),
+                null, java.util.List.of());
+            SecurityContextHolder.getContext().setAuthentication(auth);
+        }
         try {
             // 第一步：校验必填字段
             validate(result);
@@ -82,6 +106,10 @@ public class ModelResultConsumer {
                     exception);
             // 抛出异常，让 Kafka 触发重试机制
             throw exception;
+        } finally {
+            if (ownerUserId != null) {
+                SecurityContextHolder.clearContext();
+            }
         }
     }
 

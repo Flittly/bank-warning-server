@@ -14,19 +14,20 @@
         <result property="maxY" column="max_y"/>
         <result property="createdAt" column="created_at"/>
         <result property="updatedAt" column="updated_at"/>
+        <result property="userId" column="user_id"/>
     </resultMap>
 
     <select id="selectAll" resultMap="TiffBoundsResultMap">
-        SELECT * FROM tiff_bounds ORDER BY tiff_key
+        SELECT * FROM tiff_bounds WHERE (user_id = #{userId} OR #{userId} IS NULL) ORDER BY tiff_key
     </select>
 
     <select id="selectByTiffKey" resultMap="TiffBoundsResultMap">
-        SELECT * FROM tiff_bounds WHERE tiff_key = #{tiffKey}
+        SELECT * FROM tiff_bounds WHERE tiff_key = #{tiffKey} AND (user_id = #{userId} OR #{userId} IS NULL)
     </select>
 
     <insert id="insertOrUpdate" parameterType="com.yangtze.bankwarning.domain.po.TiffBoundsPO" useGeneratedKeys="true" keyProperty="id">
-        INSERT INTO tiff_bounds (tiff_key, region_code, year, timepoint, min_x, min_y, max_x, max_y)
-        VALUES (#{tiffKey}, #{regionCode}, #{year}, #{timepoint}, #{minX}, #{minY}, #{maxX}, #{maxY})
+        INSERT INTO tiff_bounds (tiff_key, region_code, year, timepoint, min_x, min_y, max_x, max_y, user_id)
+        VALUES (#{tiffKey}, #{regionCode}, #{year}, #{timepoint}, #{minX}, #{minY}, #{maxX}, #{maxY}, #{userId})
         ON CONFLICT (tiff_key) DO UPDATE SET
             region_code = EXCLUDED.region_code,
             year = EXCLUDED.year,
@@ -35,7 +36,8 @@
             min_y = EXCLUDED.min_y,
             max_x = EXCLUDED.max_x,
             max_y = EXCLUDED.max_y,
-            updated_at = CURRENT_TIMESTAMP
+            updated_at = CURRENT_TIMESTAMP,
+            user_id = EXCLUDED.user_id
     </insert>
 
 </mapper>

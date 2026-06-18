@@ -9,11 +9,11 @@ import java.util.List;
 @Mapper
 public interface BasicParamMapper {
 
-    List<BasicParamPO> selectAll();
+    List<BasicParamPO> selectAll(@Param("userId") Long userId);
 
-    BasicParamPO selectByParamId(@Param("paramId") String paramId);
+    BasicParamPO selectByParamId(@Param("paramId") String paramId, @Param("userId") Long userId);
 
-    BasicParamPO selectById(@Param("id") Integer id);
+    BasicParamPO selectById(@Param("id") Integer id, @Param("userId") Long userId);
 
     int insert(BasicParamPO param);
 

@@ -2,6 +2,7 @@ package com.yangtze.bankwarning.service;
 
 import com.yangtze.bankwarning.domain.po.AiChatSessionPO;
 import com.yangtze.bankwarning.mapper.AiChatSessionMapper;
+import com.yangtze.bankwarning.security.security.SecurityUtils;
 import org.springframework.stereotype.Service;
 
 import java.util.List;
@@ -17,7 +18,8 @@ public class AiChatSessionService {
     }
 
     public List<AiChatSessionPO> listSessions() {
-        return mapper.selectAll();
+        Long userId = SecurityUtils.getCurrentUserIdForDataFilter();
+        return mapper.selectAll(userId);
     }
 
     public AiChatSessionPO createSession(String title) {
@@ -25,15 +27,19 @@ public class AiChatSessionService {
         String uuid = UUID.randomUUID().toString();
         po.setSessionId(uuid);
         po.setTitle(title != null && !title.isBlank() ? title : "会话-" + uuid.substring(0, 8));
+        po.setUserId(SecurityUtils.getCurrentUserId());
+        Long userId = SecurityUtils.getCurrentUserIdForDataFilter();
         mapper.insert(po);
         return po;
     }
 
     public void deleteSession(String sessionId) {
-        mapper.deleteBySessionId(sessionId);
+        Long userId = SecurityUtils.getCurrentUserIdForDataFilter();
+        mapper.deleteBySessionId(sessionId, userId);
     }
 
     public void updateTitle(String sessionId, String title) {
-        mapper.updateTitle(sessionId, title);
+        Long userId = SecurityUtils.getCurrentUserIdForDataFilter();
+        mapper.updateTitle(sessionId, title, userId);
     }
 }

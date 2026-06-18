@@ -36,13 +36,14 @@
         <result property="createdAt" column="created_at"/>
         <result property="updatedAt" column="updated_at"/>
         <result property="deletedAt" column="deleted_at"/>
+        <result property="userId" column="user_id"/>
     </resultMap>
 
     <select id="selectByTaskIdAndBankId" resultMap="SectionResultMap">
         SELECT cs.*, t.task_id AS task_code, t.task_name
         FROM cross_sections cs
         JOIN tasks t ON cs.task_id = t.task_id
-        WHERE cs.deleted_at IS NULL AND t.deleted_at IS NULL
+        WHERE cs.deleted_at IS NULL AND t.deleted_at IS NULL AND (cs.user_id = #{userId} OR #{userId} IS NULL)
         <if test="taskId != null">
             AND cs.task_id = #{taskId}
         </if>
@@ -56,7 +57,7 @@
         SELECT cs.*, t.task_id AS task_code, t.task_name
         FROM cross_sections cs
         JOIN tasks t ON cs.task_id = t.task_id
-        WHERE cs.section_id = #{sectionId} AND cs.deleted_at IS NULL AND t.deleted_at IS NULL
+        WHERE cs.section_id = #{sectionId} AND cs.deleted_at IS NULL AND t.deleted_at IS NULL AND (cs.user_id = #{userId} OR #{userId} IS NULL)
     </select>
 
     <insert id="insert" parameterType="com.yangtze.bankwarning.domain.po.SectionPO" useGeneratedKeys="true" keyProperty="id">
@@ -66,13 +67,14 @@
             param_name, segment, current_timepoint, set_name, water_qs, tidal_level,
             bench_id, ref_id, hs, hc, protection_level, control_level,
             comparison_timepoint, risk_thresholds, weights, other_params,
-            geom, start_point, end_point
+            user_id, geom, start_point, end_point
         ) VALUES (
             #{taskId}, #{sectionId}, #{sectionName}, #{bankId}, #{regionCode}, #{segmentIndex},
             #{sectionGeometry}::jsonb, #{verticalFootPoint}::jsonb, #{distance}, #{basicParamId},
             #{paramName}, #{segment}, #{currentTimepoint}, #{setName}, #{waterQs}, #{tidalLevel},
             #{benchId}, #{refId}, #{hs}, #{hc}, #{protectionLevel}, #{controlLevel},
             #{comparisonTimepoint}, #{riskThresholds}::jsonb, #{weights}::jsonb, #{otherParams}::jsonb,
+            #{userId},
             CASE WHEN #{sectionGeometry} IS NOT NULL AND #{sectionGeometry} != ''
                  THEN ST_SetSRID(ST_GeomFromGeoJSON(#{sectionGeometry}::json), 4326)
                  ELSE NULL END,
@@ -120,25 +122,25 @@
             end_point = CASE WHEN #{sectionGeometry} IS NOT NULL AND #{sectionGeometry} != ''
                             THEN ST_EndPoint(ST_SetSRID(ST_GeomFromGeoJSON(#{sectionGeometry}::json), 4326))
                             ELSE end_point END
-        WHERE section_id = #{sectionId} AND deleted_at IS NULL
+        WHERE section_id = #{sectionId} AND deleted_at IS NULL AND (user_id = #{userId} OR #{userId} IS NULL)
     </update>
 
     <update id="deleteBySectionId">
         UPDATE cross_sections SET deleted_at = CURRENT_TIMESTAMP
-        WHERE section_id = #{sectionId} AND deleted_at IS NULL
+        WHERE section_id = #{sectionId} AND deleted_at IS NULL AND (user_id = #{userId} OR #{userId} IS NULL)
     </update>
 
     <select id="countByTaskId" resultType="int">
-        SELECT COUNT(*) FROM cross_sections WHERE task_id = #{taskId} AND deleted_at IS NULL
+        SELECT COUNT(*) FROM cross_sections WHERE task_id = #{taskId} AND deleted_at IS NULL AND (user_id = #{userId} OR #{userId} IS NULL)
     </select>
 
     <update id="deleteByTaskId">
         UPDATE cross_sections SET deleted_at = CURRENT_TIMESTAMP
-        WHERE task_id = #{taskId} AND deleted_at IS NULL
+        WHERE task_id = #{taskId} AND deleted_at IS NULL AND (user_id = #{userId} OR #{userId} IS NULL)
     </update>
 
     <select id="existsBySectionId" resultType="boolean">
-        SELECT COUNT(*) > 0 FROM cross_sections WHERE section_id = #{sectionId} AND deleted_at IS NULL
+        SELECT COUNT(*) > 0 FROM cross_sections WHERE section_id = #{sectionId} AND deleted_at IS NULL AND (user_id = #{userId} OR #{userId} IS NULL)
     </select>
 
 </mapper>

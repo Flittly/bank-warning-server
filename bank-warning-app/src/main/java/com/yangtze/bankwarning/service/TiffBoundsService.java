@@ -1,5 +1,6 @@
 package com.yangtze.bankwarning.service;
 
+import com.yangtze.bankwarning.security.security.SecurityUtils;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.jdbc.core.JdbcTemplate;
@@ -21,15 +22,16 @@ public class TiffBoundsService {
 
     @SuppressWarnings("unchecked")
     public Map<String, Object> listTiffBoundsAsGeoJson() {
+        Long userId = SecurityUtils.getCurrentUserIdForDataFilter();
         String sql = """
                 SELECT tiff_key, region_code, year, timepoint,
                        ST_AsGeoJSON(geom) AS geometry
                 FROM tiff_bounds
-                WHERE geom IS NOT NULL
+                WHERE geom IS NOT NULL AND (user_id = ? OR ? IS NULL)
                 ORDER BY tiff_key
                 """;
 
-        List<Map<String, Object>> rows = jdbcTemplate.queryForList(sql);
+        List<Map<String, Object>> rows = jdbcTemplate.queryForList(sql, userId, userId);
 
         List<Map<String, Object>> features = rows.stream().map(row -> {
             Map<String, Object> feature = new LinkedHashMap<>();

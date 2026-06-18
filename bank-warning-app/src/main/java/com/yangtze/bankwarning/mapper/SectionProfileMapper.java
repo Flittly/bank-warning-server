@@ -9,11 +9,11 @@ import java.util.List;
 @Mapper
 public interface SectionProfileMapper {
 
-    List<SectionProfilePO> selectByTaskId(@Param("taskId") String taskId);
+    List<SectionProfilePO> selectByTaskId(@Param("taskId") String taskId, @Param("userId") Long userId);
 
-    SectionProfilePO selectLatestBySectionId(@Param("sectionId") String sectionId);
+    SectionProfilePO selectLatestBySectionId(@Param("sectionId") String sectionId, @Param("userId") Long userId);
 
     int insertOrUpdate(SectionProfilePO profile);
 
-    int deleteByTaskId(@Param("taskId") String taskId);
+    int deleteByTaskId(@Param("taskId") String taskId, @Param("userId") Long userId);
 }

@@ -7,6 +7,7 @@ import java.time.LocalDateTime;
 @Data
 public class TaskRunPO {
     private Long id;
+    private Long userId;
     private String runId;
     private String taskId;
     private String status;

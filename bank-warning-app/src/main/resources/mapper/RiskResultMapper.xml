@@ -15,10 +15,11 @@
         <result property="createdAt" column="created_at"/>
         <result property="updatedAt" column="updated_at"/>
         <result property="deletedAt" column="deleted_at"/>
+        <result property="userId" column="user_id"/>
     </resultMap>
 
     <select id="selectByTaskIdAndBankIdAndRegionCode" resultMap="RiskResultResultMap">
-        SELECT * FROM bank_risk_results WHERE deleted_at IS NULL
+        SELECT * FROM bank_risk_results WHERE deleted_at IS NULL AND (user_id = #{userId} OR #{userId} IS NULL)
         <if test="taskId != null">
             AND task_id = #{taskId}
         </if>
@@ -33,32 +34,32 @@
 
     <select id="selectLatestBySectionId" resultMap="RiskResultResultMap">
         SELECT * FROM bank_risk_results
-        WHERE section_id = #{sectionId} AND deleted_at IS NULL
+        WHERE section_id = #{sectionId} AND deleted_at IS NULL AND (user_id = #{userId} OR #{userId} IS NULL)
         ORDER BY id DESC LIMIT 1
     </select>
 
     <insert id="insert" parameterType="com.yangtze.bankwarning.domain.po.RiskResultPO" useGeneratedKeys="true" keyProperty="id">
         INSERT INTO bank_risk_results (
             run_id, task_id, section_id, section_name, region_code, bank_id,
-            risk_level, indicators
+            risk_level, indicators, user_id
         ) VALUES (
             #{runId}, #{taskId}, #{sectionId}, #{sectionName}, #{regionCode}, #{bankId},
-            #{riskLevel}, #{indicators}::jsonb
+            #{riskLevel}, #{indicators}::jsonb, #{userId}
         )
     </insert>
 
     <select id="countByTaskId" resultType="int">
-        SELECT COUNT(*) FROM bank_risk_results WHERE task_id = #{taskId} AND deleted_at IS NULL
+        SELECT COUNT(*) FROM bank_risk_results WHERE task_id = #{taskId} AND deleted_at IS NULL AND (user_id = #{userId} OR #{userId} IS NULL)
     </select>
 
     <update id="deleteByTaskId">
         UPDATE bank_risk_results SET deleted_at = CURRENT_TIMESTAMP
-        WHERE task_id = #{taskId} AND deleted_at IS NULL
+        WHERE task_id = #{taskId} AND deleted_at IS NULL AND (user_id = #{userId} OR #{userId} IS NULL)
     </update>
 
     <select id="existsByRunIdAndSectionId" resultType="boolean">
         SELECT COUNT(*) > 0 FROM bank_risk_results
-        WHERE run_id = #{runId} AND section_id = #{sectionId} AND deleted_at IS NULL
+        WHERE run_id = #{runId} AND section_id = #{sectionId} AND deleted_at IS NULL AND (user_id = #{userId} OR #{userId} IS NULL)
     </select>
 
 </mapper>

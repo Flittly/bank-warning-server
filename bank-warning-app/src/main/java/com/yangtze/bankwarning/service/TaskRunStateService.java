@@ -2,6 +2,7 @@ package com.yangtze.bankwarning.service;
 
 import com.yangtze.bankwarning.domain.po.TaskRunPO;
 import com.yangtze.bankwarning.mapper.TaskRunMapper;
+import com.yangtze.bankwarning.security.security.SecurityUtils;
 import com.yangtze.bankwarning.service.async.TaskRunStatePort;
 import org.springframework.stereotype.Service;
 
@@ -25,26 +26,31 @@ public class TaskRunStateService implements TaskRunStatePort {
         po.setRunId(runId);
         po.setTaskId(taskId);
         po.setExpectedCount(expectedCount);
+        po.setUserId(SecurityUtils.getCurrentUserId());
+        Long userId = SecurityUtils.getCurrentUserIdForDataFilter();
         taskRunMapper.insert(po);
         return runId;
     }
 
     @Override
     public void markSectionSuccess(String runId) {
-        taskRunMapper.markSubmittedToRunning(runId);
-        taskRunMapper.incrementCompleted(runId);
+        Long userId = SecurityUtils.getCurrentUserIdForDataFilter();
+        taskRunMapper.markSubmittedToRunning(runId, userId);
+        taskRunMapper.incrementCompleted(runId, userId);
         tryFinish(runId);
     }
 
     @Override
     public void markSectionError(String runId, String errorMessage) {
-        taskRunMapper.markSubmittedToRunning(runId);
-        taskRunMapper.incrementFailed(runId, errorMessage);
+        Long userId = SecurityUtils.getCurrentUserIdForDataFilter();
+        taskRunMapper.markSubmittedToRunning(runId, userId);
+        taskRunMapper.incrementFailed(runId, errorMessage, userId);
         tryFinish(runId);
     }
 
     public Map<String, Object> getRunSummary(String runId) {
-        TaskRunPO po = taskRunMapper.selectByRunId(runId);
+        Long userId = SecurityUtils.getCurrentUserIdForDataFilter();
+        TaskRunPO po = taskRunMapper.selectByRunId(runId, userId);
         if (po == null) {
             throw new IllegalArgumentException("Run not found: " + runId);
         }
@@ -58,14 +64,15 @@ public class TaskRunStateService implements TaskRunStatePort {
         int failed = ((Number) run.get("failed_count")).intValue();
 
         if (completed + failed >= expected) {
+            Long userId = SecurityUtils.getCurrentUserIdForDataFilter();
             if (failed > 0) {
                 if (completed > 0) {
-                    taskRunMapper.markPartialFailed(runId, String.valueOf(run.get("error_message")));
+                    taskRunMapper.markPartialFailed(runId, String.valueOf(run.get("error_message")), userId);
                 } else {
-                    taskRunMapper.markError(runId, String.valueOf(run.get("error_message")));
+                    taskRunMapper.markError(runId, String.valueOf(run.get("error_message")), userId);
                 }
             } else {
-                taskRunMapper.markCompleted(runId);
+                taskRunMapper.markCompleted(runId, userId);
             }
         }
     }
