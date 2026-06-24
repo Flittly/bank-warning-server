@@ -19,11 +19,11 @@
     </resultMap>
 
     <select id="selectAll" resultMap="TaskResultMap">
-        SELECT * FROM tasks WHERE deleted_at IS NULL AND (user_id = #{userId} OR #{userId} IS NULL) ORDER BY id DESC
+        SELECT * FROM tasks WHERE deleted_at IS NULL AND (user_id = #{userId} OR #{userId, jdbcType=BIGINT} IS NULL) ORDER BY id DESC
     </select>
 
     <select id="selectByTaskId" resultMap="TaskResultMap">
-        SELECT * FROM tasks WHERE task_id = #{taskId} AND deleted_at IS NULL AND (user_id = #{userId} OR #{userId} IS NULL)
+        SELECT * FROM tasks WHERE task_id = #{taskId} AND deleted_at IS NULL AND (user_id = #{userId} OR #{userId, jdbcType=BIGINT} IS NULL)
     </select>
 
     <insert id="insert" parameterType="com.yangtze.bankwarning.domain.po.TaskPO" useGeneratedKeys="true" keyProperty="id">
@@ -36,12 +36,12 @@
         SET task_name = #{taskName},
             bank_ids = #{bankIds}::jsonb,
             description = #{description}
-        WHERE task_id = #{taskId} AND deleted_at IS NULL AND (user_id = #{userId} OR #{userId} IS NULL)
+        WHERE task_id = #{taskId} AND deleted_at IS NULL AND (user_id = #{userId} OR #{userId, jdbcType=BIGINT} IS NULL)
     </update>
 
     <update id="deleteByTaskId">
         UPDATE tasks SET deleted_at = CURRENT_TIMESTAMP
-        WHERE task_id = #{taskId} AND deleted_at IS NULL AND (user_id = #{userId} OR #{userId} IS NULL)
+        WHERE task_id = #{taskId} AND deleted_at IS NULL AND (user_id = #{userId} OR #{userId, jdbcType=BIGINT} IS NULL)
     </update>
 
     <update id="updateStatus">
@@ -50,7 +50,7 @@
             run_started_at = COALESCE(#{runStartedAt}::timestamp, run_started_at),
             run_completed_at = COALESCE(#{runCompletedAt}::timestamp, run_completed_at),
             error_message = #{errorMessage}
-        WHERE task_id = #{taskId} AND deleted_at IS NULL AND (user_id = #{userId} OR #{userId} IS NULL)
+        WHERE task_id = #{taskId} AND deleted_at IS NULL AND (user_id = #{userId} OR #{userId, jdbcType=BIGINT} IS NULL)
     </update>
 
     <update id="markRunning">
@@ -59,7 +59,7 @@
             run_started_at = CURRENT_TIMESTAMP,
             run_completed_at = NULL,
             error_message = NULL
-        WHERE task_id = #{taskId} AND deleted_at IS NULL AND (user_id = #{userId} OR #{userId} IS NULL)
+        WHERE task_id = #{taskId} AND deleted_at IS NULL AND (user_id = #{userId} OR #{userId, jdbcType=BIGINT} IS NULL)
     </update>
 
     <update id="markCompleted">
@@ -67,7 +67,7 @@
         SET status = 'completed',
             run_completed_at = CURRENT_TIMESTAMP,
             error_message = NULL
-        WHERE task_id = #{taskId} AND deleted_at IS NULL AND (user_id = #{userId} OR #{userId} IS NULL)
+        WHERE task_id = #{taskId} AND deleted_at IS NULL AND (user_id = #{userId} OR #{userId, jdbcType=BIGINT} IS NULL)
     </update>
 
     <update id="markError">
@@ -75,7 +75,7 @@
         SET status = 'error',
             run_completed_at = CURRENT_TIMESTAMP,
             error_message = #{errorMessage}
-        WHERE task_id = #{taskId} AND deleted_at IS NULL AND (user_id = #{userId} OR #{userId} IS NULL)
+        WHERE task_id = #{taskId} AND deleted_at IS NULL AND (user_id = #{userId} OR #{userId, jdbcType=BIGINT} IS NULL)
     </update>
 
     <update id="markPartialFailed">
@@ -83,7 +83,7 @@
         SET status = 'partial_failed',
             run_completed_at = CURRENT_TIMESTAMP,
             error_message = #{errorMessage}
-        WHERE task_id = #{taskId} AND deleted_at IS NULL AND (user_id = #{userId} OR #{userId} IS NULL)
+        WHERE task_id = #{taskId} AND deleted_at IS NULL AND (user_id = #{userId} OR #{userId, jdbcType=BIGINT} IS NULL)
     </update>
 
 </mapper>

@@ -18,11 +18,11 @@
     </resultMap>
 
     <select id="selectAll" resultMap="TiffBoundsResultMap">
-        SELECT * FROM tiff_bounds WHERE (user_id = #{userId} OR #{userId} IS NULL) ORDER BY tiff_key
+        SELECT * FROM tiff_bounds WHERE (user_id = #{userId} OR #{userId, jdbcType=BIGINT} IS NULL) ORDER BY tiff_key
     </select>
 
     <select id="selectByTiffKey" resultMap="TiffBoundsResultMap">
-        SELECT * FROM tiff_bounds WHERE tiff_key = #{tiffKey} AND (user_id = #{userId} OR #{userId} IS NULL)
+        SELECT * FROM tiff_bounds WHERE tiff_key = #{tiffKey} AND (user_id = #{userId} OR #{userId, jdbcType=BIGINT} IS NULL)
     </select>
 
     <insert id="insertOrUpdate" parameterType="com.yangtze.bankwarning.domain.po.TiffBoundsPO" useGeneratedKeys="true" keyProperty="id">

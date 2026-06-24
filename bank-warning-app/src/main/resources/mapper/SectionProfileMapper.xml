@@ -24,13 +24,13 @@
 
     <select id="selectByTaskId" resultMap="SectionProfileResultMap">
         SELECT * FROM section_profiles
-        WHERE task_id = #{taskId} AND deleted_at IS NULL AND (user_id = #{userId} OR #{userId} IS NULL)
+        WHERE task_id = #{taskId} AND deleted_at IS NULL AND (user_id = #{userId} OR #{userId, jdbcType=BIGINT} IS NULL)
         ORDER BY id
     </select>
 
     <select id="selectLatestBySectionId" resultMap="SectionProfileResultMap">
         SELECT * FROM section_profiles
-        WHERE section_id = #{sectionId} AND deleted_at IS NULL AND (user_id = #{userId} OR #{userId} IS NULL)
+        WHERE section_id = #{sectionId} AND deleted_at IS NULL AND (user_id = #{userId} OR #{userId, jdbcType=BIGINT} IS NULL)
         ORDER BY id DESC LIMIT 1
     </select>
 
@@ -61,7 +61,7 @@
 
     <update id="deleteByTaskId">
         UPDATE section_profiles SET deleted_at = CURRENT_TIMESTAMP
-        WHERE task_id = #{taskId} AND deleted_at IS NULL AND (user_id = #{userId} OR #{userId} IS NULL)
+        WHERE task_id = #{taskId} AND deleted_at IS NULL AND (user_id = #{userId} OR #{userId, jdbcType=BIGINT} IS NULL)
     </update>
 
 </mapper>

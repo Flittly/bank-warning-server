@@ -10,7 +10,7 @@ import org.springframework.core.io.support.PathMatchingResourcePatternResolver;
 import javax.sql.DataSource;
 
 @Configuration
-@MapperScan("com.yangtze.bankwarning.mapper")
+@MapperScan({"com.yangtze.bankwarning.mapper", "com.yangtze.bankwarning.security.mapper"})
 public class MyBatisConfig {
 
     @Bean
@@ -20,7 +20,7 @@ public class MyBatisConfig {
         sessionFactory.setMapperLocations(
                 new PathMatchingResourcePatternResolver()
                         .getResources("classpath*:mapper/**/*.xml"));
-        sessionFactory.setTypeAliasesPackage("com.yangtze.bankwarning.domain.po");
+        sessionFactory.setTypeAliasesPackage("com.yangtze.bankwarning.domain.po,com.yangtze.bankwarning.security.domain.po");
 
         org.apache.ibatis.session.Configuration configuration = new org.apache.ibatis.session.Configuration();
         configuration.setMapUnderscoreToCamelCase(true);

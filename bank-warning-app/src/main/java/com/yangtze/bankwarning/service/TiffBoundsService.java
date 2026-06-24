@@ -23,15 +23,30 @@ public class TiffBoundsService {
     @SuppressWarnings("unchecked")
     public Map<String, Object> listTiffBoundsAsGeoJson() {
         Long userId = SecurityUtils.getCurrentUserIdForDataFilter();
-        String sql = """
-                SELECT tiff_key, region_code, year, timepoint,
-                       ST_AsGeoJSON(geom) AS geometry
-                FROM tiff_bounds
-                WHERE geom IS NOT NULL AND (user_id = ? OR ? IS NULL)
-                ORDER BY tiff_key
-                """;
+        String sql;
+        Object[] params;
 
-        List<Map<String, Object>> rows = jdbcTemplate.queryForList(sql, userId, userId);
+        if (userId == null) {
+            sql = """
+                    SELECT tiff_key, region_code, year, timepoint,
+                           ST_AsGeoJSON(geom) AS geometry
+                    FROM tiff_bounds
+                    WHERE geom IS NOT NULL
+                    ORDER BY tiff_key
+                    """;
+            params = new Object[0];
+        } else {
+            sql = """
+                    SELECT tiff_key, region_code, year, timepoint,
+                           ST_AsGeoJSON(geom) AS geometry
+                    FROM tiff_bounds
+                    WHERE geom IS NOT NULL AND user_id = ?
+                    ORDER BY tiff_key
+                    """;
+            params = new Object[]{userId};
+        }
+
+        List<Map<String, Object>> rows = jdbcTemplate.queryForList(sql, params);
 
         List<Map<String, Object>> features = rows.stream().map(row -> {
             Map<String, Object> feature = new LinkedHashMap<>();

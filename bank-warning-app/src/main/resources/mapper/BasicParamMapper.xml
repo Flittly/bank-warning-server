@@ -28,15 +28,15 @@
     </resultMap>
 
     <select id="selectAll" resultMap="BasicParamResultMap">
-        SELECT * FROM basic_params WHERE deleted_at IS NULL AND (user_id = #{userId} OR #{userId} IS NULL) ORDER BY id DESC
+        SELECT * FROM basic_params WHERE deleted_at IS NULL AND (user_id = #{userId} OR #{userId, jdbcType=BIGINT} IS NULL) ORDER BY id DESC
     </select>
 
     <select id="selectByParamId" resultMap="BasicParamResultMap">
-        SELECT * FROM basic_params WHERE param_id = #{paramId} AND deleted_at IS NULL AND (user_id = #{userId} OR #{userId} IS NULL)
+        SELECT * FROM basic_params WHERE param_id = #{paramId} AND deleted_at IS NULL AND (user_id = #{userId} OR #{userId, jdbcType=BIGINT} IS NULL)
     </select>
 
     <select id="selectById" resultMap="BasicParamResultMap">
-        SELECT * FROM basic_params WHERE id = #{id} AND deleted_at IS NULL AND (user_id = #{userId} OR #{userId} IS NULL)
+        SELECT * FROM basic_params WHERE id = #{id} AND deleted_at IS NULL AND (user_id = #{userId} OR #{userId, jdbcType=BIGINT} IS NULL)
     </select>
 
     <insert id="insert" parameterType="com.yangtze.bankwarning.domain.po.BasicParamPO" useGeneratedKeys="true" keyProperty="id">
@@ -69,7 +69,7 @@
             risk_thresholds = COALESCE(#{riskThresholds}::jsonb, risk_thresholds),
             weights = COALESCE(#{weights}::jsonb, weights),
             other_params = COALESCE(#{otherParams}::jsonb, other_params)
-        WHERE param_id = #{paramId} AND deleted_at IS NULL AND (user_id = #{userId} OR #{userId} IS NULL)
+        WHERE param_id = #{paramId} AND deleted_at IS NULL AND (user_id = #{userId} OR #{userId, jdbcType=BIGINT} IS NULL)
     </update>
 
 </mapper>

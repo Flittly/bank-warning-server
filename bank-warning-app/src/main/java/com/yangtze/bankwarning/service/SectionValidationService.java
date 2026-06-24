@@ -183,7 +183,7 @@ public class SectionValidationService extends AbstractJdbcRepository {
                             SELECT CASE WHEN COUNT(*) > 0 THEN 1 ELSE 0 END
                             FROM tiff_bounds
                             WHERE tiff_key = :tiffKey
-                              AND (user_id = :userId OR :userId IS NULL)
+                              AND (user_id = :userId OR CAST(:userId AS BIGINT) IS NULL)
                               AND ST_Within(
                                   ST_SetSRID(ST_GeomFromGeoJSON(:geometry), 4326),
                                   geom
@@ -209,7 +209,7 @@ public class SectionValidationService extends AbstractJdbcRepository {
                 """
                         SELECT tiff_key, min_x, min_y, max_x, max_y
                         FROM tiff_bounds
-                        WHERE tiff_key = :tiffKey AND (user_id = :userId OR :userId IS NULL)
+                        WHERE tiff_key = :tiffKey AND (user_id = :userId OR CAST(:userId AS BIGINT) IS NULL)
                         """,
                 params
         );
@@ -276,7 +276,7 @@ public class SectionValidationService extends AbstractJdbcRepository {
                             validation_message = :validationMessage,
                             updated_at = CURRENT_TIMESTAMP
                         WHERE section_id = :sectionId
-                          AND (user_id = :userId OR :userId IS NULL)
+                          AND (user_id = :userId OR CAST(:userId AS BIGINT) IS NULL)
                         """,
                 new LinkedHashMap<>() {{
                     put("isValid", isValid);

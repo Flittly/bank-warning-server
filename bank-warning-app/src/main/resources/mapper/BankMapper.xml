@@ -17,7 +17,7 @@
     </resultMap>
 
     <select id="selectAll" resultMap="BankResultMap">
-        SELECT * FROM banks WHERE deleted_at IS NULL AND (user_id = #{userId} OR #{userId} IS NULL)
+        SELECT * FROM banks WHERE deleted_at IS NULL AND (user_id = #{userId} OR #{userId, jdbcType=BIGINT} IS NULL)
         <if test="regionCode != null">
             AND region_code = #{regionCode}
         </if>
@@ -25,7 +25,7 @@
     </select>
 
     <select id="selectByBankId" resultMap="BankResultMap">
-        SELECT * FROM banks WHERE bank_id = #{bankId} AND deleted_at IS NULL AND (user_id = #{userId} OR #{userId} IS NULL)
+        SELECT * FROM banks WHERE bank_id = #{bankId} AND deleted_at IS NULL AND (user_id = #{userId} OR #{userId, jdbcType=BIGINT} IS NULL)
     </select>
 
     <insert id="insert" parameterType="com.yangtze.bankwarning.domain.po.BankPO" useGeneratedKeys="true" keyProperty="id">
@@ -40,12 +40,12 @@
             bank_geometry = #{bankGeometry}::jsonb,
             description = #{description},
             reversed = #{reversed}
-        WHERE bank_id = #{bankId} AND deleted_at IS NULL AND (user_id = #{userId} OR #{userId} IS NULL)
+        WHERE bank_id = #{bankId} AND deleted_at IS NULL AND (user_id = #{userId} OR #{userId, jdbcType=BIGINT} IS NULL)
     </update>
 
     <update id="deleteByBankId">
         UPDATE banks SET deleted_at = CURRENT_TIMESTAMP
-        WHERE bank_id = #{bankId} AND deleted_at IS NULL AND (user_id = #{userId} OR #{userId} IS NULL)
+        WHERE bank_id = #{bankId} AND deleted_at IS NULL AND (user_id = #{userId} OR #{userId, jdbcType=BIGINT} IS NULL)
     </update>
 
 </mapper>

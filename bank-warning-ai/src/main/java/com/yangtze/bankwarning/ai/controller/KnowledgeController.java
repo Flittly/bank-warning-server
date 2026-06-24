@@ -150,7 +150,7 @@ public class KnowledgeController {
     @GetMapping("/knowledge/list")
     public List<Map<String, Object>> listDocuments() {
         Long userId = SecurityUtils.getCurrentUserIdForDataFilter();
-        String sql = "SELECT DISTINCT doc_id, payload FROM ai_knowledge_store WHERE (user_id = ? OR ? IS NULL) ORDER BY doc_id";
+        String sql = "SELECT DISTINCT doc_id, payload FROM ai_knowledge_store WHERE (user_id = ? OR ?::bigint IS NULL) ORDER BY doc_id";
         List<Map<String, Object>> rows = jdbcTemplate.queryForList(sql, userId, userId);
         Map<String, Map<String, Object>> grouped = new LinkedHashMap<>();
         for (Map<String, Object> row : rows) {
@@ -165,7 +165,7 @@ public class KnowledgeController {
                 meta.putIfAbsent("fileName", p.getOrDefault("fileName", docId));
             }
             Integer chunks = jdbcTemplate.queryForObject(
-                    "SELECT COUNT(*) FROM ai_knowledge_store WHERE doc_id = ? AND (user_id = ? OR ? IS NULL)", Integer.class, docId, userId, userId);
+                    "SELECT COUNT(*) FROM ai_knowledge_store WHERE doc_id = ? AND (user_id = ? OR ?::bigint IS NULL)", Integer.class, docId, userId, userId);
             meta.put("chunks", chunks != null ? chunks : 0);
         }
         return new ArrayList<>(grouped.values());
@@ -175,7 +175,7 @@ public class KnowledgeController {
     public Map<String, Object> getDocument(@PathVariable("id") String id) {
         Long userId = SecurityUtils.getCurrentUserIdForDataFilter();
         List<Map<String, Object>> rows = jdbcTemplate.queryForList(
-                "SELECT content, chunk_id, payload FROM ai_knowledge_store WHERE doc_id = ? AND (user_id = ? OR ? IS NULL) ORDER BY chunk_id", id, userId, userId);
+                "SELECT content, chunk_id, payload FROM ai_knowledge_store WHERE doc_id = ? AND (user_id = ? OR ?::bigint IS NULL) ORDER BY chunk_id", id, userId, userId);
         if (rows.isEmpty()) {
             return Map.of("success", false, "error", "文档不存在");
         }
@@ -201,7 +201,7 @@ public class KnowledgeController {
     @DeleteMapping("/knowledge/{id}")
     public Map<String, Object> deleteDocument(@PathVariable("id") String id) {
         Long userId = SecurityUtils.getCurrentUserIdForDataFilter();
-        int deleted = jdbcTemplate.update("DELETE FROM ai_knowledge_store WHERE doc_id = ? AND (user_id = ? OR ? IS NULL)", id, userId, userId);
+        int deleted = jdbcTemplate.update("DELETE FROM ai_knowledge_store WHERE doc_id = ? AND (user_id = ? OR ?::bigint IS NULL)", id, userId, userId);
         if (deleted == 0) {
             return Map.of("success", false, "error", "文档不存在");
         }
@@ -255,9 +255,9 @@ public class KnowledgeController {
     public Map<String, Object> getStats() {
         Long userId = SecurityUtils.getCurrentUserIdForDataFilter();
         Integer docCount = jdbcTemplate.queryForObject(
-                "SELECT COUNT(DISTINCT doc_id) FROM ai_knowledge_store WHERE (user_id = ? OR ? IS NULL)", Integer.class, userId, userId);
+                "SELECT COUNT(DISTINCT doc_id) FROM ai_knowledge_store WHERE (user_id = ? OR ?::bigint IS NULL)", Integer.class, userId, userId);
         Integer chunkCount = jdbcTemplate.queryForObject(
-                "SELECT COUNT(*) FROM ai_knowledge_store WHERE (user_id = ? OR ? IS NULL)", Integer.class, userId, userId);
+                "SELECT COUNT(*) FROM ai_knowledge_store WHERE (user_id = ? OR ?::bigint IS NULL)", Integer.class, userId, userId);
         return Map.of("store", "PgVectorStore", "documents", docCount != null ? docCount : 0,
                 "chunks", chunkCount != null ? chunkCount : 0, "dimensions", 1024);
     }

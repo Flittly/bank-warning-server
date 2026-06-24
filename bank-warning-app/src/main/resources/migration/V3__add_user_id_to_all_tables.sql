@@ -23,10 +23,7 @@ ALTER TABLE banks ADD COLUMN IF NOT EXISTS user_id BIGINT;
 -- 2.2 tasks
 ALTER TABLE tasks ADD COLUMN IF NOT EXISTS user_id BIGINT;
 
--- 2.3 task_runs
-ALTER TABLE task_runs ADD COLUMN IF NOT EXISTS user_id BIGINT;
-
--- 2.4 basic_params
+-- 2.3 basic_params
 ALTER TABLE basic_params ADD COLUMN IF NOT EXISTS user_id BIGINT;
 
 -- 2.5 cross_sections
@@ -62,7 +59,6 @@ BEGIN
     IF admin_id IS NOT NULL THEN
         UPDATE banks SET user_id = admin_id WHERE user_id IS NULL;
         UPDATE tasks SET user_id = admin_id WHERE user_id IS NULL;
-        UPDATE task_runs SET user_id = admin_id WHERE user_id IS NULL;
         UPDATE basic_params SET user_id = admin_id WHERE user_id IS NULL;
         UPDATE cross_sections SET user_id = admin_id WHERE user_id IS NULL;
         UPDATE bank_risk_results SET user_id = admin_id WHERE user_id IS NULL;
@@ -79,7 +75,6 @@ END $$;
 -- ========================================
 ALTER TABLE banks ALTER COLUMN user_id SET NOT NULL;
 ALTER TABLE tasks ALTER COLUMN user_id SET NOT NULL;
-ALTER TABLE task_runs ALTER COLUMN user_id SET NOT NULL;
 ALTER TABLE basic_params ALTER COLUMN user_id SET NOT NULL;
 ALTER TABLE cross_sections ALTER COLUMN user_id SET NOT NULL;
 ALTER TABLE bank_risk_results ALTER COLUMN user_id SET NOT NULL;
@@ -95,8 +90,6 @@ ALTER TABLE ai_chat_sessions ALTER COLUMN user_id SET NOT NULL;
 ALTER TABLE banks ADD CONSTRAINT fk_banks_user
     FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE;
 ALTER TABLE tasks ADD CONSTRAINT fk_tasks_user
-    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE;
-ALTER TABLE task_runs ADD CONSTRAINT fk_task_runs_user
     FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE;
 ALTER TABLE basic_params ADD CONSTRAINT fk_basic_params_user
     FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE;
@@ -120,7 +113,6 @@ ALTER TABLE ai_chat_sessions ADD CONSTRAINT fk_ai_chat_sessions_user
 -- ========================================
 CREATE INDEX IF NOT EXISTS idx_banks_user_id ON banks(user_id);
 CREATE INDEX IF NOT EXISTS idx_tasks_user_id ON tasks(user_id);
-CREATE INDEX IF NOT EXISTS idx_task_runs_user_id ON task_runs(user_id);
 CREATE INDEX IF NOT EXISTS idx_basic_params_user_id ON basic_params(user_id);
 CREATE INDEX IF NOT EXISTS idx_cross_sections_user_id ON cross_sections(user_id);
 CREATE INDEX IF NOT EXISTS idx_bank_risk_results_user_id ON bank_risk_results(user_id);
