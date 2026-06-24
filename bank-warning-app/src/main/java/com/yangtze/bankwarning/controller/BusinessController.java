@@ -6,6 +6,7 @@ import com.yangtze.bankwarning.domain.dto.BasicParamPayload;
 import com.yangtze.bankwarning.domain.dto.BasicParamsCreateRequest;
 import com.yangtze.bankwarning.domain.dto.SectionPayload;
 import com.yangtze.bankwarning.domain.dto.SectionsCreateRequest;
+import com.yangtze.bankwarning.domain.dto.SectionBatchUpdateRequest;
 import com.yangtze.bankwarning.domain.dto.TasksCreateRequest;
 import com.yangtze.bankwarning.domain.dto.TaskStatusUpdateRequest;
 import com.yangtze.bankwarning.service.BusinessStoreService;
@@ -174,6 +175,12 @@ public class BusinessController {
     public Map<String, Object> updateSection(@PathVariable("section_id") String sectionId, @RequestBody SectionPayload payload) {
         businessStoreService.updateSection(sectionId, payload);
         return Map.of("success", true, "section_id", sectionId, "updated", true);
+    }
+
+    @PutMapping("/sections/batch-params")
+    public Map<String, Object> batchUpdateSectionParams(@RequestBody SectionBatchUpdateRequest request) {
+        businessStoreService.batchUpdateSectionParams(request.sectionIds(), request.params());
+        return Map.of("success", true, "updated", request.sectionIds().size());
     }
 
     @DeleteMapping("/sections/{section_id}")

@@ -5,6 +5,7 @@ import org.apache.ibatis.annotations.Mapper;
 import org.apache.ibatis.annotations.Param;
 
 import java.util.List;
+import java.util.Map;
 
 @Mapper
 public interface SectionMapper {
@@ -24,4 +25,6 @@ public interface SectionMapper {
     int deleteByTaskId(@Param("taskId") String taskId, @Param("userId") Long userId);
 
     boolean existsBySectionId(@Param("sectionId") String sectionId, @Param("userId") Long userId);
+
+    int batchUpdateParams(@Param("sectionIds") List<String> sectionIds, @Param("params") Map<String, Object> params, @Param("userId") Long userId);
 }

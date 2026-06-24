@@ -267,6 +267,12 @@ public class BusinessStoreService {
         sectionProfileMapper.deleteByTaskId(taskCode, userId);
     }
 
+    public void batchUpdateSectionParams(List<String> sectionIds, Map<String, Object> params) {
+        Long userId = SecurityUtils.getCurrentUserIdForDataFilter();
+        if (sectionIds == null || sectionIds.isEmpty()) return;
+        sectionMapper.batchUpdateParams(sectionIds, params, userId);
+    }
+
     // ==================== RiskResult ====================
 
     public List<Map<String, Object>> listRiskResults(String taskId, String bankId, String regionCode) {

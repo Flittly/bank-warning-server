@@ -143,4 +143,32 @@
         SELECT COUNT(*) > 0 FROM cross_sections WHERE section_id = #{sectionId} AND deleted_at IS NULL AND (user_id = #{userId} OR #{userId, jdbcType=BIGINT} IS NULL)
     </select>
 
+    <update id="batchUpdateParams">
+        UPDATE cross_sections
+        <set>
+            updated_at = CURRENT_TIMESTAMP,
+            <if test="params.param_name != null">param_name = #{params.param_name},</if>
+            <if test="params.segment != null">segment = #{params.segment},</if>
+            <if test="params.current_timepoint != null">current_timepoint = #{params.current_timepoint},</if>
+            <if test="params.set_name != null">set_name = #{params.set_name},</if>
+            <if test="params.water_qs != null">water_qs = #{params.water_qs},</if>
+            <if test="params.tidal_level != null">tidal_level = #{params.tidal_level},</if>
+            <if test="params.bench_id != null">bench_id = #{params.bench_id},</if>
+            <if test="params.ref_id != null">ref_id = #{params.ref_id},</if>
+            <if test="params.hs != null">hs = #{params.hs},</if>
+            <if test="params.hc != null">hc = #{params.hc},</if>
+            <if test="params.protection_level != null">protection_level = #{params.protection_level},</if>
+            <if test="params.control_level != null">control_level = #{params.control_level},</if>
+            <if test="params.comparison_timepoint != null">comparison_timepoint = #{params.comparison_timepoint},</if>
+            <if test="params.risk_thresholds != null">risk_thresholds = #{params.risk_thresholds}::jsonb,</if>
+            <if test="params.weights != null">weights = #{params.weights}::jsonb,</if>
+            <if test="params.other_params != null">other_params = #{params.other_params}::jsonb,</if>
+        </set>
+        WHERE section_id IN
+        <foreach collection="sectionIds" item="sid" open="(" separator="," close=")">
+            #{sid}
+        </foreach>
+        AND deleted_at IS NULL AND (user_id = #{userId} OR #{userId, jdbcType=BIGINT} IS NULL)
+    </update>
+
 </mapper>
