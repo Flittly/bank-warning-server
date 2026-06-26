@@ -3,11 +3,16 @@ package com.yangtze.bankwarning.controller;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
+import org.springframework.http.HttpHeaders;
+import org.springframework.http.MediaType;
+import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
 
 import java.io.File;
 import java.io.IOException;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
+import java.nio.file.Path;
 import java.util.*;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
@@ -22,6 +27,40 @@ public class ReportsController {
 
     @Value("${app.ai.visualization.output-dir:visualization/output}")
     private String outputDir;
+
+    @Value("${app.ai.visualization.script-dir:../bank-model-server}")
+    private String scriptDir;
+
+    @GetMapping("/reports/{filename}/export")
+    public ResponseEntity<byte[]> exportReport(@PathVariable String filename) {
+        File mdFile = new File(new File(outputDir, "reports"), filename);
+        if (!mdFile.exists()) return ResponseEntity.notFound().build();
+        try {
+            Path tmpDir = Files.createTempDirectory("docx-");
+            Path docxFile = tmpDir.resolve(filename.replace(".md", ".docx"));
+            ProcessBuilder pb = new ProcessBuilder(
+                "uv", "run", "python", "util/md2docx.py",
+                mdFile.getAbsolutePath(), docxFile.toString()
+            );
+            pb.directory(new File(scriptDir).getAbsoluteFile());
+            pb.redirectErrorStream(true);
+            pb.environment().put("PYTHONIOENCODING", "utf-8");
+            Process p = pb.start();
+            String out = new String(p.getInputStream().readAllBytes());
+            if (p.waitFor() != 0) {
+                return ResponseEntity.status(500).body(("导出失败: " + out).getBytes(StandardCharsets.UTF_8));
+            }
+            byte[] docx = Files.readAllBytes(docxFile);
+            Files.deleteIfExists(docxFile);
+            Files.deleteIfExists(tmpDir);
+            return ResponseEntity.ok()
+                .header(HttpHeaders.CONTENT_DISPOSITION, "attachment; filename=\"" + filename.replace(".md", ".docx") + "\"")
+                .contentType(MediaType.parseMediaType("application/vnd.openxmlformats-officedocument.wordprocessingml.document"))
+                .body(docx);
+        } catch (Exception e) {
+            return ResponseEntity.status(500).body(("导出异常: " + e.getMessage()).getBytes(StandardCharsets.UTF_8));
+        }
+    }
 
     @GetMapping("/reports")
     public Map<String, Object> listReports() {
