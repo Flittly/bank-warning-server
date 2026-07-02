@@ -12,8 +12,12 @@ import io.agentscope.core.message.UserMessage;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Qualifier;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.web.bind.annotation.*;
 
+import java.io.File;
+import java.io.IOException;
+import java.nio.file.Files;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
@@ -28,6 +32,9 @@ public class AgentController {
     private final ModelService modelService;
     private final ReportWorkflowService reportWorkflow;
     private final ReasoningTraceMiddleware traceMiddleware;
+
+    @Value("${app.ai.visualization.output-dir:visualization/output}")
+    private String outputDir;
 
     public AgentController(
             @Qualifier("chatAgent") HarnessAgent defaultChatAgent,
@@ -85,22 +92,86 @@ public class AgentController {
         String sessionId = (String) body.get("sessionId");
         String modelKey = (String) body.getOrDefault("model", "");
         List<String> skills = (List<String>) body.get("skills");
+        List<String> reportIds = (List<String>) body.get("reportIds");
         HarnessAgent agent = modelService.getOrCreateAgent(modelKey, defaultChatAgent);
         if (agent == null) agent = defaultChatAgent;
         RuntimeContext ctx = RuntimeContext.builder()
                 .sessionId(sessionId)
                 .build();
-        String prompt = question;
-        if (skills != null && !skills.isEmpty()) {
-            prompt = "以下是用户本次对话中启用的技能，请优先使用这些技能来回答问题：\n- "
-                    + String.join("\n- ", skills)
-                    + "\n\n用户问题：" + question;
+
+        StringBuilder prompt = new StringBuilder();
+        boolean hasReports = reportIds != null && !reportIds.isEmpty();
+        // 拼入拖入的报告内容作为上下文
+        if (hasReports) {
+            prompt.append("以下是用户拖入的已有报告，请基于这些报告内容回答用户问题：\n\n");
+            File reportsDir = new File(outputDir, "reports");
+            for (String filename : reportIds) {
+                File f = new File(reportsDir, filename);
+                if (f.exists()) {
+                    try {
+                        String content = Files.readString(f.toPath());
+                        prompt.append("--- 报告：").append(filename).append(" ---\n");
+                        prompt.append(content).append("\n");
+                    } catch (IOException e) {
+                        log.warn("[chat] 无法读取报告文件: {}", filename, e);
+                    }
+                }
+            }
+            prompt.append("\n--- 以上为已有报告内容 ---\n\n");
         }
+        // 拼入启用的技能
+        if (skills != null && !skills.isEmpty()) {
+            prompt.append("以下是用户本次对话中启用的技能，请优先使用这些技能来回答问题：\n- ");
+            prompt.append(String.join("\n- ", skills));
+            prompt.append("\n\n");
+        }
+        // 如果有报告，要求 AI 用分隔符区分"总结"和"完整修改后报告"
+        if (hasReports) {
+            prompt.append("重要指令：如果用户要求你修改报告内容，请你先在回复的开头用 1-2 句话简要说明你做了什么修改，")
+                  .append("然后在单独一行写上分隔标记 <!--REPORT-->，之后输出完整的修改后报告全文。")
+                  .append("如果用户不是要修改报告而只是问问题，则正常回答即可，不需要写 <!--REPORT-->。\n\n");
+        }
+        prompt.append("用户问题：").append(question);
+
         Msg response = agent.call(
-                List.of(new UserMessage("user", prompt)),
+                List.of(new UserMessage("user", prompt.toString())),
                 ctx
         ).block();
-        return Map.of("success", true, "data", extractText(response));
+        String rawText = extractText(response);
+
+        // 如果 AI 返回了报告修改标记，解析并写回文件
+        String separator = "<!--REPORT-->";
+        int sepIdx = rawText.indexOf(separator);
+        String chatReply;
+        List<Map<String, String>> updatedReports = new ArrayList<>();
+        if (hasReports && sepIdx >= 0) {
+            chatReply = rawText.substring(0, sepIdx).trim();
+            String modifiedReport = rawText.substring(sepIdx + separator.length()).trim();
+            if (!modifiedReport.isEmpty()) {
+                File reportsDir = new File(outputDir, "reports");
+                for (String filename : reportIds) {
+                    File f = new File(reportsDir, filename);
+                    try {
+                        Files.writeString(f.toPath(), modifiedReport);
+                        log.info("[chat] 报告已更新: {}", filename);
+                        updatedReports.add(Map.of("filename", filename, "updated", "true"));
+                    } catch (IOException e) {
+                        log.error("[chat] 写入报告失败: {}", filename, e);
+                        updatedReports.add(Map.of("filename", filename, "error", e.getMessage()));
+                    }
+                }
+            }
+        } else {
+            chatReply = rawText;
+        }
+
+        Map<String, Object> result = new HashMap<>();
+        result.put("success", true);
+        result.put("data", chatReply);
+        if (!updatedReports.isEmpty()) {
+            result.put("updatedReports", updatedReports);
+        }
+        return result;
     }
 
     private String extractText(Msg msg) {

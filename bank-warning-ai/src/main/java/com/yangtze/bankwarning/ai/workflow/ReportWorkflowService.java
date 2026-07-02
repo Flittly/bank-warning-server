@@ -98,7 +98,8 @@ public class ReportWorkflowService {
         com.yangtze.bankwarning.ai.service.VisualizationService.beginTask(taskDir);
 
         try {
-        WorkflowState state = workflows.computeIfAbsent(taskId, k -> new WorkflowState());
+        WorkflowState state = new WorkflowState();
+        workflows.put(taskId, state); // 每次请求都全新开始，不复用旧状态
         state.context.put("taskId", taskId);
 
         for (int i = 0; i < STEPS.length; i++) {

@@ -102,12 +102,48 @@ public class ReportsController {
 
     @DeleteMapping("/reports/{filename}")
     public Map<String, Object> deleteReport(@PathVariable String filename) {
-        File file = new File(new File(outputDir, "reports"), filename);
+        File reportsDir = new File(outputDir, "reports");
+        File file = new File(reportsDir, filename);
+        log.info("[reports] 删除报告: {}", file.getAbsolutePath());
+
         if (!file.exists()) {
+            log.warn("[reports] 文件不存在: {}", file.getAbsolutePath());
             return Map.of("success", false, "error", "文件不存在");
         }
+
+        // 1. 删除 .md 报告文件
         boolean deleted = file.delete();
+        log.info("[reports] 报告文件删除: {} -> {}", filename, deleted);
+
+        // 2. 同步清理关联的图片目录（格式: report_{taskId}_{timestamp}）
+        java.util.regex.Matcher m = FILENAME_PTN.matcher(filename);
+        if (m.matches()) {
+            String taskId = m.group(1);
+            String ts = m.group(2);
+            String imageDirName = "report_" + taskId + "_" + ts;
+            File imageDir = new File(outputDir, imageDirName);
+            if (imageDir.exists() && imageDir.isDirectory()) {
+                boolean dirDeleted = deleteDirectory(imageDir);
+                log.info("[reports] 图片目录删除: {} -> {}", imageDir.getAbsolutePath(), dirDeleted);
+            }
+        }
+
         return Map.of("success", deleted, "filename", filename, "deleted", deleted);
+    }
+
+    // 递归删除目录
+    private boolean deleteDirectory(File dir) {
+        File[] files = dir.listFiles();
+        if (files != null) {
+            for (File f : files) {
+                if (f.isDirectory()) {
+                    deleteDirectory(f);
+                } else {
+                    f.delete();
+                }
+            }
+        }
+        return dir.delete();
     }
 
     @PutMapping("/reports/{filename}")

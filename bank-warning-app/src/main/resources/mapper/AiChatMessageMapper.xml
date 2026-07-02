@@ -1,0 +1,35 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN" "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="com.yangtze.bankwarning.mapper.AiChatMessageMapper">
+
+    <resultMap id="MessageResultMap" type="com.yangtze.bankwarning.domain.po.AiChatMessagePO">
+        <id column="id" property="id"/>
+        <result column="session_id" property="sessionId"/>
+        <result column="role" property="role"/>
+        <result column="content" property="content"/>
+        <result column="context_text" property="contextText"/>
+        <result column="user_id" property="userId"/>
+        <result column="created_at" property="createdAt"/>
+    </resultMap>
+
+    <select id="selectBySessionId" resultMap="MessageResultMap">
+        SELECT id, session_id, role, content, context_text, user_id, created_at
+        FROM ai_chat_messages
+        WHERE session_id = #{sessionId}
+          AND (user_id = #{userId} OR #{userId, jdbcType=BIGINT} IS NULL)
+        ORDER BY created_at ASC
+    </select>
+
+    <insert id="insert" parameterType="com.yangtze.bankwarning.domain.po.AiChatMessagePO"
+            useGeneratedKeys="true" keyProperty="id">
+        INSERT INTO ai_chat_messages (session_id, role, content, context_text, user_id)
+        VALUES (#{sessionId}, #{role}, #{content}, #{contextText}, #{userId})
+    </insert>
+
+    <delete id="deleteBySessionId">
+        DELETE FROM ai_chat_messages
+        WHERE session_id = #{sessionId}
+          AND (user_id = #{userId} OR #{userId, jdbcType=BIGINT} IS NULL)
+    </delete>
+
+</mapper>
