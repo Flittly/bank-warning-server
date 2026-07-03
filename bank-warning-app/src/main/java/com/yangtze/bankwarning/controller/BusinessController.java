@@ -46,9 +46,9 @@ public class BusinessController {
     @PostMapping("/banks")
     public Map<String, Object> createBanks(@Valid @RequestBody BanksCreateRequest request) {
         boolean overwrite = Boolean.TRUE.equals(request.overwrite());
-        List<Map<String, Object>> inserted = request.banks().stream()
+        var inserted = request.banks().stream()
                 .map(bank -> businessStoreService.saveBank(bank, overwrite))
-                .map(bank -> Map.of("id", bank.get("id"), "bank_id", bank.get("bank_id"), "bank_name", bank.get("bank_name")))
+                .map(b -> Map.of("id", b.id(), "bank_id", b.bankId(), "bank_name", b.bankName()))
                 .toList();
         return Map.of("success", true, "inserted_count", inserted.size(), "banks", inserted);
     }
@@ -78,9 +78,9 @@ public class BusinessController {
     @PostMapping("/tasks")
     public Map<String, Object> createTasks(@Valid @RequestBody TasksCreateRequest request) {
         boolean overwrite = Boolean.TRUE.equals(request.overwrite());
-        List<Map<String, Object>> inserted = request.tasks().stream()
+        var inserted = request.tasks().stream()
                 .map(task -> businessStoreService.saveTask(task, overwrite))
-                .map(task -> Map.of("id", task.get("id"), "task_id", task.get("task_id"), "task_name", task.get("task_name")))
+                .map(t -> Map.of("id", t.id(), "task_id", t.taskId(), "task_name", t.taskName()))
                 .toList();
         return Map.of("success", true, "inserted_count", inserted.size(), "tasks", inserted);
     }
@@ -125,9 +125,9 @@ public class BusinessController {
     @PostMapping("/basic-params")
     public Map<String, Object> createBasicParams(@Valid @RequestBody BasicParamsCreateRequest request) {
         boolean overwrite = Boolean.TRUE.equals(request.overwrite());
-        List<Map<String, Object>> inserted = request.params().stream()
+        var inserted = request.params().stream()
                 .map(param -> businessStoreService.saveBasicParam(param, overwrite))
-                .map(param -> Map.of("id", param.get("id"), "param_id", param.get("param_id"), "param_name", param.get("param_name")))
+                .map(param -> Map.of("id", param.id(), "param_id", param.paramId(), "param_name", param.paramName()))
                 .toList();
         return Map.of("success", true, "inserted_count", inserted.size(), "params", inserted);
     }
@@ -152,9 +152,9 @@ public class BusinessController {
     public Map<String, Object> createSections(@Valid @RequestBody SectionsCreateRequest request) {
         boolean overwrite = Boolean.TRUE.equals(request.overwrite());
         boolean inherit = !Boolean.FALSE.equals(request.inheritFromBasicParam());
-        List<Map<String, Object>> inserted = request.sections().stream()
+        var inserted = request.sections().stream()
                 .map(section -> businessStoreService.saveSection(request.taskId(), section, inherit, overwrite))
-                .map(section -> Map.of("id", section.get("id"), "section_id", section.get("section_id"), "section_name", section.get("section_name"), "bank_id", section.get("bank_id")))
+                .map(section -> Map.of("id", section.id(), "section_id", section.sectionId(), "section_name", section.sectionName(), "bank_id", section.bankId()))
                 .toList();
         return Map.of("success", true, "task_id", request.taskId(), "inserted_count", inserted.size(), "sections", inserted);
     }
@@ -204,12 +204,11 @@ public class BusinessController {
 
     @GetMapping("/results/{section_id}/matrix")
     public Map<String, Object> getRiskMatrix(@PathVariable("section_id") String sectionId) {
-        Map<String, Object> result = businessStoreService.getRiskResultBySectionId(sectionId);
-        Object indicators = result.get("indicators");
+        var result = businessStoreService.getRiskResultBySectionId(sectionId);
         return Map.of(
                 "success", true,
                 "section_id", sectionId,
-                "matrix", indicators
+                "matrix", result.indicators()
         );
     }
 
@@ -230,9 +229,9 @@ public class BusinessController {
 
     @PostMapping("/sections/{section_id}/validate")
     public Map<String, Object> validateSection(@PathVariable("section_id") String sectionId) {
-        Map<String, Object> section = businessStoreService.getSection(sectionId);
-        Map<String, Object> sectionGeometry = (Map<String, Object>) section.get("section_geometry");
-        String benchId = (String) section.get("bench_id");
+        var section = businessStoreService.getSection(sectionId);
+        Map<String, Object> sectionGeometry = (Map<String, Object>) section.sectionGeometry();
+        String benchId = section.benchId();
 
         SectionValidationService.ValidationResponse response =
                 sectionValidationService.validateSection(sectionId, sectionGeometry, benchId);
@@ -248,13 +247,14 @@ public class BusinessController {
 
     @GetMapping("/sections/{section_id}/validation")
     public Map<String, Object> getSectionValidation(@PathVariable("section_id") String sectionId) {
-        Map<String, Object> section = businessStoreService.getSection(sectionId);
+        var section = businessStoreService.getSection(sectionId);
         Map<String, Object> result = new HashMap<>();
         result.put("success", true);
         result.put("section_id", sectionId);
-        result.put("is_valid", section.get("is_valid"));
-        result.put("validation_status", section.get("validation_status"));
-        result.put("validation_message", section.get("validation_message"));
+        result.put("is_valid", section.isValid());
+        result.put("validation_status", section.validationStatus());
+        result.put("validation_message", section.validationMessage());
         return result;
     }
 }
+
