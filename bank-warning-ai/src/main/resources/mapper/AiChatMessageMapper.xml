@@ -20,7 +20,7 @@
         ORDER BY created_at ASC
     </select>
 
-    <insert id="insert" parameterType="com.yangtze.bankwarning.domain.po.AiChatMessagePO"
+    <insert id="insert" parameterType="com.yangtze.bankwarning.ai.domain.po.AiChatMessagePO"
             useGeneratedKeys="true" keyProperty="id">
         INSERT INTO ai_chat_messages (session_id, role, content, context_text, user_id)
         VALUES (#{sessionId}, #{role}, #{content}, #{contextText}, #{userId})

@@ -19,7 +19,7 @@
         SELECT * FROM ai_chat_sessions WHERE session_id = #{sessionId} AND (user_id = #{userId} OR #{userId, jdbcType=BIGINT} IS NULL)
     </select>
 
-    <insert id="insert" parameterType="com.yangtze.bankwarning.domain.po.AiChatSessionPO"
+    <insert id="insert" parameterType="com.yangtze.bankwarning.ai.domain.po.AiChatSessionPO"
             useGeneratedKeys="true" keyProperty="id">
         INSERT INTO ai_chat_sessions (session_id, title, user_id)
         VALUES (#{sessionId}, #{title}, #{userId})
