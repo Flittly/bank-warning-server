@@ -1,6 +1,7 @@
 package com.yangtze.bankwarning.ai.controller;
 
 import com.yangtze.bankwarning.ai.middleware.ReasoningTraceMiddleware;
+import com.yangtze.bankwarning.ai.service.KnowledgeService;
 import com.yangtze.bankwarning.ai.service.ModelService;
 import com.yangtze.bankwarning.ai.workflow.PlanProgress;
 import com.yangtze.bankwarning.ai.workflow.ReportWorkflowService;
@@ -9,6 +10,8 @@ import io.agentscope.core.agent.RuntimeContext;
 import io.agentscope.core.message.Msg;
 import io.agentscope.core.message.ThinkingBlock;
 import io.agentscope.core.message.UserMessage;
+import io.agentscope.core.rag.model.Document;
+import io.agentscope.core.rag.model.RetrieveConfig;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Qualifier;
@@ -32,6 +35,7 @@ public class AgentController {
     private final ModelService modelService;
     private final ReportWorkflowService reportWorkflow;
     private final ReasoningTraceMiddleware traceMiddleware;
+    private final KnowledgeService knowledgeService;
 
     @Value("${app.ai.visualization.output-dir:visualization/output}")
     private String outputDir;
@@ -40,11 +44,13 @@ public class AgentController {
             @Qualifier("chatAgent") HarnessAgent defaultChatAgent,
             ModelService modelService,
             ReportWorkflowService reportWorkflow,
+            KnowledgeService knowledgeService,
             @Qualifier("chatTraceMiddleware") ReasoningTraceMiddleware traceMiddleware) {
         this.defaultChatAgent = defaultChatAgent;
         this.modelService = modelService;
         this.reportWorkflow = reportWorkflow;
         this.traceMiddleware = traceMiddleware;
+        this.knowledgeService = knowledgeService;
     }
 
     @PostMapping("/report/task/{task_id}")
@@ -100,6 +106,25 @@ public class AgentController {
                 .build();
 
         StringBuilder prompt = new StringBuilder();
+
+        // 预检索：自动查知识库，将相关知识拼入 prompt（不等 agent 调用 query_knowledge）
+        try {
+            RetrieveConfig config = RetrieveConfig.builder()
+                    .limit(3)
+                    .scoreThreshold(0.4)
+                    .build();
+            List<Document> docs = knowledgeService.retrieve(question, config).block();
+            if (docs != null && !docs.isEmpty()) {
+                prompt.append("以下是与用户问题相关的专业知识（系统自动检索，已为你准备好）：\n");
+                for (Document doc : docs) {
+                    prompt.append("- ").append(doc.getMetadata().getContent()).append("\n");
+                }
+                prompt.append("\n");
+            }
+        } catch (Exception e) {
+            log.warn("[chat] 预检索失败，跳过: {}", e.getMessage());
+        }
+
         boolean hasReports = reportIds != null && !reportIds.isEmpty();
         // 拼入拖入的报告内容作为上下文
         if (hasReports) {

@@ -81,9 +81,7 @@ public class ModelService {
                             .flushTrigger(MemoryConfig.FlushTrigger.throttled(java.time.Duration.ofMinutes(5)))
                             .sessionRetentionDays(36500)
                             .build())
-                    .disableFilesystemTools()
                     .disableShellTool()
-                    .disableSubagents()
                     .build();
             log.info("[ModelService] created agent for: {}", k);
             return agent;
