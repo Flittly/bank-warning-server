@@ -1,4 +1,4 @@
-package com.yangtze.bankwarning.domain.po;
+package com.yangtze.bankwarning.ai.domain.po;
 
 import lombok.Data;
 import java.time.LocalDateTime;
@@ -7,9 +7,9 @@ import java.time.LocalDateTime;
 public class AiChatMessagePO {
     private Long id;
     private String sessionId;
-    private String role;        // 'user' 或 'assistant'
+    private String role;
     private String content;
-    private String contextText; // 上下文标签（如 "📄 report_123.md"）
+    private String contextText;
     private Long userId;
     private LocalDateTime createdAt;
 }

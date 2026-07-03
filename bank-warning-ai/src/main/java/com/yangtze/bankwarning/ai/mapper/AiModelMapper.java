@@ -1,4 +1,4 @@
-package com.yangtze.bankwarning.mapper;
+package com.yangtze.bankwarning.ai.mapper;
 
 import com.yangtze.bankwarning.ai.domain.AiModelPO;
 import org.apache.ibatis.annotations.Mapper;

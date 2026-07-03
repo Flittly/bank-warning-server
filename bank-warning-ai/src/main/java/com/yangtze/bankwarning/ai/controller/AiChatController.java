@@ -1,7 +1,7 @@
-package com.yangtze.bankwarning.controller;
+package com.yangtze.bankwarning.ai.controller;
 
-import com.yangtze.bankwarning.service.AiChatMessageService;
-import com.yangtze.bankwarning.service.AiChatSessionService;
+import com.yangtze.bankwarning.ai.service.AiChatMessageService;
+import com.yangtze.bankwarning.ai.service.AiChatSessionService;
 import org.springframework.web.bind.annotation.*;
 
 import java.util.List;
@@ -42,7 +42,7 @@ public class AiChatController {
 
     @DeleteMapping("/sessions/{session_id}")
     public Map<String, Object> deleteSession(@PathVariable("session_id") String sessionId) {
-        messageService.deleteBySessionId(sessionId); // 级联删除消息
+        messageService.deleteBySessionId(sessionId);
         sessionService.deleteSession(sessionId);
         return Map.of("success", true, "session_id", sessionId, "deleted", true);
     }

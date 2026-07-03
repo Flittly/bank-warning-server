@@ -10,7 +10,7 @@ import org.springframework.core.io.support.PathMatchingResourcePatternResolver;
 import javax.sql.DataSource;
 
 @Configuration
-@MapperScan({"com.yangtze.bankwarning.mapper", "com.yangtze.bankwarning.security.mapper"})
+@MapperScan({"com.yangtze.bankwarning.mapper", "com.yangtze.bankwarning.security.mapper", "com.yangtze.bankwarning.ai.mapper"})
 public class MyBatisConfig {
 
     @Bean

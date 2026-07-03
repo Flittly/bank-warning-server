@@ -1,8 +1,9 @@
-package com.yangtze.bankwarning.mapper;
+package com.yangtze.bankwarning.ai.mapper;
 
-import com.yangtze.bankwarning.domain.po.AiChatSessionPO;
+import com.yangtze.bankwarning.ai.domain.po.AiChatSessionPO;
 import org.apache.ibatis.annotations.Mapper;
 import org.apache.ibatis.annotations.Param;
+
 import java.util.List;
 
 @Mapper

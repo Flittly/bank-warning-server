@@ -1,7 +1,7 @@
-package com.yangtze.bankwarning.service;
+package com.yangtze.bankwarning.ai.service;
 
-import com.yangtze.bankwarning.domain.po.AiChatSessionPO;
-import com.yangtze.bankwarning.mapper.AiChatSessionMapper;
+import com.yangtze.bankwarning.ai.domain.po.AiChatSessionPO;
+import com.yangtze.bankwarning.ai.mapper.AiChatSessionMapper;
 import com.yangtze.bankwarning.security.security.SecurityUtils;
 import org.springframework.stereotype.Service;
 
