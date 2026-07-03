@@ -1,6 +1,6 @@
 package com.yangtze.bankwarning.ai.service;
 
-import com.yangtze.bankwarning.ai.domain.AiModelPO;
+import com.yangtze.bankwarning.ai.domain.po.AiModelPO;
 import com.yangtze.bankwarning.ai.mapper.AiModelMapper;
 import io.agentscope.core.model.Model;
 import io.agentscope.core.model.OpenAIChatModel;

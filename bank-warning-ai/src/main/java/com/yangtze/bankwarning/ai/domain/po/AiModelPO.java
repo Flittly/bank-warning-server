@@ -1,4 +1,4 @@
-package com.yangtze.bankwarning.ai.domain;
+package com.yangtze.bankwarning.ai.domain.po;
 
 import lombok.Data;
 import java.time.LocalDateTime;

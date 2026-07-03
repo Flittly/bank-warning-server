@@ -1,6 +1,6 @@
 package com.yangtze.bankwarning.ai.controller;
 
-import com.yangtze.bankwarning.ai.domain.AiModelPO;
+import com.yangtze.bankwarning.ai.domain.po.AiModelPO;
 import com.yangtze.bankwarning.ai.service.ModelService;
 import org.springframework.web.bind.annotation.*;
 
