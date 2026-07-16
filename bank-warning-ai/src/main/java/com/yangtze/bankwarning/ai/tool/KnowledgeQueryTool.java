@@ -2,7 +2,6 @@ package com.yangtze.bankwarning.ai.tool;
 
 import com.yangtze.bankwarning.ai.service.KnowledgeService;
 import io.agentscope.core.rag.model.Document;
-import io.agentscope.core.rag.model.RetrieveConfig;
 import io.agentscope.core.tool.Tool;
 import io.agentscope.core.tool.ToolParam;
 import org.slf4j.Logger;
@@ -26,11 +25,7 @@ public class KnowledgeQueryTool {
     public String queryKnowledge(
             @ToolParam(name = "query", description = "知识查询问题描述") String query) {
         log.info("[tool] querying knowledge: {}", query);
-        RetrieveConfig config = RetrieveConfig.builder()
-                .limit(5)
-                .scoreThreshold(0.4)
-                .build();
-        List<Document> docs = knowledgeService.retrieve(query, config).block();
+        List<Document> docs = knowledgeService.retrieve(query, 5, 0.4).block();
         if (docs == null || docs.isEmpty()) {
             return "未找到与「" + query + "」相关的知识。";
         }

@@ -2,7 +2,6 @@ package com.yangtze.bankwarning.ai.service;
 
 import io.agentscope.core.embedding.EmbeddingModel;
 import io.agentscope.core.rag.model.Document;
-import io.agentscope.core.rag.model.RetrieveConfig;
 import io.agentscope.core.rag.store.VDBStoreBase;
 import io.agentscope.core.rag.store.dto.SearchDocumentDto;
 import io.agentscope.core.message.TextBlock;
@@ -55,7 +54,7 @@ public class KnowledgeService {
      * 检索相关文档
      */
     @SuppressWarnings("deprecation")
-    public Mono<List<Document>> retrieve(String query, RetrieveConfig config) {
+    public Mono<List<Document>> retrieve(String query, int limit, double scoreThreshold) {
         return Mono.fromCallable(() -> {
             try {
                 var queryBlock = TextBlock.builder().text(query).build();
@@ -66,8 +65,8 @@ public class KnowledgeService {
 
                 SearchDocumentDto searchDto = SearchDocumentDto.builder()
                         .queryEmbedding(queryEmbedding)
-                        .limit(config.getLimit())
-                        .scoreThreshold(config.getScoreThreshold())
+                        .limit(limit)
+                        .scoreThreshold(scoreThreshold)
                         .build();
 
                 List<Document> results = vectorStore.search(searchDto).block();

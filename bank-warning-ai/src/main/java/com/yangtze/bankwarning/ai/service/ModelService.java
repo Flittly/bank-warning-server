@@ -3,7 +3,7 @@ package com.yangtze.bankwarning.ai.service;
 import com.yangtze.bankwarning.ai.domain.po.AiModelPO;
 import com.yangtze.bankwarning.ai.mapper.AiModelMapper;
 import io.agentscope.core.model.Model;
-import io.agentscope.core.model.OpenAIChatModel;
+import io.agentscope.extensions.model.openai.OpenAIChatModel;
 import io.agentscope.harness.agent.HarnessAgent;
 import io.agentscope.harness.agent.memory.MemoryConfig;
 import org.slf4j.Logger;

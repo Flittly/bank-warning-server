@@ -11,7 +11,6 @@ import io.agentscope.core.message.Msg;
 import io.agentscope.core.message.ThinkingBlock;
 import io.agentscope.core.message.UserMessage;
 import io.agentscope.core.rag.model.Document;
-import io.agentscope.core.rag.model.RetrieveConfig;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Qualifier;
@@ -109,11 +108,7 @@ public class AgentController {
 
         // 预检索：自动查知识库，将相关知识拼入 prompt（不等 agent 调用 query_knowledge）
         try {
-            RetrieveConfig config = RetrieveConfig.builder()
-                    .limit(3)
-                    .scoreThreshold(0.4)
-                    .build();
-            List<Document> docs = knowledgeService.retrieve(question, config).block();
+            List<Document> docs = knowledgeService.retrieve(question, 3, 0.4).block();
             if (docs != null && !docs.isEmpty()) {
                 prompt.append("以下是与用户问题相关的专业知识（系统自动检索，已为你准备好）：\n");
                 for (Document doc : docs) {

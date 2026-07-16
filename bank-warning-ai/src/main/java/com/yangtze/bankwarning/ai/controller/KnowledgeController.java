@@ -6,7 +6,6 @@ import com.yangtze.bankwarning.security.security.SecurityUtils;
 import io.agentscope.core.message.TextBlock;
 import io.agentscope.core.rag.model.Document;
 import io.agentscope.core.rag.model.DocumentMetadata;
-import io.agentscope.core.rag.model.RetrieveConfig;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.jdbc.core.JdbcTemplate;
@@ -214,11 +213,7 @@ public class KnowledgeController {
             @RequestParam("query") String query,
             @RequestParam(name = "type", required = false) String type,
             @RequestParam(name = "topK", defaultValue = "5") int topK) {
-        RetrieveConfig config = RetrieveConfig.builder()
-                .limit(topK)
-                .scoreThreshold(0.4)
-                .build();
-        List<Document> results = knowledgeService.retrieve(query, config).block();
+        List<Document> results = knowledgeService.retrieve(query, topK, 0.4).block();
         if (results == null) return List.of();
         return results.stream().map(doc -> Map.<String, Object>of(
                 "content", doc.getMetadata().getContent().toString(),

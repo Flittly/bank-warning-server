@@ -15,7 +15,7 @@
     <description>AI module powered by AgentScope</description>
 
     <properties>
-        <agentscope.version>2.0.0-RC2</agentscope.version>
+        <agentscope.version>2.0.0</agentscope.version>
     </properties>
 
     <dependencyManagement>
