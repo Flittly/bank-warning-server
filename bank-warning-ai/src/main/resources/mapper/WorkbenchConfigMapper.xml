@@ -1,0 +1,40 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
+        "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="com.yangtze.bankwarning.ai.mapper.WorkbenchConfigMapper">
+
+    <resultMap id="BaseResultMap" type="com.yangtze.bankwarning.ai.domain.po.WorkbenchConfigPO">
+        <id column="id" property="id"/>
+        <result column="user_id" property="userId"/>
+        <result column="title" property="title"/>
+        <result column="config_json" property="configJson"/>
+        <result column="created_at" property="createdAt"/>
+    </resultMap>
+
+    <select id="selectByUserId" resultMap="BaseResultMap">
+        SELECT id, user_id, title, config_json, created_at
+        FROM ai_workbench_configs
+        WHERE user_id = #{userId}
+        ORDER BY created_at DESC
+        LIMIT 50
+    </select>
+
+    <select id="selectById" resultMap="BaseResultMap">
+        SELECT id, user_id, title, config_json, created_at
+        FROM ai_workbench_configs
+        WHERE id = #{id}
+          AND user_id = #{userId}
+    </select>
+
+    <insert id="insert" useGeneratedKeys="true" keyProperty="id">
+        INSERT INTO ai_workbench_configs (user_id, title, config_json)
+        VALUES (#{userId}, #{title}, #{configJson})
+    </insert>
+
+    <delete id="deleteById">
+        DELETE FROM ai_workbench_configs
+        WHERE id = #{id}
+          AND user_id = #{userId}
+    </delete>
+
+</mapper>

@@ -2,7 +2,9 @@ package com.yangtze.bankwarning.ai.service;
 
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.yangtze.bankwarning.ai.domain.po.WorkbenchConfigPO;
 import com.yangtze.bankwarning.ai.dto.WorkbenchRunRequest;
+import com.yangtze.bankwarning.ai.mapper.WorkbenchConfigMapper;
 import com.yangtze.bankwarning.security.security.SecurityUtils;
 import io.agentscope.core.model.Model;
 import io.agentscope.core.skill.repository.AgentSkillRepository;
@@ -12,7 +14,6 @@ import io.agentscope.harness.agent.filesystem.local.LocalFilesystem;
 import io.agentscope.harness.agent.memory.MemoryConfig;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Service;
 
 import java.io.IOException;
@@ -29,7 +30,7 @@ public class WorkbenchOrchestratorService {
     private final Model model;
     private final Toolkit toolkit;
     private final List<AgentSkillRepository> skillRepos;
-    private final JdbcTemplate jdbc;
+    private final WorkbenchConfigMapper configMapper;
     private final ObjectMapper objectMapper;
     private final Path baseWorkspace;
 
@@ -37,12 +38,12 @@ public class WorkbenchOrchestratorService {
             Model deepseekModel,
             Toolkit reportToolkit,
             List<AgentSkillRepository> agentSkillRepositories,
-            JdbcTemplate jdbcTemplate,
+            WorkbenchConfigMapper configMapper,
             ObjectMapper objectMapper) {
         this.model = deepseekModel;
         this.toolkit = reportToolkit;
         this.skillRepos = agentSkillRepositories;
-        this.jdbc = jdbcTemplate;
+        this.configMapper = configMapper;
         this.objectMapper = objectMapper;
         this.baseWorkspace = Path.of(".agentscope", "workspace", "workbench").toAbsolutePath();
     }
@@ -50,12 +51,14 @@ public class WorkbenchOrchestratorService {
     public Map<String, Object> save(WorkbenchRunRequest request) {
         Long userId = SecurityUtils.getCurrentUserId();
         try {
-            String json = objectMapper.writeValueAsString(request);
-            String title = request.title() != null && !request.title().isBlank()
-                    ? request.title() : ("方案 " + java.time.LocalDateTime.now().toString().substring(0, 16));
-            jdbc.update("INSERT INTO ai_workbench_configs (user_id, title, config_json) VALUES (?, ?, ?)", userId, title, json);
-            log.info("[workbench] saved config for user {}", userId);
-            return Map.of("success", true, "message", "编排方案已保存");
+            WorkbenchConfigPO po = new WorkbenchConfigPO();
+            po.setUserId(userId);
+            po.setTitle(request.title() != null && !request.title().isBlank()
+                    ? request.title() : ("方案 " + java.time.LocalDateTime.now().toString().substring(0, 16)));
+            po.setConfigJson(objectMapper.writeValueAsString(request));
+            configMapper.insert(po);
+            log.info("[workbench] saved config id={} for user {}", po.getId(), userId);
+            return Map.of("success", true, "id", po.getId(), "message", "编排方案已保存");
         } catch (JsonProcessingException e) {
             log.error("[workbench] failed to serialize config", e);
             return Map.of("success", false, "error", "序列化失败: " + e.getMessage());
@@ -64,23 +67,21 @@ public class WorkbenchOrchestratorService {
 
     public List<Map<String, Object>> listConfigs() {
         Long userId = SecurityUtils.getCurrentUserId();
-        return jdbc.queryForList(
-                "SELECT id, title, created_at FROM ai_workbench_configs WHERE user_id = ? ORDER BY created_at DESC LIMIT 50",
-                userId);
+        return configMapper.selectByUserId(userId).stream()
+                .map(po -> Map.<String, Object>of("id", po.getId(), "title", po.getTitle(), "created_at", po.getCreatedAt().toString()))
+                .collect(Collectors.toList());
     }
 
     public Map<String, Object> getConfig(Long id) {
         Long userId = SecurityUtils.getCurrentUserId();
-        List<Map<String, Object>> rows = jdbc.queryForList(
-                "SELECT id, config_json, created_at FROM ai_workbench_configs WHERE id = ? AND user_id = ?", id, userId);
-        if (rows.isEmpty()) return Map.of("success", false, "error", "方案不存在");
-        Map<String, Object> row = rows.get(0);
-        return Map.of("success", true, "id", row.get("id"), "config", row.get("config_json"), "createdAt", row.get("created_at"));
+        WorkbenchConfigPO po = configMapper.selectById(id, userId);
+        if (po == null) return Map.of("success", false, "error", "方案不存在");
+        return Map.of("success", true, "id", po.getId(), "config", po.getConfigJson(), "createdAt", po.getCreatedAt().toString());
     }
 
     public Map<String, Object> deleteConfig(Long id) {
         Long userId = SecurityUtils.getCurrentUserId();
-        int deleted = jdbc.update("DELETE FROM ai_workbench_configs WHERE id = ? AND user_id = ?", id, userId);
+        int deleted = configMapper.deleteById(id, userId);
         if (deleted == 0) return Map.of("success", false, "error", "方案不存在或无权限");
         return Map.of("success", true, "message", "已删除");
     }
@@ -91,11 +92,8 @@ public class WorkbenchOrchestratorService {
 
         try {
             writeSubagentDefinitions(request);
-
             HarnessAgent orchestrator = buildOrchestrator(request);
-
             String fullPrompt = buildPrompt(request);
-
             var result = orchestrator.call(fullPrompt).block();
 
             Map<String, Object> response = new LinkedHashMap<>();
@@ -103,7 +101,6 @@ public class WorkbenchOrchestratorService {
             response.put("runId", runId);
             response.put("output", result != null ? result.getTextContent() : "");
             return response;
-
         } catch (Exception e) {
             log.error("[workbench] run {} failed", runId, e);
             return Map.of("success", false, "error", e.getMessage());
@@ -112,14 +109,10 @@ public class WorkbenchOrchestratorService {
 
     public Map<String, Object> runLatest() {
         Long userId = SecurityUtils.getCurrentUserId();
-        List<Map<String, Object>> rows = jdbc.queryForList(
-                "SELECT config_json FROM ai_workbench_configs WHERE user_id = ? ORDER BY created_at DESC LIMIT 1", userId);
-        if (rows.isEmpty()) {
-            return Map.of("success", false, "error", "请先保存编排方案");
-        }
+        List<WorkbenchConfigPO> list = configMapper.selectByUserId(userId);
+        if (list.isEmpty()) return Map.of("success", false, "error", "请先保存编排方案");
         try {
-            String json = (String) rows.get(0).get("config_json");
-            WorkbenchRunRequest request = objectMapper.readValue(json, WorkbenchRunRequest.class);
+            WorkbenchRunRequest request = objectMapper.readValue(list.get(0).getConfigJson(), WorkbenchRunRequest.class);
             return run(request);
         } catch (Exception e) {
             log.error("[workbench] failed to load saved config", e);
@@ -151,12 +144,6 @@ public class WorkbenchOrchestratorService {
             Files.writeString(mdFile, md.toString());
             log.info("[workbench] wrote subagent spec: {}", mdFile);
         }
-
-        long userId = SecurityUtils.getCurrentUserId();
-        Path userFile = subagentsDir.resolve("_config.json");
-        String json = objectMapper.writeValueAsString(request);
-        Files.writeString(userFile, json);
-        log.info("[workbench] wrote config for user {}: {}", userId, userFile);
     }
 
     private HarnessAgent buildOrchestrator(WorkbenchRunRequest request) {
