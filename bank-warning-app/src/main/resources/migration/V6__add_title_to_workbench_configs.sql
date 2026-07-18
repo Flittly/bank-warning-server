@@ -1,0 +1,1 @@
+ALTER TABLE ai_workbench_configs ADD COLUMN IF NOT EXISTS title VARCHAR(200);

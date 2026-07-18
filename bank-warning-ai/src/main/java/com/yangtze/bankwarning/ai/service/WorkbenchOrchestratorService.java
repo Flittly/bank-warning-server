@@ -51,7 +51,9 @@ public class WorkbenchOrchestratorService {
         Long userId = SecurityUtils.getCurrentUserId();
         try {
             String json = objectMapper.writeValueAsString(request);
-            jdbc.update("INSERT INTO ai_workbench_configs (user_id, config_json) VALUES (?, ?)", userId, json);
+            String title = request.title() != null && !request.title().isBlank()
+                    ? request.title() : ("方案 " + java.time.LocalDateTime.now().toString().substring(0, 16));
+            jdbc.update("INSERT INTO ai_workbench_configs (user_id, title, config_json) VALUES (?, ?, ?)", userId, title, json);
             log.info("[workbench] saved config for user {}", userId);
             return Map.of("success", true, "message", "编排方案已保存");
         } catch (JsonProcessingException e) {
@@ -63,7 +65,7 @@ public class WorkbenchOrchestratorService {
     public List<Map<String, Object>> listConfigs() {
         Long userId = SecurityUtils.getCurrentUserId();
         return jdbc.queryForList(
-                "SELECT id, created_at, substr(config_json::text, 1, 200) as preview FROM ai_workbench_configs WHERE user_id = ? ORDER BY created_at DESC LIMIT 50",
+                "SELECT id, title, created_at FROM ai_workbench_configs WHERE user_id = ? ORDER BY created_at DESC LIMIT 50",
                 userId);
     }
 

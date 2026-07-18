@@ -3,6 +3,7 @@ package com.yangtze.bankwarning.ai.dto;
 import java.util.List;
 
 public record WorkbenchRunRequest(
+    String title,
     String prompt,
     String sessionId,
     List<AgentSpec> agents,
