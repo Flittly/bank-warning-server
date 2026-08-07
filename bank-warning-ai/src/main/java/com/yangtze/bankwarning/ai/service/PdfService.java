@@ -1,5 +1,7 @@
 package com.yangtze.bankwarning.ai.service;
 
+import com.yangtze.bankwarning.ai.security.PythonImportScanner;
+import com.yangtze.bankwarning.ai.security.SkillPathGuard;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
@@ -32,6 +34,12 @@ public class PdfService {
     @Value("${app.ai.pdf.timeout-seconds:120}")
     private int timeoutSeconds;
 
+    private final PythonImportScanner importScanner;
+
+    public PdfService(PythonImportScanner importScanner) {
+        this.importScanner = importScanner;
+    }
+
     public Map<String, Object> processPdf(String skillName, String scriptName, String filePath){
         log.info("[pdf] processPdf, skill={}, script={}, file={}", skillName, scriptName, filePath);
 
@@ -47,6 +55,22 @@ public class PdfService {
                 "error", "脚本不存在: skill=" + skillName + ", script=" + scriptName
                     + "（查找目录：" + cacheDir + "/" + skillName + "/scripts, "
                     + fallbackScriptsDir + "）");
+        }
+
+        //执行前静态扫描脚本
+        try {
+            List<String> violations = importScanner.scanFile(scriptFile.toPath(),
+                    PythonImportScanner.parsePermissions(scriptFile.toPath().getParent().getParent()));
+            if (!violations.isEmpty() && importScanner.isFailOnViolation()) {
+                log.warn("[pdf] 脚本被静态扫描拦截: {} violations={}", scriptFile, String.join(", ", violations));
+                return Map.of("success", false, "error", "脚本未通过安全扫描: " + String.join(", ", violations));
+            }
+            if (!violations.isEmpty()) {
+                log.warn("[pdf] 脚本存在潜在危险 import（已放行）: {} violations={}", scriptFile, String.join(", ", violations));
+            }
+        } catch (Exception e) {
+            log.warn("[pdf] 扫描脚本失败，拒绝执行: {} error={}", scriptFile, e.getMessage());
+            return Map.of("success", false, "error", "脚本安全扫描失败: " + e.getMessage());
         }
 
         try{
@@ -104,27 +128,54 @@ public class PdfService {
         }
     }
 
+    /**
+     * 解析要执行的脚本路径。
+     *
+     * 安全约束：脚本必须来自下方三个白名单目录之一，不接受调用方传入的任意路径
+     * （杜绝"绝对路径直执行"），且每个目录内都经 SkillPathGuard 防 ../ 逃逸。
+     */
     private File resolveScript(String skillName, String scriptName){
-        // 1. 尝试绝对路径
-        File direct = new File(scriptName);
-        if(direct.isAbsolute() && direct.exists()) return direct;
+        if (scriptName == null || scriptName.isBlank()) return null;
 
         String skill = skillName == null || skillName.isBlank() ? "pdf" : skillName.trim();
 
-        // 2. 优先 .skills-cache/<skill>/scripts/ （Nacos/classpath 物化目录）
-        File fromCache = new File(Paths.get(cacheDir, skill, "scripts").toString(), scriptName);
-        if(fromCache.exists()) return fromCache;
+        // 1. 优先 .skills-cache/<skill>/scripts/ （Nacos/classpath 物化目录）
+        File fromCache = resolveWithinCache(skill, scriptName);
+        if(fromCache != null && fromCache.exists()) return fromCache;
 
-        // 3. Fallback: classpath 老目录（兼容本地 pdf skill 没经过物化的情况）
-        File fromFallback = new File(fallbackScriptsDir, scriptName);
-        if(fromFallback.exists()) return fromFallback;
+        // 2. Fallback: classpath 老目录（兼容本地 pdf skill 没经过物化的情况）
+        File fromFallback = resolveWithin(fallbackScriptsDir, scriptName);
+        if(fromFallback != null && fromFallback.exists()) return fromFallback;
 
-        // 4. Fallback: user.dir/src/main/resources/skills/pdf/scripts/
-        File fromUserDir = new File(System.getProperty("user.dir"),
-                "src/main/resources/skills/pdf/scripts/" + scriptName);
-        if (fromUserDir.exists()) return fromUserDir;
+        // 3. Fallback: user.dir/src/main/resources/skills/pdf/scripts/
+        File fromUserDir = resolveWithin(
+                new File(System.getProperty("user.dir"), "src/main/resources/skills/pdf/scripts").getAbsolutePath(),
+                scriptName);
+        if (fromUserDir != null && fromUserDir.exists()) return fromUserDir;
 
         return null;
+    }
+
+    /** 在 cache 目录内安全解析脚本路径，防 ../ 逃逸 */
+    private File resolveWithinCache(String skill, String scriptName){
+        try {
+            Path base = Paths.get(cacheDir, skill, "scripts").toAbsolutePath().normalize();
+            return SkillPathGuard.safeResolve(base, scriptName).toFile();
+        } catch (IllegalArgumentException e) {
+            log.warn("[pdf] 非法脚本路径: skill={} script={} reason={}", skill, scriptName, e.getMessage());
+            return null;
+        }
+    }
+
+    /** 在任意基础目录内安全解析，防 ../ 逃逸 */
+    private File resolveWithin(String baseDir, String scriptName){
+        try {
+            Path base = Paths.get(baseDir).toAbsolutePath().normalize();
+            return SkillPathGuard.safeResolve(base, scriptName).toFile();
+        } catch (IllegalArgumentException e) {
+            log.warn("[pdf] 非法脚本路径: base={} script={} reason={}", baseDir, scriptName, e.getMessage());
+            return null;
+        }
     }
 
     private void readStreamInto(java.io.InputStream is, StringBuilder sb) throws IOException {

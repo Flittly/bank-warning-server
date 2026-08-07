@@ -6,6 +6,8 @@ import com.alibaba.nacos.api.exception.NacosException;
 import com.alibaba.nacos.client.ai.NacosAiService;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.yangtze.bankwarning.ai.security.SkillContentVerifier;
+import com.yangtze.bankwarning.ai.security.SkillPathGuard;
 import io.agentscope.core.nacos.skill.NacosSkillRepository;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -24,8 +26,12 @@ import org.springframework.web.client.RestTemplate;
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.Paths;
 import java.util.ArrayList;
 import java.util.Base64;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Properties;
@@ -56,16 +62,19 @@ public class NacosSkillRepositoryHolder {
     private volatile long tokenExpiresAt = 0L;
     private final java.util.concurrent.ConcurrentHashMap<String, String> cachedSkillNames = new java.util.concurrent.ConcurrentHashMap<>();
     private com.alibaba.nacos.api.ai.AiService aiService;
+    private final SkillContentVerifier contentVerifier;
 
     public NacosSkillRepositoryHolder(
             @Value("${agentscope.nacos.server-addr:127.0.0.1:8848}") String serverAddr,
             @Value("${agentscope.nacos.namespace:public}") String namespace,
             @Value("${agentscope.nacos.username:}") String username,
-            @Value("${agentscope.nacos.password:}") String password) {
+            @Value("${agentscope.nacos.password:}") String password,
+            SkillContentVerifier contentVerifier) {
         this.serverAddr = serverAddr;
         this.namespace = namespace;
         this.username = username;
         this.password = password;
+        this.contentVerifier = contentVerifier;
         NacosSkillRepository repo = null;
         boolean ok = false;
         try {
@@ -132,25 +141,21 @@ public class NacosSkillRepositoryHolder {
             zip = downloadViaAdmin(skillName);
         }
         if (zip == null || zip.length == 0) throw new RuntimeException("下载到空内容");
-        java.io.File skillsDir = new java.io.File("src/main/resources/skills/" + skillName);
-        if (!skillsDir.exists()) skillsDir.mkdirs();
-        try (java.util.zip.ZipInputStream zis = new java.util.zip.ZipInputStream(
-                new java.io.ByteArrayInputStream(zip))) {
-            java.util.zip.ZipEntry entry;
-            while ((entry = zis.getNextEntry()) != null) {
-                String name = entry.getName();
-                if (name.contains("/")) name = name.substring(name.indexOf('/') + 1);
-                if (name.isEmpty()) continue;
-                java.io.File outFile = new java.io.File(skillsDir, name);
-                if (entry.isDirectory()) outFile.mkdirs();
-                else {
-                    outFile.getParentFile().mkdirs();
-                    java.nio.file.Files.write(outFile.toPath(), zis.readAllBytes());
-                }
-                zis.closeEntry();
-            }
+        // 下载后先做完整性校验（sha256 清单 + HMAC 签名），通过才允许落盘，拒绝被篡改的 skill
+        if (!contentVerifier.verifyZip(zip)) {
+            throw new RuntimeException("Skill 内容完整性校验失败，拒绝落盘: " + skillName);
         }
-        log.info("[NacosSkill] downloaded {} to {}", skillName, skillsDir.getAbsolutePath());
+        // 校验通过后再解析并剥离公共根目录，得到归一化的文件集合
+        SkillContentVerifier.ZipContent content = contentVerifier.parseZip(zip);
+        Path skillsDir = Paths.get("src/main/resources/skills/" + skillName).toAbsolutePath().normalize();
+        Files.createDirectories(skillsDir);
+        for (Map.Entry<String, byte[]> entry : content.files.entrySet()) {
+            // 落盘前同样走路径防逃逸，防止 zip 内 ../ 条目覆盖外部文件
+            Path outFile = SkillPathGuard.safeResolve(skillsDir, entry.getKey());
+            Files.createDirectories(outFile.getParent());
+            Files.write(outFile, entry.getValue());
+        }
+        log.info("[NacosSkill] downloaded {} to {}", skillName, skillsDir);
     }
 
     private byte[] downloadViaAdmin(String skillName) throws Exception {
@@ -251,34 +256,40 @@ public class NacosSkillRepositoryHolder {
     }
 
     private byte[] buildSkillZip(String skillContent, Map<String, String> resources) throws IOException {
+        Map<String, byte[]> contents = new LinkedHashMap<>();
+        // 1. SKILL.md 作为根文件
+        if (skillContent != null) {
+            contents.put("SKILL.md", skillContent.getBytes(StandardCharsets.UTF_8));
+        }
+        // 2. 其他 resources（避开 SKILL.md 避免重复）
+        if (resources != null) {
+            for (Map.Entry<String, String> entry : resources.entrySet()) {
+                String path = entry.getKey();
+                if (path == null) continue;
+                String normalized = path.replace('\\', '/');
+                if (normalized.equals("SKILL.md") || normalized.equals("./SKILL.md")) continue;
+                String value = entry.getValue();
+                if (value == null) continue;
+                byte[] data;
+                if (value.startsWith("base64:")) {
+                    // 二进制资源（图片、字体等）以 base64 传递，这里解码回原始字节
+                    data = Base64.getDecoder().decode(value.substring("base64:".length()));
+                } else {
+                    data = value.getBytes(StandardCharsets.UTF_8);
+                }
+                contents.put(normalized, data);
+            }
+        }
         ByteArrayOutputStream baos = new ByteArrayOutputStream();
         try (ZipOutputStream zos = new ZipOutputStream(baos)) {
-            // 1. SKILL.md 作为根文件
-            if (skillContent != null) {
-                ZipEntry e = new ZipEntry("SKILL.md");
-                zos.putNextEntry(e);
-                zos.write(skillContent.getBytes(StandardCharsets.UTF_8));
+            for (Map.Entry<String, byte[]> entry : contents.entrySet()) {
+                ZipEntry ze = new ZipEntry(entry.getKey());
+                zos.putNextEntry(ze);
+                zos.write(entry.getValue());
                 zos.closeEntry();
             }
-            // 2. 其他 resources（避开 SKILL.md 避免重复）
-            if (resources != null) {
-                for (Map.Entry<String, String> entry : resources.entrySet()) {
-                    String path = entry.getKey();
-                    if (path == null) continue;
-                    String normalized = path.replace('\\', '/');
-                    if (normalized.equals("SKILL.md") || normalized.equals("./SKILL.md")) continue;
-                    String value = entry.getValue();
-                    if (value == null) continue;
-                    ZipEntry ze = new ZipEntry(normalized);
-                    zos.putNextEntry(ze);
-                    if (value.startsWith("base64:")) {
-                        zos.write(Base64.getDecoder().decode(value.substring("base64:".length())));
-                    } else {
-                        zos.write(value.getBytes(StandardCharsets.UTF_8));
-                    }
-                    zos.closeEntry();
-                }
-            }
+            // 最后写入内嵌校验清单（sha256 + HMAC 签名），消费方下载后按此校验
+            contentVerifier.writeChecksumEntry(zos, contents);
         }
         return baos.toByteArray();
     }

@@ -360,6 +360,8 @@ public class VisualizationService {
 
             log.info("[viz] executing: {}", String.join(" ", cmd));
             log.info("[viz] working dir: {}", scriptBase.getAbsolutePath());
+            // 执行前审计：bank-model-server 为本地固定可信模块，仅记录不扫描
+            log.info("[viz] execute-python-audit cmd={} workdir={}", String.join(" ", cmd), scriptBase.getAbsolutePath());
 
             // 执行命令 - 设置工作目录为 bank-model-server
             ProcessBuilder pb = new ProcessBuilder(cmd);

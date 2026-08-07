@@ -117,6 +117,16 @@ app:
       # Skill 脚本物化缓存根目录（启动时把所有 skill 的 resources 物化到这里）
       # <cache-dir>/<skill-name>/scripts/<file>
       cache-dir: ${user.dir}/.skills-cache
+      # Skill 安全校验（阶段一）
+      verify:
+        # 是否启用完整性校验与静态扫描（关闭时仅保留路径防逃逸）
+        enabled: ${SKILL_VERIFY_ENABLED:true}
+        # HMAC-SHA256 签名密钥（上传/下载 skill zip 时生成与校验清单用）
+        hmac-secret: ${SKILL_HMAC_SECRET:}
+        # 静态扫描发现危险 import 时：true=拒绝，false=仅告警
+        fail-on-violation: ${SKILL_VERIFY_FAIL_ON_VIOLATION:true}
+        # 危险模块黑名单（可覆盖默认值）
+        forbidden-imports: [ctypes, multiprocessing, socket, subprocess, urllib, http, ftplib, telnetlib, ftputil, paramiko, shutil]
     pdf:
       # 兼容旧路径：仅当 cache 里找不到时回退到这里
       fallback-scripts-dir: ${user.dir}/src/main/resources/skills/pdf/scripts
