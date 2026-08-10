@@ -1,0 +1,135 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  自定义 Nacos 客户端日志配置（覆盖 nacos-logback-adapter jar 内的 nacos-logback12.xml）。
+
+  背景：Nacos 默认用 FixedWindowRollingPolicy 做日志滚动，它需要"整条链依次改名"，
+  在 Windows 上 config.log/remote.log 被写日志线程持有句柄，改名失败，
+  于是每次滚动都报 RenameUtil WARN，且日志永远不会归档、无限增长。
+
+  修复：
+  1. 改用 SizeAndTimeBasedRollingPolicy，按"大小 + 时间"直接切出新文件（config.log.日期.序号）；
+  2. 不设置 <file>，让日志直接写到 fileNamePattern 指向的文件，滚动时没有任何改名步骤，
+     从根上规避 Windows 文件占用导致的 RenameUtil 失败。
+-->
+
+<configuration debug="false" scan="false" packagingData="true">
+    <nacosClientProperty scope="context" name="logPath" source="JM.LOG.PATH" defaultValue="${user.home}/logs"/>
+    <nacosClientProperty scope="context" name="logRetainCount" source="JM.LOG.RETAIN.COUNT" defaultValue="7"/>
+    <nacosClientProperty scope="context" name="logFileSize" source="JM.LOG.FILE.SIZE" defaultValue="10MB"/>
+    <nacosClientProperty scope="context" name="nacosConfigLogLevel" source="com.alibaba.nacos.config.log.level" defaultValue="info"/>
+    <nacosClientProperty scope="context" name="nacosLogLevel" source="com.alibaba.nacos.log.level" defaultValue="info"/>
+    <nacosClientProperty scope="context" name="nacosNamingLogLevel" source="com.alibaba.nacos.naming.log.level" defaultValue="info"/>
+    <nacosClientProperty scope="context" name="nacosAILogLevel" source="com.alibaba.nacos.ai.log.level" defaultValue="info"/>
+
+    <appender name="CONFIG_LOG_FILE" class="ch.qos.logback.core.rolling.RollingFileAppender">
+        <rollingPolicy class="ch.qos.logback.core.rolling.SizeAndTimeBasedRollingPolicy">
+            <fileNamePattern>${logPath}/nacos/config.log.%d{yyyy-MM-dd}.%i</fileNamePattern>
+            <maxFileSize>${logFileSize}</maxFileSize>
+            <maxHistory>${logRetainCount}</maxHistory>
+            <totalSizeCap>20GB</totalSizeCap>
+        </rollingPolicy>
+        <encoder>
+            <pattern>%d{yyyy-MM-dd HH:mm:ss.SSS} %p [%-5t:%c{2}] %m%n</pattern>
+        </encoder>
+    </appender>
+
+    <appender name="ASYNC-CONFIG" class="ch.qos.logback.classic.AsyncAppender">
+        <discardingThreshold>0</discardingThreshold>
+        <queueSize>1024</queueSize>
+        <neverBlock>true</neverBlock>
+        <appender-ref ref="CONFIG_LOG_FILE"/>
+    </appender>
+
+    <appender name="NAMING_LOG_FILE" class="ch.qos.logback.core.rolling.RollingFileAppender">
+        <rollingPolicy class="ch.qos.logback.core.rolling.SizeAndTimeBasedRollingPolicy">
+            <fileNamePattern>${logPath}/nacos/naming.log.%d{yyyy-MM-dd}.%i</fileNamePattern>
+            <maxFileSize>${logFileSize}</maxFileSize>
+            <maxHistory>${logRetainCount}</maxHistory>
+            <totalSizeCap>20GB</totalSizeCap>
+        </rollingPolicy>
+        <encoder>
+            <pattern>%d{yyyy-MM-dd HH:mm:ss.SSS} %p [%-5t:%c{2}] %m%n</pattern>
+        </encoder>
+    </appender>
+
+    <appender name="ASYNC-NAMING" class="ch.qos.logback.classic.AsyncAppender">
+        <discardingThreshold>0</discardingThreshold>
+        <queueSize>1024</queueSize>
+        <neverBlock>true</neverBlock>
+        <appender-ref ref="NAMING_LOG_FILE"/>
+    </appender>
+
+    <appender name="REMOTE_LOG_FILE" class="ch.qos.logback.core.rolling.RollingFileAppender">
+        <rollingPolicy class="ch.qos.logback.core.rolling.SizeAndTimeBasedRollingPolicy">
+            <fileNamePattern>${logPath}/nacos/remote.log.%d{yyyy-MM-dd}.%i</fileNamePattern>
+            <maxFileSize>${logFileSize}</maxFileSize>
+            <maxHistory>${logRetainCount}</maxHistory>
+            <totalSizeCap>20GB</totalSizeCap>
+        </rollingPolicy>
+        <encoder>
+            <pattern>%d{yyyy-MM-dd HH:mm:ss.SSS} %p [%-5t:%c{2}] %m%n</pattern>
+        </encoder>
+    </appender>
+
+    <appender name="ASYNC-REMOTE" class="ch.qos.logback.classic.AsyncAppender">
+        <discardingThreshold>0</discardingThreshold>
+        <queueSize>1024</queueSize>
+        <neverBlock>true</neverBlock>
+        <appender-ref ref="REMOTE_LOG_FILE"/>
+    </appender>
+
+    <appender name="AI_LOG_FILE" class="ch.qos.logback.core.rolling.RollingFileAppender">
+        <rollingPolicy class="ch.qos.logback.core.rolling.SizeAndTimeBasedRollingPolicy">
+            <fileNamePattern>${logPath}/nacos/ai.log.%d{yyyy-MM-dd}.%i</fileNamePattern>
+            <maxFileSize>${logFileSize}</maxFileSize>
+            <maxHistory>${logRetainCount}</maxHistory>
+            <totalSizeCap>20GB</totalSizeCap>
+        </rollingPolicy>
+        <encoder>
+            <pattern>%d{yyyy-MM-dd HH:mm:ss.SSS} %p [%-5t:%c{2}] %m%n</pattern>
+        </encoder>
+    </appender>
+
+    <appender name="ASYNC-AI" class="ch.qos.logback.classic.AsyncAppender">
+        <discardingThreshold>0</discardingThreshold>
+        <queueSize>1024</queueSize>
+        <neverBlock>true</neverBlock>
+        <appender-ref ref="AI_LOG_FILE"/>
+    </appender>
+
+    <logger name="com.alibaba.nacos.client" level="${nacosConfigLogLevel}"
+        additivity="false">
+        <appender-ref ref="ASYNC-CONFIG"/>
+    </logger>
+
+    <Logger name="com.alibaba.nacos.common.labels" level="${nacosLogLevel}"
+        additivity="false">
+        <appender-ref ref="ASYNC-REMOTE"/>
+    </Logger>
+
+    <Logger name="com.alibaba.nacos.common.remote.client" level="${nacosLogLevel}"
+        additivity="false">
+        <appender-ref ref="ASYNC-REMOTE"/>
+    </Logger>
+
+    <Logger name="com.alibaba.nacos.shaded.io.grpc" level="${nacosConfigLogLevel}"
+        additivity="false">
+        <appender-ref ref="ASYNC-REMOTE"/>
+    </Logger>
+
+    <logger name="com.alibaba.nacos.client.config" level="${nacosConfigLogLevel}"
+        additivity="false">
+        <appender-ref ref="ASYNC-CONFIG"/>
+    </logger>
+
+    <logger name="com.alibaba.nacos.client.naming" level="${nacosNamingLogLevel}"
+        additivity="false">
+        <appender-ref ref="ASYNC-NAMING"/>
+    </logger>
+
+    <logger name="com.alibaba.nacos.client.ai" level="${nacosAILogLevel}"
+        additivity="false">
+        <appender-ref ref="ASYNC-AI"/>
+    </logger>
+
+</configuration>
