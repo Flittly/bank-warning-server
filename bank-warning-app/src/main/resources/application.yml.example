@@ -127,11 +127,28 @@ app:
         fail-on-violation: ${SKILL_VERIFY_FAIL_ON_VIOLATION:true}
         # 危险模块黑名单（可覆盖默认值）
         forbidden-imports: [ctypes, multiprocessing, socket, subprocess, urllib, http, ftplib, telnetlib, ftputil, paramiko, shutil]
+      # Skill 执行沙箱（阶段二）
+      sandbox:
+        # off=关闭沙箱（阶段一原行为）；process=进程级软沙箱（默认）；docker=容器级硬沙箱（生产建议）
+        mode: ${SKILL_SANDBOX_MODE:process}
+        # 单次执行超时（秒），超时后强杀整棵进程树
+        timeout-seconds: ${SKILL_SANDBOX_TIMEOUT_SECONDS:120}
+        # stdout/stderr 最大捕获字节数，超出部分丢弃并标记截断（防输出洪泛）
+        max-output-bytes: ${SKILL_SANDBOX_MAX_OUTPUT_BYTES:1048576}
+        # 脚本内存上限（MB，POSIX rlimit；Windows 下降级为仅超时+输出上限）
+        memory-mb: ${SKILL_SANDBOX_MEMORY_MB:512}
+        # CPU 时间上限（秒，POSIX rlimit）
+        cpu-seconds: ${SKILL_SANDBOX_CPU_SECONDS:30}
+        # docker 模式：容器内进程数上限 / CPU 配额
+        pids-limit: ${SKILL_SANDBOX_PIDS_LIMIT:64}
+        cpus: ${SKILL_SANDBOX_CPUS:0.5}
+        # docker 模式：镜像名（需预置 Python 及 skill 依赖）
+        docker-image: ${SKILL_SANDBOX_DOCKER_IMAGE:}
+        # 子进程环境变量白名单（其余一律不继承，防 os.environ 偷取宿主密钥）
+        env-allowlist: [PATH, SYSTEMROOT, WINDIR, COMSPEC, PATHEXT, LANG, LC_ALL, PYTHONIOENCODING]
     pdf:
       # 兼容旧路径：仅当 cache 里找不到时回退到这里
       fallback-scripts-dir: ${user.dir}/src/main/resources/skills/pdf/scripts
-      # Python 脚本执行超时（秒）
-      timeout-seconds: 120
     # 可视化脚本配置
     visualization:
       # 脚本目录（bank-model-server 路径）

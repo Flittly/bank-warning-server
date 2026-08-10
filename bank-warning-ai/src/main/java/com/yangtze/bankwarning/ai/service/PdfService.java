@@ -1,24 +1,20 @@
 package com.yangtze.bankwarning.ai.service;
 
 import com.yangtze.bankwarning.ai.security.PythonImportScanner;
+  import com.yangtze.bankwarning.ai.security.SkillSandboxExecutor;
 import com.yangtze.bankwarning.ai.security.SkillPathGuard;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 
-import java.io.BufferedReader;
 import java.io.File;
 import java.io.IOException;
-import java.io.InputStreamReader;
-import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
-import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
-import java.util.concurrent.TimeUnit;
 
 @Service
 public class PdfService {
@@ -31,13 +27,12 @@ public class PdfService {
     @Value("${app.ai.pdf.fallback-scripts-dir:${user.dir}/src/main/resources/skills/pdf/scripts}")
     private String fallbackScriptsDir;
 
-    @Value("${app.ai.pdf.timeout-seconds:120}")
-    private int timeoutSeconds;
-
     private final PythonImportScanner importScanner;
+    private final SkillSandboxExecutor sandboxExecutor;
 
-    public PdfService(PythonImportScanner importScanner) {
+    public PdfService(PythonImportScanner importScanner, SkillSandboxExecutor sandboxExecutor) {
         this.importScanner = importScanner;
+        this.sandboxExecutor = sandboxExecutor;
     }
 
     public Map<String, Object> processPdf(String skillName, String scriptName, String filePath){
@@ -73,55 +68,33 @@ public class PdfService {
             return Map.of("success", false, "error", "脚本安全扫描失败: " + e.getMessage());
         }
 
-        try{
+        try {
             Path skillDir = Paths.get(cacheDir, skillName);
-            List<String> cmd = new ArrayList<>();
-            cmd.add("uv");
-            cmd.add("run");
-            cmd.add("--quiet");
-            cmd.add("--project");
-            cmd.add(skillDir.toString());
-            cmd.add("python");
-            cmd.add(scriptFile.getAbsolutePath());
-            cmd.add(filePath);
+            Path pdfAbs = pdfFile.toAbsolutePath();
+            // 统一走阶段二沙箱执行器：环境白名单 + 强超时 + 输出上限 + audit hook/rlimit
+            SkillSandboxExecutor.SandboxRequest sandboxReq = SkillSandboxExecutor.SandboxRequest.builder()
+                    .script(scriptFile.toPath().toAbsolutePath())
+                    .skillDir(skillDir.toAbsolutePath())
+                    .args(List.of(pdfAbs.toString()))
+                    // 输入文件目录只读挂载：脚本能读 PDF，但不能写回宿主任意路径
+                    .readRoots(List.of(pdfAbs.getParent()))
+                    .extraEnv(Map.of("PYTHONIOENCODING", "utf-8"))
+                    .useUvProject(true)
+                    .build();
+            SkillSandboxExecutor.SandboxResult result = sandboxExecutor.execute(sandboxReq);
 
-            log.info("[pdf] executing: {}", String.join(" ", cmd));
-
-            ProcessBuilder pb = new ProcessBuilder(cmd);
-            pb.environment().put("PYTHONIOENCODING", "utf-8");
-
-            Process process = pb.start();
-            StringBuilder stdoutSb = new StringBuilder();
-            StringBuilder stderrSb = new StringBuilder();
-            Thread stdoutThread = new Thread(() -> {
-                try { readStreamInto(process.getInputStream(), stdoutSb); } catch (IOException ignored) {}
-            });
-            Thread stderrThread = new Thread(() -> {
-                try { readStreamInto(process.getErrorStream(), stderrSb); } catch (IOException ignored) {}
-            });
-            stdoutThread.start();
-            stderrThread.start();
-            boolean completed = process.waitFor(timeoutSeconds, TimeUnit.SECONDS);
-
-            if(!completed){
-                process.destroyForcibly();
-                return Map.of("success", false, "error", "脚本执行超时");
+            if (result.isTimedOut()) {
+                return Map.of("success", false, "error",
+                        "脚本执行超时（沙箱 " + result.getMode() + "，" + result.getDurationMs() + "ms 后强杀）");
             }
-            stdoutThread.join(5000);
-            stderrThread.join(5000);
-
-            String stdout = stdoutSb.toString().trim();
-            String stderr = stderrSb.toString().trim();
-
-            log.info("[pdf] exit code: {}, stdout length: {}, stderr length: {}",
-                    process.exitValue(), stdout.length(), stderr.length());
-
-            if (process.exitValue() != 0) {
-                return Map.of("success", false, "error", "脚本执行失败: " + stderr);
+            if (result.isOutputTruncated()) {
+                log.warn("[pdf] 脚本输出超过沙箱上限，已截断");
             }
-
-            return Map.of("success", true, "content", stdout);
-
+            if (result.getExitCode() != 0) {
+                return Map.of("success", false, "error",
+                        "脚本执行失败: " + trimTo(result.getStderr(), 2000));
+            }
+            return Map.of("success", true, "content", result.getStdout());
         } catch (Exception e) {
             log.error("[pdf] execute failed", e);
             return Map.of("success", false, "error", e.getMessage());
@@ -178,13 +151,11 @@ public class PdfService {
         }
     }
 
-    private void readStreamInto(java.io.InputStream is, StringBuilder sb) throws IOException {
-        try (BufferedReader reader = new BufferedReader(
-                new InputStreamReader(is, StandardCharsets.UTF_8))) {
-            String line;
-            while ((line = reader.readLine()) != null) {
-                sb.append(line).append("\n");
-            }
+    private static String trimTo(String text, int max) {
+        if (text == null) {
+            return "";
         }
+        String trimmed = text.trim();
+        return trimmed.length() <= max ? trimmed : trimmed.substring(0, max) + "...(truncated)";
     }
 }
