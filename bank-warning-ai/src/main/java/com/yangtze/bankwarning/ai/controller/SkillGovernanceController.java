@@ -33,8 +33,10 @@ public class SkillGovernanceController {
     }
 
     @GetMapping("/approvals")
-    public Map<String, Object> listPending() {
-        return Map.of("success", true, "approvals", approvalService.listPending());
+    public Map<String, Object> listApprovals(
+            @RequestParam(defaultValue = "PENDING") String status) {
+        String queryStatus = "ALL".equalsIgnoreCase(status) ? null : status;
+        return Map.of("success", true, "approvals", approvalService.listByStatus(queryStatus));
     }
 
     @GetMapping("/approvals/skill/{skillName}")
@@ -59,6 +61,13 @@ public class SkillGovernanceController {
         boolean ok = approvalService.reject(id, reviewer(), comment);
         return ok ? Map.of("success", true)
                 : Map.of("success", false, "error", "审批记录不存在或已处理");
+    }
+
+    @PostMapping("/approvals/{id}/resubmit")
+    public Map<String, Object> resubmit(@PathVariable Long id) {
+        boolean ok = approvalService.resubmit(id, reviewer());
+        return ok ? Map.of("success", true)
+                : Map.of("success", false, "error", "仅已驳回的记录可重新提交");
     }
 
     @GetMapping("/audit")

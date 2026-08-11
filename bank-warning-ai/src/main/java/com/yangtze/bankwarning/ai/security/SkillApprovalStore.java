@@ -27,6 +27,9 @@ public interface SkillApprovalStore {
     /** 查询全部待审批记录 */
     List<SkillApproval> listPending();
 
+    /** 按状态查询审批记录，status 为 null 时返回全部 */
+    List<SkillApproval> listByStatus(String status);
+
     /** 按 id 查询一条审批记录 */
     Optional<SkillApproval> findById(Long id);
 

@@ -90,10 +90,21 @@ public class JdbcSkillApprovalStore implements SkillApprovalStore {
 
     @Override
     public List<SkillApproval> listPending() {
+        return listByStatus(STATUS_PENDING);
+    }
+
+    @Override
+    public List<SkillApproval> listByStatus(String status) {
+        if (status == null || status.isBlank()) {
+            return jdbcTemplate.query(
+                    "SELECT id, skill_name, version, permission, status, requested_by, reviewed_by, comment "
+                            + "FROM skill_approvals ORDER BY created_at DESC",
+                    ROW_MAPPER);
+        }
         return jdbcTemplate.query(
-                "SELECT id, skill_name, version, permission, status, requested_by, reviewed_by, comment FROM skill_approvals "
-                        + "WHERE status = ? ORDER BY created_at DESC",
-                ROW_MAPPER, STATUS_PENDING);
+                "SELECT id, skill_name, version, permission, status, requested_by, reviewed_by, comment "
+                        + "FROM skill_approvals WHERE status = ? ORDER BY created_at DESC",
+                ROW_MAPPER, status);
     }
 
     @Override

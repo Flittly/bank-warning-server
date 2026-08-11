@@ -41,6 +41,14 @@ class SkillApprovalServiceTest {
         }
 
         @Override
+        public List<SkillApproval> listByStatus(String status) {
+            if (status == null) {
+                return List.copyOf(rows);
+            }
+            return rows.stream().filter(a -> status.equals(a.status())).toList();
+        }
+
+        @Override
         public Optional<SkillApproval> findById(Long id) {
             return rows.stream().filter(a -> id.equals(a.id())).findFirst();
         }
@@ -150,5 +158,24 @@ class SkillApprovalServiceTest {
 
         assertTrue(approval.approve(id, "admin"));
         assertFalse(approval.approve(id, "admin2"));
+    }
+
+    @Test
+    void rejectedRecordCanBeResubmitted() {
+        MapStore store = new MapStore();
+        SkillApprovalService approval = new SkillApprovalService(store);
+        approval.createPendingForSkill("search", "1.0.0", Set.of("network"), "alice");
+        Long id = store.listPending().get(0).id();
+
+        assertTrue(approval.reject(id, "admin", "不允许联网"));
+        assertTrue(approval.resubmit(id, "alice"));
+        assertEquals(1, store.listPending().size());
+
+        SkillGovernanceService governance = new SkillGovernanceService(
+                store, true, false, List.of(), List.of(), true);
+        assertFalse(governance.evaluate("search", "1.0.0", Set.of("network")).isAllowed());
+
+        assertTrue(approval.approve(id, "admin"));
+        assertTrue(governance.evaluate("search", "1.0.0", Set.of("network")).isAllowed());
     }
 }

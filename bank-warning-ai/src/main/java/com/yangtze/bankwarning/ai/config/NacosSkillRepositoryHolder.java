@@ -10,6 +10,7 @@ import com.yangtze.bankwarning.ai.security.SkillContentVerifier;
 import com.yangtze.bankwarning.ai.security.SkillPathGuard;
 import com.yangtze.bankwarning.ai.security.SkillMetadata;
 import com.yangtze.bankwarning.ai.security.SkillApprovalService;
+import com.yangtze.bankwarning.ai.service.SkillCacheService;
 import com.yangtze.bankwarning.security.security.SecurityUtils;
 import io.agentscope.core.nacos.skill.NacosSkillRepository;
 import org.slf4j.Logger;
@@ -67,6 +68,7 @@ public class NacosSkillRepositoryHolder {
     private com.alibaba.nacos.api.ai.AiService aiService;
     private final SkillContentVerifier contentVerifier;
     private final SkillApprovalService approvalService;
+    private final SkillCacheService skillCacheService;
 
     public NacosSkillRepositoryHolder(
             @Value("${agentscope.nacos.server-addr:127.0.0.1:8848}") String serverAddr,
@@ -74,13 +76,15 @@ public class NacosSkillRepositoryHolder {
             @Value("${agentscope.nacos.username:}") String username,
             @Value("${agentscope.nacos.password:}") String password,
             SkillContentVerifier contentVerifier,
-            SkillApprovalService approvalService) {
+            SkillApprovalService approvalService,
+            SkillCacheService skillCacheService) {
         this.serverAddr = serverAddr;
         this.namespace = namespace;
         this.username = username;
         this.password = password;
         this.contentVerifier = contentVerifier;
         this.approvalService = approvalService;
+        this.skillCacheService = skillCacheService;
         NacosSkillRepository repo = null;
         boolean ok = false;
         try {
@@ -168,7 +172,9 @@ public class NacosSkillRepositoryHolder {
             SkillMetadata metadata = SkillMetadata.parse(new String(skillMdBytes, StandardCharsets.UTF_8));
             approvalService.createPendingForSkill(skillName, metadata.getVersion(), metadata.getPermissions(), requester());
         }
-        log.info("[NacosSkill] downloaded {} to {}", skillName, skillsDir);
+        // 下载后立即刷新执行缓存，脚本立即可用，无需重启
+        skillCacheService.materialize(skillName, content.files);
+        log.info("[NacosSkill] downloaded {} to {}，缓存已刷新，立即生效", skillName, skillsDir);
     }
 
     private static String requester() {

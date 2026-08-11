@@ -3,10 +3,9 @@ package com.yangtze.bankwarning.ai.config;
 import com.fasterxml.jackson.core.JsonParser;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.yangtze.bankwarning.ai.middleware.ReasoningTraceMiddleware;
-import com.yangtze.bankwarning.ai.security.PythonImportScanner;
-import com.yangtze.bankwarning.ai.security.SkillPathGuard;
 import com.yangtze.bankwarning.ai.service.KnowledgeService;
 import com.yangtze.bankwarning.ai.service.PdfService;
+import com.yangtze.bankwarning.ai.service.SkillCacheService;
 import com.yangtze.bankwarning.ai.service.VisualizationService;
 import com.yangtze.bankwarning.ai.service.WeatherService;
 import com.yangtze.bankwarning.ai.tool.KnowledgeQueryTool;
@@ -37,12 +36,8 @@ import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.jdbc.core.JdbcTemplate;
 
-import java.nio.file.Files;
 import java.nio.file.Path;
-import java.nio.file.Paths;
-import java.nio.file.StandardOpenOption;
 import java.util.ArrayList;
-import java.util.Base64;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -156,17 +151,15 @@ public class AgentScopeConfig {
     public List<AgentSkillRepository> agentSkillRepositories(
             Toolkit reportToolkit,
             ObjectProvider<NacosSkillRepositoryHolder> nacosHolderProvider,
-            @Value("${app.ai.skill.cache-dir:${user.dir}/.skills-cache}") String cacheDir,
-            PythonImportScanner importScanner) throws Exception {
+            SkillCacheService skillCacheService) throws Exception {
         List<AgentSkillRepository> repos = new ArrayList<>();
         Set<String> registered = new HashSet<>();
-        Path cacheBase = Paths.get(cacheDir);
 
         ClasspathSkillRepository classpathRepo = new ClasspathSkillRepository("skills");
         for (AgentSkill skill : classpathRepo.getAllSkills()) {
             String name = skill.getName();
             if (registered.add(name)) {
-                materializeSkillScripts(skill, cacheBase, importScanner);
+                materializeSafe(skillCacheService, skill);
                 log.info("[SkillRepo] registered local: {}", name);
             } else {
                 log.warn("[SkillRepo] duplicate local skill skipped: {}", name);
@@ -179,7 +172,7 @@ public class AgentScopeConfig {
             for (AgentSkill skill : nacosHolder.getRepository().getAllSkills()) {
                 String name = skill.getName();
                 if (registered.add(name)) {
-                    materializeSkillScripts(skill, cacheBase, importScanner);
+                    materializeSafe(skillCacheService, skill);
                     log.info("[SkillRepo] registered nacos: {}", name);
                 } else {
                     log.info("[SkillRepo] nacos skill '{}' skipped (local has higher priority)", name);
@@ -192,45 +185,11 @@ public class AgentScopeConfig {
         return repos;
     }
 
-    private void materializeSkillScripts(AgentSkill skill, Path cacheBase, PythonImportScanner scanner) {
-        Map<String, String> resources = skill.getResources();
-        if (resources == null || resources.isEmpty()) return;
-        Path base = cacheBase.resolve(skill.getName()).toAbsolutePath().normalize();
+    private void materializeSafe(SkillCacheService skillCacheService, AgentSkill skill) {
         try {
-            Files.createDirectories(base);
+            skillCacheService.materializeResources(skill.getName(), skill.getResources());
         } catch (Exception e) {
-            log.error("[SkillRepo] failed to create cache dir {}: {}", base, e.getMessage());
-            return;
-        }
-        for (Map.Entry<String, String> entry : resources.entrySet()) {
-            String relPath = entry.getKey();
-            String content = entry.getValue();
-            if (content == null) continue;
-            try {
-                // 路径防逃逸：normalize 后必须位于 skill 缓存目录内，防止 ../ 覆盖外部文件
-                Path target = SkillPathGuard.safeResolve(base, relPath);
-                Files.createDirectories(target.getParent());
-                // 资源可能以 base64 编码传递（如二进制脚本/模板），统一在此解码
-                String decoded = content.startsWith("base64:")
-                        ? new String(Base64.getDecoder().decode(content.substring("base64:".length())))
-                        : content;
-                Files.writeString(target, decoded,
-                        StandardOpenOption.CREATE,
-                        StandardOpenOption.TRUNCATE_EXISTING);
-                log.info("[SkillRepo] materialized: {}", target);
-            } catch (Exception e) {
-                log.error("[SkillRepo] failed to materialize {}: {}", relPath, e.getMessage());
-            }
-        }
-        // 物化后对 skill 目录下所有 .py 做静态 import 扫描，危险模块需在 SKILL.md permissions 放行
-        try {
-            var scanResult = scanner.scanSkillDir(base, PythonImportScanner.parsePermissions(base));
-            if (!scanResult.getViolations().isEmpty()) {
-                log.warn("[SkillRepo] skill '{}' import violations: {}", skill.getName(),
-                        String.join(", ", scanResult.getViolations()));
-            }
-        } catch (Exception e) {
-            log.warn("[SkillRepo] scan skill '{}' failed: {}", skill.getName(), e.getMessage());
+            log.error("[SkillRepo] 物化失败 {}: {}", skill.getName(), e.getMessage());
         }
     }
 

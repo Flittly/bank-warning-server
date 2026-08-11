@@ -48,6 +48,10 @@ public class SkillApprovalService {
         return store.listPending();
     }
 
+    public List<SkillApprovalStore.SkillApproval> listByStatus(String status) {
+        return store.listByStatus(status);
+    }
+
     public List<SkillApprovalStore.SkillApproval> listBySkill(String skillName, String version) {
         return store.findApprovals(skillName, version);
     }
@@ -78,6 +82,21 @@ public class SkillApprovalService {
         if (ok) {
             store.appendAudit(approval.skillName(), approval.version(), "REJECTED",
                     "permission=" + approval.permission() + " reviewer=" + reviewer + " comment=" + comment, true);
+        }
+        return ok;
+    }
+
+    /** 已驳回的记录重新提交审批：状态回到 PENDING，清空审批人与意见 */
+    public boolean resubmit(Long id, String requester) {
+        Optional<SkillApprovalStore.SkillApproval> row = store.findById(id);
+        if (row.isEmpty() || !SkillApprovalStore.STATUS_REJECTED.equals(row.get().status())) {
+            return false;
+        }
+        SkillApprovalStore.SkillApproval approval = row.get();
+        boolean ok = store.updateStatus(id, SkillApprovalStore.STATUS_PENDING, null, null);
+        if (ok) {
+            store.appendAudit(approval.skillName(), approval.version(), "RESUBMITTED",
+                    "permission=" + approval.permission() + " requester=" + requester, false);
         }
         return ok;
     }

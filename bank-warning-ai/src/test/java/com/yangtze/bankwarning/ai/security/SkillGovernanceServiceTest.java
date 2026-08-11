@@ -43,6 +43,14 @@ class SkillGovernanceServiceTest {
         }
 
         @Override
+        public List<SkillApproval> listByStatus(String status) {
+            if (status == null) {
+                return List.copyOf(approvals);
+            }
+            return approvals.stream().filter(a -> status.equals(a.status())).toList();
+        }
+
+        @Override
         public java.util.Optional<SkillApproval> findById(Long id) {
             return approvals.stream().filter(a -> id.equals(a.id())).findFirst();
         }
