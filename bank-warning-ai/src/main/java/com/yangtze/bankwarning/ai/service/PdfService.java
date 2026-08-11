@@ -1,7 +1,10 @@
 package com.yangtze.bankwarning.ai.service;
 
 import com.yangtze.bankwarning.ai.security.PythonImportScanner;
-  import com.yangtze.bankwarning.ai.security.SkillSandboxExecutor;
+import com.yangtze.bankwarning.ai.security.SkillSandboxExecutor;
+import com.yangtze.bankwarning.ai.security.SkillGovernanceService;
+import com.yangtze.bankwarning.ai.security.SkillMetadata;
+import com.yangtze.bankwarning.ai.security.SkillOutputValidator;
 import com.yangtze.bankwarning.ai.security.SkillPathGuard;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -29,10 +32,17 @@ public class PdfService {
 
     private final PythonImportScanner importScanner;
     private final SkillSandboxExecutor sandboxExecutor;
+    private final SkillGovernanceService governance;
+    private final SkillOutputValidator outputValidator;
 
-    public PdfService(PythonImportScanner importScanner, SkillSandboxExecutor sandboxExecutor) {
+    public PdfService(PythonImportScanner importScanner,
+                      SkillSandboxExecutor sandboxExecutor,
+                      SkillGovernanceService governance,
+                      SkillOutputValidator outputValidator) {
         this.importScanner = importScanner;
         this.sandboxExecutor = sandboxExecutor;
+        this.governance = governance;
+        this.outputValidator = outputValidator;
     }
 
     public Map<String, Object> processPdf(String skillName, String scriptName, String filePath){
@@ -52,6 +62,21 @@ public class PdfService {
                     + fallbackScriptsDir + "）");
         }
 
+        // 阶段三：读取 skill 元数据（版本 / 权限 / 输出契约），执行前做治理裁决
+        Path skillDir = Paths.get(cacheDir, skillName);
+        SkillMetadata metadata = SkillMetadata.parse(skillDir);
+        SkillGovernanceService.GovernanceDecision decision =
+                governance.evaluate(skillName, metadata.getVersion(), metadata.getPermissions());
+        if (!decision.isAllowed()) {
+            String detail = String.join("; ", decision.reasons());
+            governance.recordAudit(skillName, metadata.getVersion(), "EXECUTE_BLOCKED", detail, true);
+            log.warn("[pdf] skill 被治理策略拒绝: skill={} version={} reasons={}", skillName, metadata.getVersion(), detail);
+            return Map.of("success", false, "error", "Skill 执行被治理策略拒绝: " + detail);
+        }
+        for (String warning : decision.warnings()) {
+            log.warn("[pdf] skill 治理警告: skill={} version={} {}", skillName, metadata.getVersion(), warning);
+        }
+
         //执行前静态扫描脚本
         try {
             List<String> violations = importScanner.scanFile(scriptFile.toPath(),
@@ -69,7 +94,6 @@ public class PdfService {
         }
 
         try {
-            Path skillDir = Paths.get(cacheDir, skillName);
             Path pdfAbs = pdfFile.toAbsolutePath();
             // 统一走阶段二沙箱执行器：环境白名单 + 强超时 + 输出上限 + audit hook/rlimit
             SkillSandboxExecutor.SandboxRequest sandboxReq = SkillSandboxExecutor.SandboxRequest.builder()
@@ -91,9 +115,23 @@ public class PdfService {
                 log.warn("[pdf] 脚本输出超过沙箱上限，已截断");
             }
             if (result.getExitCode() != 0) {
+                governance.recordAudit(skillName, metadata.getVersion(), "EXECUTE_FAILED",
+                        "exit=" + result.getExitCode() + " stderr=" + trimTo(result.getStderr(), 500), true);
                 return Map.of("success", false, "error",
                         "脚本执行失败: " + trimTo(result.getStderr(), 2000));
             }
+
+            // 阶段三：输出契约校验，失败即拒绝，绝不透传不可信输出
+            SkillOutputValidator.ValidationResult outputCheck = outputValidator.validate(metadata, result);
+            if (!outputCheck.isValid()) {
+                governance.recordAudit(skillName, metadata.getVersion(), "OUTPUT_INVALID",
+                        outputCheck.getReason(), true);
+                log.warn("[pdf] 脚本输出未通过校验: skill={} version={} reason={}",
+                        skillName, metadata.getVersion(), outputCheck.getReason());
+                return Map.of("success", false, "error", "脚本输出未通过校验: " + outputCheck.getReason());
+            }
+            governance.recordAudit(skillName, metadata.getVersion(), "EXECUTE_OK",
+                    "exit=" + result.getExitCode() + " durationMs=" + result.getDurationMs(), false);
             return Map.of("success", true, "content", result.getStdout());
         } catch (Exception e) {
             log.error("[pdf] execute failed", e);
@@ -110,7 +148,7 @@ public class PdfService {
     private File resolveScript(String skillName, String scriptName){
         if (scriptName == null || scriptName.isBlank()) return null;
 
-        String skill = skillName == null || skillName.isBlank() ? "pdf" : skillName.trim();
+        String skill = skillName == null || skillName.isBlank() ? "pdf" : skillName.strip();
 
         // 1. 优先 .skills-cache/<skill>/scripts/ （Nacos/classpath 物化目录）
         File fromCache = resolveWithinCache(skill, scriptName);
@@ -155,7 +193,7 @@ public class PdfService {
         if (text == null) {
             return "";
         }
-        String trimmed = text.trim();
+        String trimmed = text.strip();
         return trimmed.length() <= max ? trimmed : trimmed.substring(0, max) + "...(truncated)";
     }
 }

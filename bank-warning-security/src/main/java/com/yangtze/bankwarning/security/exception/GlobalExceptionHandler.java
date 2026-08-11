@@ -1,6 +1,7 @@
 package com.yangtze.bankwarning.security.exception;
 
 import com.yangtze.bankwarning.security.exception.business.InvalidCredentialsException;
+import com.yangtze.bankwarning.security.exception.business.PermissionDeniedException;
 import com.yangtze.bankwarning.security.exception.business.UserNotFoundException;
 import org.springframework.http.ResponseEntity;
 import org.springframework.validation.FieldError;
@@ -29,6 +30,14 @@ public class GlobalExceptionHandler {
         error.put("code", "INVALID_CREDENTIALS");
         error.put("message", e.getMessage());
         return ResponseEntity.status(401).body(error);
+    }
+
+    @ExceptionHandler(PermissionDeniedException.class)
+    public ResponseEntity<Map<String, String>> handlePermissionDenied(PermissionDeniedException e) {
+        Map<String, String> error = new HashMap<>();
+        error.put("code", "PERMISSION_DENIED");
+        error.put("message", e.getMessage());
+        return ResponseEntity.status(403).body(error);
     }
 
     @ExceptionHandler(MethodArgumentNotValidException.class)

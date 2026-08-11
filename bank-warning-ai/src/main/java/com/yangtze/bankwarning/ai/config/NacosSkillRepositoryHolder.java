@@ -8,6 +8,9 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.yangtze.bankwarning.ai.security.SkillContentVerifier;
 import com.yangtze.bankwarning.ai.security.SkillPathGuard;
+import com.yangtze.bankwarning.ai.security.SkillMetadata;
+import com.yangtze.bankwarning.ai.security.SkillApprovalService;
+import com.yangtze.bankwarning.security.security.SecurityUtils;
 import io.agentscope.core.nacos.skill.NacosSkillRepository;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -63,18 +66,21 @@ public class NacosSkillRepositoryHolder {
     private final java.util.concurrent.ConcurrentHashMap<String, String> cachedSkillNames = new java.util.concurrent.ConcurrentHashMap<>();
     private com.alibaba.nacos.api.ai.AiService aiService;
     private final SkillContentVerifier contentVerifier;
+    private final SkillApprovalService approvalService;
 
     public NacosSkillRepositoryHolder(
             @Value("${agentscope.nacos.server-addr:127.0.0.1:8848}") String serverAddr,
             @Value("${agentscope.nacos.namespace:public}") String namespace,
             @Value("${agentscope.nacos.username:}") String username,
             @Value("${agentscope.nacos.password:}") String password,
-            SkillContentVerifier contentVerifier) {
+            SkillContentVerifier contentVerifier,
+            SkillApprovalService approvalService) {
         this.serverAddr = serverAddr;
         this.namespace = namespace;
         this.username = username;
         this.password = password;
         this.contentVerifier = contentVerifier;
+        this.approvalService = approvalService;
         NacosSkillRepository repo = null;
         boolean ok = false;
         try {
@@ -155,7 +161,19 @@ public class NacosSkillRepositoryHolder {
             Files.createDirectories(outFile.getParent());
             Files.write(outFile, entry.getValue());
         }
+        // 阶段三：下载后按 SKILL.md 声明的权限自动生成待审批记录（幂等），
+        // 审批通过前该 skill 的权限类能力无法执行
+        byte[] skillMdBytes = content.files.get("SKILL.md");
+        if (skillMdBytes != null) {
+            SkillMetadata metadata = SkillMetadata.parse(new String(skillMdBytes, StandardCharsets.UTF_8));
+            approvalService.createPendingForSkill(skillName, metadata.getVersion(), metadata.getPermissions(), requester());
+        }
         log.info("[NacosSkill] downloaded {} to {}", skillName, skillsDir);
+    }
+
+    private static String requester() {
+        String name = SecurityUtils.getCurrentUsername();
+        return name == null ? "system" : name;
     }
 
     private byte[] downloadViaAdmin(String skillName) throws Exception {

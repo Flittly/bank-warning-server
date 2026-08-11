@@ -11,7 +11,7 @@ import java.util.Map;
 
 @RestController
 @RequestMapping("/v0/admin")
-@PreAuthorize("hasRole('ADMIN')")
+@PreAuthorize("hasAnyRole('SUPER_ADMIN', 'ADMIN')")
 public class AdminUserController {
 
     private final UserService userService;

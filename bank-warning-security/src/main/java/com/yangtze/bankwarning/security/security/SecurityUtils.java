@@ -22,6 +22,20 @@ public class SecurityUtils {
         return null;
     }
 
+    /** 获取当前用户的角色（去掉 ROLE_ 前缀，例如 SUPER_ADMIN / ADMIN / USER） */
+    public static String getCurrentUserRole() {
+        Authentication authentication = SecurityContextHolder.getContext().getAuthentication();
+        if (authentication == null) {
+            return null;
+        }
+        return authentication.getAuthorities().stream()
+                .map(GrantedAuthority::getAuthority)
+                .filter(auth -> auth.startsWith("ROLE_"))
+                .map(auth -> auth.substring("ROLE_".length()))
+                .findFirst()
+                .orElse(null);
+    }
+
     /**
      * 获取当前用户ID用于数据过滤。
      * ADMIN返回null（SQL中 #{userId} IS NULL 可看到全部），普通用户返回自己的ID。

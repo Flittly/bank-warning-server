@@ -146,6 +146,18 @@ app:
         docker-image: ${SKILL_SANDBOX_DOCKER_IMAGE:}
         # 子进程环境变量白名单（其余一律不继承，防 os.environ 偷取宿主密钥）
         env-allowlist: [PATH, SYSTEMROOT, WINDIR, COMSPEC, PATHEXT, LANG, LC_ALL, PYTHONIOENCODING]
+      # Skill 治理闭环（阶段三）
+      governance:
+        # 是否启用治理（关闭时跳过审批/版本/熔断检查，输出契约校验仍生效）
+        enabled: ${SKILL_GOVERNANCE_ENABLED:true}
+        # 全局熔断：true 时所有动态 skill 脚本一律拒绝执行
+        kill-switch: ${SKILL_GOVERNANCE_KILL_SWITCH:false}
+        # 版本批准清单（skill@version），为空表示不限制版本，但仍校验权限审批
+        allowed-versions: []
+        # 隔离清单（skill@version），命中即拒绝执行（应急下架）
+        quarantined-versions: []
+        # 权限未审批时：true=拒绝执行，false=仅告警放行（灰度观察期）
+        fail-on-unapproved-permission: ${SKILL_GOVERNANCE_FAIL_ON_UNAPPROVED:true}
     pdf:
       # 兼容旧路径：仅当 cache 里找不到时回退到这里
       fallback-scripts-dir: ${user.dir}/src/main/resources/skills/pdf/scripts

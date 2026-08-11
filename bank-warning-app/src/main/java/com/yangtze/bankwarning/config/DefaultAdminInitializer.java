@@ -29,7 +29,7 @@ public class DefaultAdminInitializer implements CommandLineRunner {
             admin.setPhone("13800138000");
             admin.setEmail("admin@yangtze.com");
             admin.setRealName("系统管理员");
-            admin.setRole("ADMIN");
+            admin.setRole("SUPER_ADMIN");
             admin.setStatus("ACTIVE");
             userMapper.insert(admin);
             log.info("默认管理员用户已创建（admin/admin123）");
