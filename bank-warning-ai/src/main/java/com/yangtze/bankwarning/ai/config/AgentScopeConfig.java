@@ -4,6 +4,7 @@ import com.fasterxml.jackson.core.JsonParser;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.yangtze.bankwarning.ai.middleware.ReasoningTraceMiddleware;
 import com.yangtze.bankwarning.ai.service.KnowledgeService;
+import com.yangtze.bankwarning.ai.service.NacosSkillRepositoryHolder;
 import com.yangtze.bankwarning.ai.service.PdfService;
 import com.yangtze.bankwarning.ai.service.SkillCacheService;
 import com.yangtze.bankwarning.ai.service.VisualizationService;

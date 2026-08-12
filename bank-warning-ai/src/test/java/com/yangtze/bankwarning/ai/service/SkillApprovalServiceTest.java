@@ -1,4 +1,4 @@
-package com.yangtze.bankwarning.ai.security;
+package com.yangtze.bankwarning.ai.service;
 
 import org.junit.jupiter.api.Test;
 
@@ -10,6 +10,9 @@ import java.util.Set;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import com.yangtze.bankwarning.ai.security.SkillApprovalStore;
+import com.yangtze.bankwarning.ai.security.SkillApprovalStore.AuditRecord;
+import com.yangtze.bankwarning.ai.security.SkillApprovalStore.SkillApproval;
 import static com.yangtze.bankwarning.ai.security.SkillApprovalStore.STATUS_APPROVED;
 import static com.yangtze.bankwarning.ai.security.SkillApprovalStore.STATUS_PENDING;
 
@@ -90,7 +93,7 @@ class SkillApprovalServiceTest {
     @Test
     void downloadCreatesPendingForDeclaredPermissions() {
         MapStore store = new MapStore();
-        SkillApprovalService service = new SkillApprovalService(store);
+        SkillApprovalService service = new SkillApprovalService(store, "test-cache");
 
         service.createPendingForSkill("search", "1.0.0", Set.of("network", "subprocess"), "alice");
 
@@ -102,7 +105,7 @@ class SkillApprovalServiceTest {
     @Test
     void noPermissionsMeansNoApprovalRows() {
         MapStore store = new MapStore();
-        SkillApprovalService service = new SkillApprovalService(store);
+        SkillApprovalService service = new SkillApprovalService(store, "test-cache");
 
         service.createPendingForSkill("pdf", "1.0.0", Set.of(), "alice");
 
@@ -112,7 +115,7 @@ class SkillApprovalServiceTest {
     @Test
     void createPendingIsIdempotent() {
         MapStore store = new MapStore();
-        SkillApprovalService service = new SkillApprovalService(store);
+        SkillApprovalService service = new SkillApprovalService(store, "test-cache");
 
         service.createPendingForSkill("search", "1.0.0", Set.of("network"), "alice");
         service.createPendingForSkill("search", "1.0.0", Set.of("network"), "alice");
@@ -123,7 +126,7 @@ class SkillApprovalServiceTest {
     @Test
     void approveMakesGovernanceAllowExecution() {
         MapStore store = new MapStore();
-        SkillApprovalService approval = new SkillApprovalService(store);
+        SkillApprovalService approval = new SkillApprovalService(store, "test-cache");
         approval.createPendingForSkill("search", "1.0.0", Set.of("network"), "alice");
 
         Long id = store.listPending().get(0).id();
@@ -138,7 +141,7 @@ class SkillApprovalServiceTest {
     @Test
     void rejectKeepsGovernanceBlocking() {
         MapStore store = new MapStore();
-        SkillApprovalService approval = new SkillApprovalService(store);
+        SkillApprovalService approval = new SkillApprovalService(store, "test-cache");
         approval.createPendingForSkill("search", "1.0.0", Set.of("network"), "alice");
 
         Long id = store.listPending().get(0).id();
@@ -152,7 +155,7 @@ class SkillApprovalServiceTest {
     @Test
     void cannotApproveAlreadyProcessedRecord() {
         MapStore store = new MapStore();
-        SkillApprovalService approval = new SkillApprovalService(store);
+        SkillApprovalService approval = new SkillApprovalService(store, "test-cache");
         approval.createPendingForSkill("search", "1.0.0", Set.of("network"), "alice");
         Long id = store.listPending().get(0).id();
 
@@ -163,7 +166,7 @@ class SkillApprovalServiceTest {
     @Test
     void rejectedRecordCanBeResubmitted() {
         MapStore store = new MapStore();
-        SkillApprovalService approval = new SkillApprovalService(store);
+        SkillApprovalService approval = new SkillApprovalService(store, "test-cache");
         approval.createPendingForSkill("search", "1.0.0", Set.of("network"), "alice");
         Long id = store.listPending().get(0).id();
 

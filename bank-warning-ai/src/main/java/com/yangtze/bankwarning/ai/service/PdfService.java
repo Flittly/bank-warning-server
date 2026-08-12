@@ -2,10 +2,10 @@ package com.yangtze.bankwarning.ai.service;
 
 import com.yangtze.bankwarning.ai.security.PythonImportScanner;
 import com.yangtze.bankwarning.ai.security.SkillSandboxExecutor;
-import com.yangtze.bankwarning.ai.security.SkillGovernanceService;
 import com.yangtze.bankwarning.ai.security.SkillMetadata;
 import com.yangtze.bankwarning.ai.security.SkillOutputValidator;
 import com.yangtze.bankwarning.ai.security.SkillPathGuard;
+import com.yangtze.bankwarning.ai.service.SkillGovernanceService;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;

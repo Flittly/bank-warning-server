@@ -1,4 +1,4 @@
-package com.yangtze.bankwarning.ai.config;
+package com.yangtze.bankwarning.ai.service;
 
 import com.alibaba.nacos.api.PropertyKeyConst;
 import com.alibaba.nacos.api.ai.AiService;
@@ -9,8 +9,6 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.yangtze.bankwarning.ai.security.SkillContentVerifier;
 import com.yangtze.bankwarning.ai.security.SkillPathGuard;
 import com.yangtze.bankwarning.ai.security.SkillMetadata;
-import com.yangtze.bankwarning.ai.security.SkillApprovalService;
-import com.yangtze.bankwarning.ai.service.SkillCacheService;
 import com.yangtze.bankwarning.security.security.SecurityUtils;
 import io.agentscope.core.nacos.skill.NacosSkillRepository;
 import org.slf4j.Logger;

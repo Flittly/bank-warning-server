@@ -1,6 +1,6 @@
 package com.yangtze.bankwarning.ai.controller;
 
-import com.yangtze.bankwarning.ai.security.SkillApprovalService;
+import com.yangtze.bankwarning.ai.service.SkillApprovalService;
 import com.yangtze.bankwarning.security.security.SecurityUtils;
 import org.springframework.security.access.prepost.PreAuthorize;
 import org.springframework.web.bind.annotation.GetMapping;

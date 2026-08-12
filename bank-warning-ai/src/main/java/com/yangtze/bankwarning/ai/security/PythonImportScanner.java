@@ -42,9 +42,6 @@ public class PythonImportScanner {
             Pattern.compile("^\\s*(?:import|from)\\s+([A-Za-z_][A-Za-z0-9_.]*)(?:\\s+import)?", Pattern.MULTILINE);
     // 逐行匹配 "import X" / "from X import Y"，捕获被 import 的顶层模块名 X
 
-    private static final Pattern FRONTMATTER = Pattern.compile("^---\\s*\\R(.*?)\\R---\\s*", Pattern.DOTALL);
-    // 匹配 SKILL.md 顶部的 YAML frontmatter（--- 包裹的段落），用于读取 permissions 声明
-
     private final Set<String> forbidden;
     private final boolean failOnViolation;
 
@@ -134,31 +131,8 @@ public class PythonImportScanner {
      * permissions:\n  - network\n  - subprocess
      */
     public static Set<String> parsePermissions(String skillMdContent) {
-        Set<String> result = new HashSet<>();
-        if (skillMdContent == null) return result;
-        Matcher fm = FRONTMATTER.matcher(skillMdContent);
-        if (!fm.find()) return result;
-        String yaml = fm.group(1);
-        // 行内数组形式
-        Matcher inline = Pattern.compile("^\\s*permissions\\s*:\\s*\\[([^\\]]*)\\]", Pattern.MULTILINE).matcher(yaml);
-        if (inline.find()) {
-            for (String item : inline.group(1).split(",")) {
-                String t = item.trim().replaceAll("[\"'\\[\\]]", "");
-                if (!t.isEmpty()) result.add(t.toLowerCase());
-            }
-            return result;
-        }
-        // 列表形式
-        Matcher block = Pattern.compile("^\\s*permissions\\s*:\\s*\\R", Pattern.MULTILINE).matcher(yaml);
-        if (block.find()) {
-            String after = yaml.substring(block.end());
-            Matcher item = Pattern.compile("^\\s*-\\s*([^\\n\\r]+)", Pattern.MULTILINE).matcher(after);
-            while (item.find()) {
-                String t = item.group(1).trim().replaceAll("[\"'\\[\\]]", "");
-                if (!t.isEmpty()) result.add(t.toLowerCase());
-            }
-        }
-        return result;
+        // 统一走 SkillMetadata 的 frontmatter 解析，避免两套权限解析逻辑漂移
+        return SkillMetadata.parse(skillMdContent).getPermissions();
     }
 
     /** 从文件读取 SKILL.md 并解析 permissions */

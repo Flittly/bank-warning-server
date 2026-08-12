@@ -1,4 +1,4 @@
-package com.yangtze.bankwarning.ai.security;
+package com.yangtze.bankwarning.ai.service;
 
 import org.junit.jupiter.api.Test;
 
@@ -9,6 +9,7 @@ import java.util.Set;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import com.yangtze.bankwarning.ai.security.SkillApprovalStore;
 import com.yangtze.bankwarning.ai.security.SkillApprovalStore.SkillApproval;
 
 class SkillGovernanceServiceTest {

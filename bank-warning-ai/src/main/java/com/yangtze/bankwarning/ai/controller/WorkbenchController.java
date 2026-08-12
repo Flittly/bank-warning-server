@@ -1,7 +1,7 @@
 package com.yangtze.bankwarning.ai.controller;
 
 import com.yangtze.bankwarning.ai.dto.WorkbenchRunRequest;
-import com.yangtze.bankwarning.ai.service.WorkbenchOrchestratorService;
+import com.yangtze.bankwarning.ai.workflow.WorkbenchOrchestratorService;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.web.bind.annotation.*;

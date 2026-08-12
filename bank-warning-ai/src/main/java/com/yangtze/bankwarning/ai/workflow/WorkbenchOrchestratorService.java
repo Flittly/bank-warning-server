@@ -1,4 +1,4 @@
-package com.yangtze.bankwarning.ai.service;
+package com.yangtze.bankwarning.ai.workflow;
 
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
