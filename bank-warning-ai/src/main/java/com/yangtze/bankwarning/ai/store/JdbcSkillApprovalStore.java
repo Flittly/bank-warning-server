@@ -1,4 +1,4 @@
-package com.yangtze.bankwarning.ai.security;
+package com.yangtze.bankwarning.ai.store;
 
 import jakarta.annotation.PostConstruct;
 import org.slf4j.Logger;

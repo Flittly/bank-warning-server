@@ -1,4 +1,4 @@
-package com.yangtze.bankwarning.ai.security;
+package com.yangtze.bankwarning.ai.store;
 
 import java.util.List;
 import java.util.Optional;

@@ -1,6 +1,6 @@
 package com.yangtze.bankwarning.ai.service;
 
-import com.yangtze.bankwarning.ai.security.SkillApprovalStore;
+import com.yangtze.bankwarning.ai.store.SkillApprovalStore;
 import com.yangtze.bankwarning.ai.security.SkillMetadata;
 import com.yangtze.bankwarning.security.security.SecurityUtils;
 import org.slf4j.Logger;

@@ -1,6 +1,6 @@
 package com.yangtze.bankwarning.ai.service;
 
-import com.yangtze.bankwarning.ai.security.SkillApprovalStore;
+import com.yangtze.bankwarning.ai.store.SkillApprovalStore;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;

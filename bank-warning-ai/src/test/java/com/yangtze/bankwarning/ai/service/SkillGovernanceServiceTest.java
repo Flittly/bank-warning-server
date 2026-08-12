@@ -9,8 +9,8 @@ import java.util.Set;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
-import com.yangtze.bankwarning.ai.security.SkillApprovalStore;
-import com.yangtze.bankwarning.ai.security.SkillApprovalStore.SkillApproval;
+import com.yangtze.bankwarning.ai.store.SkillApprovalStore;
+import com.yangtze.bankwarning.ai.store.SkillApprovalStore.SkillApproval;
 
 class SkillGovernanceServiceTest {
 
