@@ -56,4 +56,11 @@ class SkillCacheServiceTest {
 
         assertThrows(IllegalArgumentException.class, () -> service().materialize("demo", files));
     }
+
+    @Test
+    void versionSortIsNatural() {
+        assertTrue(SkillCacheService.compareVersions("1.10.0", "1.9.0") > 0);
+        assertTrue(SkillCacheService.compareVersions("1.9.0", "1.10.0") < 0);
+        assertEquals(0, SkillCacheService.compareVersions("1.0", "1.0.0"));
+    }
 }

@@ -67,6 +67,7 @@ public class NacosSkillRepositoryHolder {
     private final SkillContentVerifier contentVerifier;
     private final SkillApprovalService approvalService;
     private final SkillCacheService skillCacheService;
+    private final SkillVersionService skillVersionService;
 
     public NacosSkillRepositoryHolder(
             @Value("${agentscope.nacos.server-addr:127.0.0.1:8848}") String serverAddr,
@@ -75,7 +76,8 @@ public class NacosSkillRepositoryHolder {
             @Value("${agentscope.nacos.password:}") String password,
             SkillContentVerifier contentVerifier,
             SkillApprovalService approvalService,
-            SkillCacheService skillCacheService) {
+            SkillCacheService skillCacheService,
+            SkillVersionService skillVersionService) {
         this.serverAddr = serverAddr;
         this.namespace = namespace;
         this.username = username;
@@ -83,6 +85,7 @@ public class NacosSkillRepositoryHolder {
         this.contentVerifier = contentVerifier;
         this.approvalService = approvalService;
         this.skillCacheService = skillCacheService;
+        this.skillVersionService = skillVersionService;
         NacosSkillRepository repo = null;
         boolean ok = false;
         try {
@@ -155,6 +158,12 @@ public class NacosSkillRepositoryHolder {
         }
         // 校验通过后再解析并剥离公共根目录，得到归一化的文件集合
         SkillContentVerifier.ZipContent content = contentVerifier.parseZip(zip);
+        byte[] skillMdBytes = content.files.get("SKILL.md");
+        if (skillMdBytes == null) {
+            // 没有 SKILL.md 的 zip 不是合法 skill，先拒绝，避免留下半写入的目录
+            throw new RuntimeException("Skill zip 缺少 SKILL.md: " + skillName);
+        }
+        SkillMetadata metadata = SkillMetadata.parse(new String(skillMdBytes, StandardCharsets.UTF_8));
         Path skillsDir = Paths.get("src/main/resources/skills/" + skillName).toAbsolutePath().normalize();
         Files.createDirectories(skillsDir);
         for (Map.Entry<String, byte[]> entry : content.files.entrySet()) {
@@ -165,13 +174,10 @@ public class NacosSkillRepositoryHolder {
         }
         // 阶段三：下载后按 SKILL.md 声明的权限自动生成待审批记录（幂等），
         // 审批通过前该 skill 的权限类能力无法执行
-        byte[] skillMdBytes = content.files.get("SKILL.md");
-        if (skillMdBytes != null) {
-            SkillMetadata metadata = SkillMetadata.parse(new String(skillMdBytes, StandardCharsets.UTF_8));
-            approvalService.createPendingForSkill(skillName, metadata.getVersion(), metadata.getPermissions(), requester());
-        }
-        // 下载后立即刷新执行缓存，脚本立即可用，无需重启
-        skillCacheService.materialize(skillName, content.files);
+        approvalService.createPendingForSkill(skillName, metadata.getVersion(), metadata.getPermissions(), requester());
+        // 档位二：按版本物化到 .skills-cache/<skill>/<version>/ 并登记版本（新版本自动激活）
+        skillVersionService.registerDownload(
+                skillName, metadata.getVersion(), "nacos", content.files, requester());
         log.info("[NacosSkill] downloaded {} to {}，缓存已刷新，立即生效", skillName, skillsDir);
     }
 

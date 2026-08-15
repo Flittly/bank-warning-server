@@ -30,12 +30,15 @@ public class SkillApprovalService {
 
     private final SkillApprovalStore store;
     private final Path cacheDir;
+    private final SkillVersionService versionService;
 
     public SkillApprovalService(
             SkillApprovalStore store,
-            @Value("${app.ai.skill.cache-dir:${user.dir}/.skills-cache}") String cacheDir) {
+            @Value("${app.ai.skill.cache-dir:${user.dir}/.skills-cache}") String cacheDir,
+            SkillVersionService versionService) {
         this.store = store;
         this.cacheDir = Paths.get(cacheDir).toAbsolutePath().normalize();
+        this.versionService = versionService;
     }
 
     /**
@@ -167,17 +170,17 @@ public class SkillApprovalService {
 
     /** 从缓存目录或 classpath 源目录读取 SKILL.md 解析元数据 */
     private SkillMetadata resolveMetadata(String skillName) {
-        Path[] candidates = {
-                cacheDir.resolve(skillName),
-                Paths.get(System.getProperty("user.dir"), "src/main/resources/skills", skillName)
-        };
-        for (Path candidate : candidates) {
-            SkillMetadata metadata = SkillMetadata.parse(candidate);
-            if (!metadata.getName().isEmpty() || !SkillMetadata.DEFAULT_VERSION.equals(metadata.getVersion())) {
-                return metadata;
-            }
+        Path activeDir = versionService == null ? null : versionService.resolveActiveDir(skillName).orElse(null);
+        SkillMetadata metadata = SkillMetadata.parse(activeDir);
+        if (!metadata.getName().isEmpty() || !SkillMetadata.DEFAULT_VERSION.equals(metadata.getVersion())) {
+            return metadata;
         }
-        return SkillMetadata.empty();
+        metadata = SkillMetadata.parse(cacheDir.resolve(skillName));
+        if (!metadata.getName().isEmpty() || !SkillMetadata.DEFAULT_VERSION.equals(metadata.getVersion())) {
+            return metadata;
+        }
+        return SkillMetadata.parse(
+                Paths.get(System.getProperty("user.dir"), "src/main/resources/skills", skillName));
     }
 
     private static String requester() {

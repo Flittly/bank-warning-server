@@ -11,6 +11,12 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import com.yangtze.bankwarning.ai.store.SkillApprovalStore;
 import com.yangtze.bankwarning.ai.store.SkillApprovalStore.SkillApproval;
+import com.yangtze.bankwarning.ai.store.SkillVersionStore;
+import com.yangtze.bankwarning.ai.store.SkillVersionStore.SkillVersion;
+
+import java.util.LinkedHashMap;
+import java.util.Map;
+import java.util.Optional;
 
 class SkillGovernanceServiceTest {
 
@@ -83,11 +89,58 @@ class SkillGovernanceServiceTest {
         }
     }
 
+    /** 最小版本存储：只实现隔离门禁测试用到的方法 */
+    private static final class VersionStore implements SkillVersionStore {
+        final Map<String, SkillVersion> rows = new LinkedHashMap<>();
+
+        @Override
+        public Optional<SkillVersion> findActive(String skillName) {
+            return rows.values().stream()
+                    .filter(v -> v.skillName().equals(skillName) && STATUS_ACTIVE.equals(v.status()))
+                    .findFirst();
+        }
+
+        @Override
+        public Optional<SkillVersion> findByVersion(String skillName, String version) {
+            return Optional.ofNullable(rows.get(skillName + "@" + version));
+        }
+
+        @Override
+        public List<SkillVersion> listVersions(String skillName) {
+            return List.of();
+        }
+
+        @Override
+        public List<SkillVersion> listAll() {
+            return List.of();
+        }
+
+        @Override
+        public SkillVersion registerOrActivate(String skillName, String version, String source, String updatedBy) {
+            throw new UnsupportedOperationException();
+        }
+
+        @Override
+        public boolean activate(String skillName, String version, String updatedBy) {
+            return false;
+        }
+
+        @Override
+        public boolean setStatus(String skillName, String version, String status, String updatedBy) {
+            return false;
+        }
+
+        @Override
+        public boolean delete(String skillName, String version) {
+            return false;
+        }
+    }
+
     private static SkillGovernanceService service(
             MemoryStore store, boolean enabled, boolean killSwitch,
             List<String> allowed, List<String> quarantined, boolean failOnUnapproved) {
         return new SkillGovernanceService(
-                store, enabled, killSwitch, allowed, quarantined, failOnUnapproved);
+                store, enabled, killSwitch, allowed, quarantined, failOnUnapproved, null);
     }
 
     @Test
@@ -123,6 +176,19 @@ class SkillGovernanceServiceTest {
         SkillGovernanceService s = service(store, true, false, List.of(), List.of("pdf@1.0.0"), true);
         assertFalse(s.evaluate("pdf", "1.0.0", Set.of()).isAllowed());
         assertTrue(s.evaluate("pdf", "1.0.1", Set.of()).isAllowed());
+    }
+
+    @Test
+    void quarantinedVersionBlockedByVersionStore() {
+        MemoryStore store = new MemoryStore();
+        VersionStore versions = new VersionStore();
+        versions.rows.put("pdf@1.0.0", new SkillVersion(
+                1L, "pdf", "1.0.0", "nacos", SkillVersionStore.STATUS_QUARANTINED,
+                "now", "now", "admin", "now"));
+        SkillGovernanceService s = new SkillGovernanceService(
+                store, true, false, List.of(), List.of(), true, versions);
+        assertFalse(s.evaluate("pdf", "1.0.0", Set.of()).isAllowed());
+        assertTrue(s.evaluate("pdf", "2.0.0", Set.of()).isAllowed());
     }
 
     @Test

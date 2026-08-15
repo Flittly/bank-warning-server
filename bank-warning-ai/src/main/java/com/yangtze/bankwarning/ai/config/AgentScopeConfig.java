@@ -7,6 +7,7 @@ import com.yangtze.bankwarning.ai.service.KnowledgeService;
 import com.yangtze.bankwarning.ai.service.NacosSkillRepositoryHolder;
 import com.yangtze.bankwarning.ai.service.PdfService;
 import com.yangtze.bankwarning.ai.service.SkillCacheService;
+import com.yangtze.bankwarning.ai.service.SkillVersionService;
 import com.yangtze.bankwarning.ai.service.VisualizationService;
 import com.yangtze.bankwarning.ai.service.WeatherService;
 import com.yangtze.bankwarning.ai.tool.KnowledgeQueryTool;
@@ -152,7 +153,7 @@ public class AgentScopeConfig {
     public List<AgentSkillRepository> agentSkillRepositories(
             Toolkit reportToolkit,
             ObjectProvider<NacosSkillRepositoryHolder> nacosHolderProvider,
-            SkillCacheService skillCacheService) throws Exception {
+            SkillVersionService skillVersionService) throws Exception {
         List<AgentSkillRepository> repos = new ArrayList<>();
         Set<String> registered = new HashSet<>();
 
@@ -160,7 +161,7 @@ public class AgentScopeConfig {
         for (AgentSkill skill : classpathRepo.getAllSkills()) {
             String name = skill.getName();
             if (registered.add(name)) {
-                materializeSafe(skillCacheService, skill);
+                materializeSafe(skillVersionService, skill);
                 log.info("[SkillRepo] registered local: {}", name);
             } else {
                 log.warn("[SkillRepo] duplicate local skill skipped: {}", name);
@@ -173,7 +174,7 @@ public class AgentScopeConfig {
             for (AgentSkill skill : nacosHolder.getRepository().getAllSkills()) {
                 String name = skill.getName();
                 if (registered.add(name)) {
-                    materializeSafe(skillCacheService, skill);
+                    materializeSafe(skillVersionService, skill);
                     log.info("[SkillRepo] registered nacos: {}", name);
                 } else {
                     log.info("[SkillRepo] nacos skill '{}' skipped (local has higher priority)", name);
@@ -186,9 +187,9 @@ public class AgentScopeConfig {
         return repos;
     }
 
-    private void materializeSafe(SkillCacheService skillCacheService, AgentSkill skill) {
+    private void materializeSafe(SkillVersionService skillVersionService, AgentSkill skill) {
         try {
-            skillCacheService.materializeResources(skill.getName(), skill.getResources());
+            skillVersionService.registerResources(skill.getName(), skill.getResources(), "classpath", "system");
         } catch (Exception e) {
             log.error("[SkillRepo] 物化失败 {}: {}", skill.getName(), e.getMessage());
         }

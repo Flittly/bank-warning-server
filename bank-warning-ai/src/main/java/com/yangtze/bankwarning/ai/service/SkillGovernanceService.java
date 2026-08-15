@@ -1,6 +1,7 @@
 package com.yangtze.bankwarning.ai.service;
 
 import com.yangtze.bankwarning.ai.store.SkillApprovalStore;
+import com.yangtze.bankwarning.ai.store.SkillVersionStore;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
@@ -31,6 +32,7 @@ public class SkillGovernanceService {
     private final Set<String> allowedVersions;
     private final Set<String> quarantinedVersions;
     private final boolean failOnUnapprovedPermission;
+    private final SkillVersionStore versionStore;
 
     public SkillGovernanceService(
             SkillApprovalStore store,
@@ -38,8 +40,10 @@ public class SkillGovernanceService {
             @Value("${app.ai.skill.governance.kill-switch:false}") boolean killSwitch,
             @Value("${app.ai.skill.governance.allowed-versions:}") List<String> allowedVersions,
             @Value("${app.ai.skill.governance.quarantined-versions:}") List<String> quarantinedVersions,
-            @Value("${app.ai.skill.governance.fail-on-unapproved-permission:true}") boolean failOnUnapprovedPermission) {
+            @Value("${app.ai.skill.governance.fail-on-unapproved-permission:true}") boolean failOnUnapprovedPermission,
+            SkillVersionStore versionStore) {
         this.store = store;
+        this.versionStore = versionStore;
         this.enabled = enabled;
         this.killSwitch = killSwitch;
         this.allowedVersions = normalize(allowedVersions);
@@ -70,6 +74,12 @@ public class SkillGovernanceService {
         }
         if (quarantinedVersions.contains(key)) {
             reasons.add("该版本已被隔离: " + key);
+        }
+        // 档位二：skill_versions 表里的版本状态也参与裁决（QUARANTINED/RETIRED 一律拒绝）
+        if (versionStore != null) {
+            versionStore.findByVersion(skillName, version)
+                    .filter(v -> !SkillVersionStore.STATUS_ACTIVE.equals(v.status()))
+                    .ifPresent(v -> reasons.add("版本状态不允许执行: " + key + " (" + v.status() + ")"));
         }
         if (!allowedVersions.isEmpty() && !allowedVersions.contains(key)) {
             reasons.add("版本不在批准清单内: " + key);

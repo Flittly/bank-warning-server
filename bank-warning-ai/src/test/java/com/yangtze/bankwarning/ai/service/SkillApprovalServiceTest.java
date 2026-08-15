@@ -93,7 +93,7 @@ class SkillApprovalServiceTest {
     @Test
     void downloadCreatesPendingForDeclaredPermissions() {
         MapStore store = new MapStore();
-        SkillApprovalService service = new SkillApprovalService(store, "test-cache");
+        SkillApprovalService service = new SkillApprovalService(store, "test-cache", null);
 
         service.createPendingForSkill("search", "1.0.0", Set.of("network", "subprocess"), "alice");
 
@@ -105,7 +105,7 @@ class SkillApprovalServiceTest {
     @Test
     void noPermissionsMeansNoApprovalRows() {
         MapStore store = new MapStore();
-        SkillApprovalService service = new SkillApprovalService(store, "test-cache");
+        SkillApprovalService service = new SkillApprovalService(store, "test-cache", null);
 
         service.createPendingForSkill("pdf", "1.0.0", Set.of(), "alice");
 
@@ -115,7 +115,7 @@ class SkillApprovalServiceTest {
     @Test
     void createPendingIsIdempotent() {
         MapStore store = new MapStore();
-        SkillApprovalService service = new SkillApprovalService(store, "test-cache");
+        SkillApprovalService service = new SkillApprovalService(store, "test-cache", null);
 
         service.createPendingForSkill("search", "1.0.0", Set.of("network"), "alice");
         service.createPendingForSkill("search", "1.0.0", Set.of("network"), "alice");
@@ -126,14 +126,14 @@ class SkillApprovalServiceTest {
     @Test
     void approveMakesGovernanceAllowExecution() {
         MapStore store = new MapStore();
-        SkillApprovalService approval = new SkillApprovalService(store, "test-cache");
+        SkillApprovalService approval = new SkillApprovalService(store, "test-cache", null);
         approval.createPendingForSkill("search", "1.0.0", Set.of("network"), "alice");
 
         Long id = store.listPending().get(0).id();
         assertTrue(approval.approve(id, "admin"));
 
         SkillGovernanceService governance = new SkillGovernanceService(
-                store, true, false, List.of(), List.of(), true);
+                store, true, false, List.of(), List.of(), true, null);
         assertTrue(governance.evaluate("search", "1.0.0", Set.of("network")).isAllowed());
         assertFalse(store.listAudit(10).isEmpty());
     }
@@ -141,21 +141,21 @@ class SkillApprovalServiceTest {
     @Test
     void rejectKeepsGovernanceBlocking() {
         MapStore store = new MapStore();
-        SkillApprovalService approval = new SkillApprovalService(store, "test-cache");
+        SkillApprovalService approval = new SkillApprovalService(store, "test-cache", null);
         approval.createPendingForSkill("search", "1.0.0", Set.of("network"), "alice");
 
         Long id = store.listPending().get(0).id();
         assertTrue(approval.reject(id, "admin", "不允许联网"));
 
         SkillGovernanceService governance = new SkillGovernanceService(
-                store, true, false, List.of(), List.of(), true);
+                store, true, false, List.of(), List.of(), true, null);
         assertFalse(governance.evaluate("search", "1.0.0", Set.of("network")).isAllowed());
     }
 
     @Test
     void cannotApproveAlreadyProcessedRecord() {
         MapStore store = new MapStore();
-        SkillApprovalService approval = new SkillApprovalService(store, "test-cache");
+        SkillApprovalService approval = new SkillApprovalService(store, "test-cache", null);
         approval.createPendingForSkill("search", "1.0.0", Set.of("network"), "alice");
         Long id = store.listPending().get(0).id();
 
@@ -166,7 +166,7 @@ class SkillApprovalServiceTest {
     @Test
     void rejectedRecordCanBeResubmitted() {
         MapStore store = new MapStore();
-        SkillApprovalService approval = new SkillApprovalService(store, "test-cache");
+        SkillApprovalService approval = new SkillApprovalService(store, "test-cache", null);
         approval.createPendingForSkill("search", "1.0.0", Set.of("network"), "alice");
         Long id = store.listPending().get(0).id();
 
@@ -175,7 +175,7 @@ class SkillApprovalServiceTest {
         assertEquals(1, store.listPending().size());
 
         SkillGovernanceService governance = new SkillGovernanceService(
-                store, true, false, List.of(), List.of(), true);
+                store, true, false, List.of(), List.of(), true, null);
         assertFalse(governance.evaluate("search", "1.0.0", Set.of("network")).isAllowed());
 
         assertTrue(approval.approve(id, "admin"));

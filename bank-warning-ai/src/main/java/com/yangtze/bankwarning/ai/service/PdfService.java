@@ -34,19 +34,23 @@ public class PdfService {
     private final SkillSandboxExecutor sandboxExecutor;
     private final SkillGovernanceService governance;
     private final SkillOutputValidator outputValidator;
+    private final SkillVersionService versionService;
 
     public PdfService(PythonImportScanner importScanner,
                       SkillSandboxExecutor sandboxExecutor,
                       SkillGovernanceService governance,
-                      SkillOutputValidator outputValidator) {
+                      SkillOutputValidator outputValidator,
+                      SkillVersionService versionService) {
         this.importScanner = importScanner;
         this.sandboxExecutor = sandboxExecutor;
         this.governance = governance;
         this.outputValidator = outputValidator;
+        this.versionService = versionService;
     }
 
     public Map<String, Object> processPdf(String skillName, String scriptName, String filePath){
         log.info("[pdf] processPdf, skill={}, script={}, file={}", skillName, scriptName, filePath);
+        String skill = skillName == null || skillName.isBlank() ? "pdf" : skillName.strip();
 
         Path pdfFile = Paths.get(filePath);
         if(!Files.exists(pdfFile)){
@@ -54,27 +58,27 @@ public class PdfService {
         }
 
         //解析脚本路径
-        File scriptFile = resolveScript(skillName, scriptName);
+        File scriptFile = resolveScript(skill, scriptName);
         if(scriptFile == null || !scriptFile.exists()){
             return Map.of("success", false,
                 "error", "脚本不存在: skill=" + skillName + ", script=" + scriptName
-                    + "（查找目录：" + cacheDir + "/" + skillName + "/scripts, "
+                    + "（查找目录：" + cacheDir + "/" + skill + "/scripts, "
                     + fallbackScriptsDir + "）");
         }
 
         // 阶段三：读取 skill 元数据（版本 / 权限 / 输出契约），执行前做治理裁决
-        Path skillDir = Paths.get(cacheDir, skillName);
+        Path skillDir = resolveActiveSkillDir(skill);
         SkillMetadata metadata = SkillMetadata.parse(skillDir);
         SkillGovernanceService.GovernanceDecision decision =
-                governance.evaluate(skillName, metadata.getVersion(), metadata.getPermissions());
+                governance.evaluate(skill, metadata.getVersion(), metadata.getPermissions());
         if (!decision.isAllowed()) {
             String detail = String.join("; ", decision.reasons());
-            governance.recordAudit(skillName, metadata.getVersion(), "EXECUTE_BLOCKED", detail, true);
-            log.warn("[pdf] skill 被治理策略拒绝: skill={} version={} reasons={}", skillName, metadata.getVersion(), detail);
+            governance.recordAudit(skill, metadata.getVersion(), "EXECUTE_BLOCKED", detail, true);
+            log.warn("[pdf] skill 被治理策略拒绝: skill={} version={} reasons={}", skill, metadata.getVersion(), detail);
             return Map.of("success", false, "error", "Skill 执行被治理策略拒绝: " + detail);
         }
         for (String warning : decision.warnings()) {
-            log.warn("[pdf] skill 治理警告: skill={} version={} {}", skillName, metadata.getVersion(), warning);
+            log.warn("[pdf] skill 治理警告: skill={} version={} {}", skill, metadata.getVersion(), warning);
         }
 
         //执行前静态扫描脚本
@@ -115,7 +119,7 @@ public class PdfService {
                 log.warn("[pdf] 脚本输出超过沙箱上限，已截断");
             }
             if (result.getExitCode() != 0) {
-                governance.recordAudit(skillName, metadata.getVersion(), "EXECUTE_FAILED",
+                governance.recordAudit(skill, metadata.getVersion(), "EXECUTE_FAILED",
                         "exit=" + result.getExitCode() + " stderr=" + trimTo(result.getStderr(), 500), true);
                 return Map.of("success", false, "error",
                         "脚本执行失败: " + trimTo(result.getStderr(), 2000));
@@ -124,13 +128,13 @@ public class PdfService {
             // 阶段三：输出契约校验，失败即拒绝，绝不透传不可信输出
             SkillOutputValidator.ValidationResult outputCheck = outputValidator.validate(metadata, result);
             if (!outputCheck.isValid()) {
-                governance.recordAudit(skillName, metadata.getVersion(), "OUTPUT_INVALID",
+                governance.recordAudit(skill, metadata.getVersion(), "OUTPUT_INVALID",
                         outputCheck.getReason(), true);
                 log.warn("[pdf] 脚本输出未通过校验: skill={} version={} reason={}",
-                        skillName, metadata.getVersion(), outputCheck.getReason());
+                        skill, metadata.getVersion(), outputCheck.getReason());
                 return Map.of("success", false, "error", "脚本输出未通过校验: " + outputCheck.getReason());
             }
-            governance.recordAudit(skillName, metadata.getVersion(), "EXECUTE_OK",
+            governance.recordAudit(skill, metadata.getVersion(), "EXECUTE_OK",
                     "exit=" + result.getExitCode() + " durationMs=" + result.getDurationMs(), false);
             return Map.of("success", true, "content", result.getStdout());
         } catch (Exception e) {
@@ -150,7 +154,7 @@ public class PdfService {
 
         String skill = skillName == null || skillName.isBlank() ? "pdf" : skillName.strip();
 
-        // 1. 优先 .skills-cache/<skill>/scripts/ （Nacos/classpath 物化目录）
+        // 1. 优先当前生效版本的 .skills-cache/<skill>/<version>/scripts/
         File fromCache = resolveWithinCache(skill, scriptName);
         if(fromCache != null && fromCache.exists()) return fromCache;
 
@@ -170,12 +174,18 @@ public class PdfService {
     /** 在 cache 目录内安全解析脚本路径，防 ../ 逃逸 */
     private File resolveWithinCache(String skill, String scriptName){
         try {
-            Path base = Paths.get(cacheDir, skill, "scripts").toAbsolutePath().normalize();
+            Path base = resolveActiveSkillDir(skill).resolve("scripts").toAbsolutePath().normalize();
             return SkillPathGuard.safeResolve(base, scriptName).toFile();
         } catch (IllegalArgumentException e) {
             log.warn("[pdf] 非法脚本路径: skill={} script={} reason={}", skill, scriptName, e.getMessage());
             return null;
         }
+    }
+
+    /** 解析当前生效版本的 skill 目录：ACTIVE 版本目录 → 版本目录兜底 → 旧布局 .skills-cache/<skill> */
+    private Path resolveActiveSkillDir(String skill) {
+        return versionService.resolveActiveDir(skill)
+                .orElseGet(() -> Paths.get(cacheDir, skill).toAbsolutePath().normalize());
     }
 
     /** 在任意基础目录内安全解析，防 ../ 逃逸 */
