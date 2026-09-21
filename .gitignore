@@ -24,3 +24,21 @@ bank-warning-app/src/main/resources/application-*.yml
 bank-warning-ai/src/main/resources/skills
 
 visualization/output
+
+# WorkBuddy 工作区数据（会话记忆、本地技能、缓存等，不入库）
+.workbuddy/
+
+# AgentScope 运行时工作区（.agentscope/）
+# 框架每次运行都会改写这里的会话记录、MEMORY.md、技能缓存，入了库就是纯 diff 噪音 → 整体忽略。
+# 只放行两份"人维护、框架只读不改写"的源资料（注意：反选必须逐级打开父目录，否则 ! 不生效）：
+#   AGENTS.md               智能体人设与本地约定；框架只读，缺失时仅打一条 warn，不会重新生成
+#   knowledge/KNOWLEDGE.md  每次调用注入 system prompt 的领域知识
+/.agentscope/*
+!/.agentscope/workspace/
+/.agentscope/workspace/*
+!/.agentscope/workspace/chat/
+/.agentscope/workspace/chat/*
+!/.agentscope/workspace/chat/AGENTS.md
+!/.agentscope/workspace/chat/knowledge/
+/.agentscope/workspace/chat/knowledge/*
+!/.agentscope/workspace/chat/knowledge/KNOWLEDGE.md

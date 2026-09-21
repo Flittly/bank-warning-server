@@ -1,27 +1,34 @@
 package com.yangtze.bankwarning.ai.workflow;
 
+import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.yangtze.bankwarning.ai.middleware.ReasoningTraceMiddleware;
 import com.yangtze.bankwarning.ai.service.MarkdownReportService;
+import com.yangtze.bankwarning.ai.service.VisualizationService;
+import com.yangtze.bankwarning.ai.store.ReportRunStore;
 import com.yangtze.bankwarning.ai.tool.RiskDataTools;
 import com.yangtze.bankwarning.ai.tool.VisualizationTools;
 import com.yangtze.bankwarning.ai.tool.WeatherTools;
+import com.yangtze.bankwarning.security.security.SecurityUtils;
 import io.agentscope.core.ReActAgent;
 import io.agentscope.core.message.Msg;
 import io.agentscope.core.message.UserMessage;
 import io.agentscope.core.model.Model;
 import io.agentscope.core.skill.repository.AgentSkillRepository;
 import io.agentscope.core.tool.Toolkit;
+import jakarta.annotation.PostConstruct;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Qualifier;
+import org.springframework.dao.DuplicateKeyException;
 import org.springframework.stereotype.Service;
 
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.concurrent.ConcurrentHashMap;
+import java.util.UUID;
 
 /**
  * 报告生成工作流服务。
@@ -30,8 +37,10 @@ import java.util.concurrent.ConcurrentHashMap;
  * 1. 6 步硬编码工作流（按钮触发的报告生成是确定性流程，不靠 LLM 自由发挥）
  * 2. 每步独立 mini agent：专属 systemPrompt + 专属 toolkit（仅注册该步需要的工具）
  * 3. executionContext 在 6 步之间共享（替代 LLM memory 跨步传递）
- * 4. 崩溃恢复：state == DONE 的子任务自动跳过
- * 5. 进度可观察：PlanProgress DTO 暴露给前端
+ * 4. 持久化 checkpoint：每步状态与中间上下文落库（ai_report_runs），
+ *    服务重启/步骤失败后，state == DONE 的子任务自动跳过，从断点续跑
+ * 5. 进度可观察：PlanProgress DTO 从数据库读取，暴露给前端
+ * 6. 同一 task 同一时刻只允许一个进行中的工作流（数据库部分唯一索引兜底）
  *
  * 端点契约：
  * - POST /v0/bank/ai/agent/report/task/{taskId}  → executeTaskReport(taskId)
@@ -64,9 +73,8 @@ public class ReportWorkflowService {
     private final List<AgentSkillRepository> skillRepositories;
     private final ReasoningTraceMiddleware traceMiddleware;
     private final MarkdownReportService markdownReportService;
+    private final ReportRunStore reportRunStore;
     private final ObjectMapper json = new ObjectMapper();
-
-    private final ConcurrentHashMap<String, WorkflowState> workflows = new ConcurrentHashMap<>();
 
     public ReportWorkflowService(Model model,
                                  RiskDataTools riskDataTools,
@@ -74,7 +82,8 @@ public class ReportWorkflowService {
                                  WeatherTools weatherTools,
                                  List<AgentSkillRepository> skillRepositories,
                                  @Qualifier("reportTraceMiddleware") ReasoningTraceMiddleware traceMiddleware,
-                                 MarkdownReportService markdownReportService) {
+                                 MarkdownReportService markdownReportService,
+                                 ReportRunStore reportRunStore) {
         this.model = model;
         this.riskDataTools = riskDataTools;
         this.visualizationTools = visualizationTools;
@@ -82,11 +91,55 @@ public class ReportWorkflowService {
         this.skillRepositories = skillRepositories;
         this.traceMiddleware = traceMiddleware;
         this.markdownReportService = markdownReportService;
+        this.reportRunStore = reportRunStore;
+    }
+
+    /**
+     * 启动时把遗留 RUNNING 工作流标记为 FAILED（单实例假设）：
+     * 进程已重启，进程内不可能还有存活的工作流，下次触发时自动续跑。
+     * 多实例部署需要租约/心跳式回收，属于后续阶段。
+     */
+    @PostConstruct
+    public void recoverInterruptedRuns() {
+        int count = reportRunStore.markStaleRunsFailed("服务重启，任务中断（重新触发即可续跑）");
+        if (count > 0) {
+            log.info("[workflow] 将 {} 个遗留 RUNNING 工作流标记为 FAILED", count);
+        }
     }
 
     public String executeTaskReport(String taskId) {
         log.info("[workflow] start report generation, taskId={}", taskId);
-        traceMiddleware.clearLog();
+        Long userId = SecurityUtils.getCurrentUserId();
+        Long dataFilter = SecurityUtils.getCurrentUserIdForDataFilter();
+
+        ReportRunStore.ReportRun existing =
+                reportRunStore.findLatestByTaskId(taskId, dataFilter).orElse(null);
+        if (existing != null && isActive(existing.status())) {
+            throw new IllegalStateException("任务正在生成报告中，请刷新进度查看，不要重复触发");
+        }
+
+        boolean resuming = existing != null && ReportRunStore.STATUS_FAILED.equals(existing.status());
+        WorkflowState state = resuming
+                ? WorkflowState.fromJson(json, existing.stepStatesJson(), existing.contextJson())
+                : new WorkflowState();
+        String runId = resuming ? existing.runId() : UUID.randomUUID().toString();
+
+        if (resuming) {
+            if (!reportRunStore.claimRunning(runId, dataFilter)) {
+                throw new IllegalStateException("任务状态已变化（可能已在生成中），请刷新后重试");
+            }
+            log.info("[workflow] resume interrupted run, runId={}, taskId={}", runId, taskId);
+        } else {
+            try {
+                reportRunStore.create(runId, taskId, userId,
+                        toStepStatesJson(state), toContextJson(state));
+            } catch (DuplicateKeyException e) {
+                throw new IllegalStateException("任务正在生成报告中，请刷新进度查看，不要重复触发", e);
+            }
+            if (!reportRunStore.claimRunning(runId, dataFilter)) {
+                throw new IllegalStateException("任务正在生成报告中，请刷新进度查看，不要重复触发");
+            }
+        }
 
         String ts = java.time.LocalDateTime.now()
                 .format(java.time.format.DateTimeFormatter.ofPattern("yyyyMMdd_HHmmss"));
@@ -95,84 +148,141 @@ public class ReportWorkflowService {
                 + taskId + "_" + ts;
         new java.io.File(taskDir).mkdirs();
         log.info("[workflow] task output dir: {}", taskDir);
-        com.yangtze.bankwarning.ai.service.VisualizationService.beginTask(taskDir);
+        VisualizationService.beginTask(taskDir);
 
         try {
-        WorkflowState state = new WorkflowState();
-        workflows.put(taskId, state); // 每次请求都全新开始，不复用旧状态
-        state.context.put("taskId", taskId);
+            for (int i = 0; i < STEPS.length; i++) {
+                if (state.stepStates[i] == StepState.DONE) {
+                    log.info("[workflow] [{}] skip (already DONE)", STEPS[i].name);
+                    continue;
+                }
 
-        for (int i = 0; i < STEPS.length; i++) {
-            if (state.stepStates[i] == StepState.DONE) {
-                log.info("[workflow] [{}] skip (already DONE)", STEPS[i].name);
-                continue;
+                log.info("[workflow] [{}] starting", STEPS[i].name);
+                state.stepStates[i] = StepState.IN_PROGRESS;
+                persistProgress(runId, dataFilter, i, state);
+                int traceBefore = traceMiddleware.getLog().size();
+
+                try {
+                    String result = executeOneStep(i, taskId, state);
+                    state.stepStates[i] = StepState.DONE;
+                    appendChartsFromTrace(state, i, traceBefore);
+                    persistProgress(runId, dataFilter, i, state);
+                    log.info("[workflow] [{}] DONE", STEPS[i].name);
+                } catch (Exception e) {
+                    log.error("[workflow] [{}] FAILED: {}", STEPS[i].name, e.getMessage(), e);
+                    state.stepStates[i] = StepState.FAILED;
+                    state.lastError = e.getMessage();
+                    persistProgress(runId, dataFilter, i, state);
+                    reportRunStore.markFailed(runId, dataFilter, e.getMessage());
+                    throw new RuntimeException("Step " + STEPS[i].name + " failed: " + e.getMessage(), e);
+                }
             }
 
-            log.info("[workflow] [{}] starting", STEPS[i].name);
-            state.stepStates[i] = StepState.IN_PROGRESS;
+            String finalReport = (String) state.context.getOrDefault("finalReport", "");
+            log.info("[workflow] finished, total length={}", finalReport.length());
 
-            try {
-                String result = executeOneStep(i, taskId, state);
-                state.stepStates[i] = StepState.DONE;
-                log.info("[workflow] [{}] DONE", STEPS[i].name);
-            } catch (Exception e) {
-                log.error("[workflow] [{}] FAILED: {}", STEPS[i].name, e.getMessage(), e);
-                state.stepStates[i] = StepState.FAILED;
-                state.lastError = e.getMessage();
-                throw new RuntimeException("Step " + STEPS[i].name + " failed: " + e.getMessage(), e);
-            }
-        }
-
-        String finalReport = (String) state.context.getOrDefault("finalReport", "");
-        log.info("[workflow] finished, total length={}", finalReport.length());
-
-        String mdContent = markdownReportService.buildMarkdownContent(
-                taskId, finalReport, collectCharts(state));
-
-        try {
-            String mdPath = markdownReportService.generateMarkdownReport(
+            String mdContent = markdownReportService.buildMarkdownContent(
                     taskId, finalReport, collectCharts(state));
-            log.info("[workflow] markdown report saved: {}", mdPath);
-        } catch (Exception e) {
-            log.error("[workflow] failed to save markdown report: {}", e.getMessage(), e);
-        }
 
-        return mdContent;
+            String savedFileName = reportFileName;
+            try {
+                String mdPath = markdownReportService.generateMarkdownReport(
+                        taskId, finalReport, collectCharts(state));
+                savedFileName = new java.io.File(mdPath).getName();
+                log.info("[workflow] markdown report saved: {}", mdPath);
+            } catch (Exception e) {
+                log.error("[workflow] failed to save markdown report: {}", e.getMessage(), e);
+            }
+
+            reportRunStore.markFinished(runId, dataFilter, savedFileName);
+            return mdContent;
         } finally {
-            com.yangtze.bankwarning.ai.service.VisualizationService.endTask();
-            var wf = workflows.get(taskId);
-            if (wf != null) wf.context.put("reportFileName", reportFileName);
+            VisualizationService.endTask();
         }
     }
 
     public String getReportFileName(String taskId) {
-        WorkflowState wf = workflows.get(taskId);
-        if (wf == null) return null;
-        return (String) wf.context.get("reportFileName");
+        Long dataFilter = SecurityUtils.getCurrentUserIdForDataFilter();
+        return reportRunStore.findLatestByTaskId(taskId, dataFilter)
+                .filter(run -> ReportRunStore.STATUS_FINISHED.equals(run.status()))
+                .map(ReportRunStore.ReportRun::reportFileName)
+                .orElse(null);
     }
 
     public PlanProgress getProgress(String taskId) {
-        WorkflowState state = workflows.get(taskId);
-        if (state == null) {
-            return null;
-        }
+        Long dataFilter = SecurityUtils.getCurrentUserIdForDataFilter();
+        return reportRunStore.findLatestByTaskId(taskId, dataFilter)
+                .map(this::toPlanProgress)
+                .orElse(null);
+    }
 
+    private PlanProgress toPlanProgress(ReportRunStore.ReportRun run) {
         List<PlanProgress.SubTaskProgress> subProgress = new ArrayList<>();
         int completed = 0;
+        List<String> states = parseStepStates(run.stepStatesJson());
         for (int i = 0; i < STEPS.length; i++) {
-            StepState ss = state.stepStates[i];
-            if (ss == StepState.DONE) completed++;
+            StepState ss = i < states.size() ? StepState.valueOf(states.get(i)) : StepState.TODO;
+            if (ss == StepState.DONE) {
+                completed++;
+            }
             subProgress.add(new PlanProgress.SubTaskProgress(
                     i, STEPS[i].name, STEPS[i].description, ss.name(),
                     STEPS[i].expectedOutcome, ""));
         }
 
-        String overallStatus = (completed == STEPS.length) ? "FINISHED"
-                : (state.lastError != null) ? "FAILED"
-                : (completed == 0) ? "PENDING" : "RUNNING";
+        String overallStatus = switch (run.status()) {
+            case ReportRunStore.STATUS_FINISHED -> "FINISHED";
+            case ReportRunStore.STATUS_FAILED -> "FAILED";
+            case ReportRunStore.STATUS_PENDING -> "PENDING";
+            default -> "RUNNING";
+        };
 
-        return new PlanProgress("report-" + taskId, taskId, overallStatus,
+        return new PlanProgress("report-" + run.taskId(), run.taskId(), overallStatus,
                 STEPS.length, completed, subProgress);
+    }
+
+    private List<String> parseStepStates(String stepStatesJson) {
+        if (stepStatesJson == null || stepStatesJson.isBlank()) {
+            return new ArrayList<>();
+        }
+        try {
+            return json.readValue(stepStatesJson, new TypeReference<List<String>>() { });
+        } catch (Exception e) {
+            log.warn("[workflow] 解析步骤状态失败: {}", e.getMessage());
+            return new ArrayList<>();
+        }
+    }
+
+    // ========== 持久化 ==========
+
+    private void persistProgress(String runId, Long dataFilter, int currentStep, WorkflowState state) {
+        reportRunStore.updateProgress(runId, dataFilter, currentStep,
+                toStepStatesJson(state), toContextJson(state));
+    }
+
+    private String toStepStatesJson(WorkflowState state) {
+        try {
+            List<String> names = new ArrayList<>();
+            for (StepState step : state.stepStates) {
+                names.add(step.name());
+            }
+            return json.writeValueAsString(names);
+        } catch (JsonProcessingException e) {
+            throw new IllegalStateException("序列化步骤状态失败", e);
+        }
+    }
+
+    private String toContextJson(WorkflowState state) {
+        try {
+            return json.writeValueAsString(state.context);
+        } catch (JsonProcessingException e) {
+            throw new IllegalStateException("序列化工作流上下文失败", e);
+        }
+    }
+
+    private static boolean isActive(String status) {
+        return ReportRunStore.STATUS_PENDING.equals(status)
+                || ReportRunStore.STATUS_RUNNING.equals(status);
     }
 
     // ========== 单步执行 ==========
@@ -249,14 +359,18 @@ public class ReportWorkflowService {
                 highRisk.add(new HighRiskSection(sectionName.trim(), null, null, level));
             }
         }
-        state.context.put("highRiskSections", highRisk);
+        // 序列化友好的 Map 形式落库（断点续跑时按 Map 读回）
+        List<Map<String, Object>> serializable = new ArrayList<>();
+        for (HighRiskSection section : highRisk) {
+            serializable.add(toHighRiskMap(section));
+        }
+        state.context.put("highRiskSections", serializable);
         return "筛选出 " + highRisk.size() + " 个高风险断面（风险等级 >= 3）";
     }
 
     private String step4QueryWeather(WorkflowState state) {
-        @SuppressWarnings("unchecked")
-        List<HighRiskSection> highRisk = (List<HighRiskSection>) state.context.get("highRiskSections");
-        if (highRisk == null || highRisk.isEmpty()) {
+        List<Map<String, Object>> highRisk = readHighRiskSections(state);
+        if (highRisk.isEmpty()) {
             state.context.put("weatherResults", new LinkedHashMap<String, String>());
             return "无高风险断面，跳过天气查询";
         }
@@ -266,9 +380,9 @@ public class ReportWorkflowService {
 
         StringBuilder ctx = new StringBuilder("需要查询天气的高风险断面列表：\n");
         for (int i = 0; i < highRisk.size(); i++) {
-            HighRiskSection s = highRisk.get(i);
+            Map<String, Object> s = highRisk.get(i);
             ctx.append(String.format("%d. 断面：%s | 风险等级：%d | 坐标：(%s, %s)\n",
-                    i + 1, s.name(), s.level(), s.lng(), s.lat()));
+                    i + 1, s.get("name"), levelOf(s), s.get("lng"), s.get("lat")));
         }
         ctx.append("\n对每个断面调用 get_weather_forecast(lng, lat, 3) 获取未来 3 天天气。\n");
         ctx.append("如果数据显示有暴雨/台风预警，再额外调用 get_weather_warning(lng, lat)。");
@@ -292,9 +406,8 @@ public class ReportWorkflowService {
     }
 
     private String step5GenSectionCharts(WorkflowState state) {
-        @SuppressWarnings("unchecked")
-        List<HighRiskSection> highRisk = (List<HighRiskSection>) state.context.get("highRiskSections");
-        if (highRisk == null || highRisk.isEmpty()) {
+        List<Map<String, Object>> highRisk = readHighRiskSections(state);
+        if (highRisk.isEmpty()) {
             state.context.put("sectionChartsText", "无高风险断面，跳过断面图生成");
             return "无高风险断面，跳过";
         }
@@ -304,8 +417,8 @@ public class ReportWorkflowService {
         toolkit.removeTool("generate_risk_distribution_map");
 
         StringBuilder sectionList = new StringBuilder();
-        for (HighRiskSection s : highRisk) {
-            sectionList.append("断面：").append(s.name()).append("（ID 暂用断面名）\n");
+        for (Map<String, Object> s : highRisk) {
+            sectionList.append("断面：").append(s.get("name")).append("（ID 暂用断面名）\n");
         }
 
         ReActAgent agent = buildMiniAgent("step5_gen_charts", toolkit,
@@ -370,22 +483,89 @@ public class ReportWorkflowService {
         return report;
     }
 
-    // ========== 辅助方法 ==========
+    // ========== 图表收集（逐步落库，支持断点续跑） ==========
 
-    private ReActAgent buildMiniAgent(String name, Toolkit toolkit, String sysPrompt) {
-        return ReActAgent.builder()
-                .name(name)
-                .sysPrompt(sysPrompt)
-                .model(model)
-                .toolkit(toolkit)
-                .skillRepositories(skillRepositories)
-                .middleware(traceMiddleware)
-                .maxIters(3)
-                .build();
+    /**
+     * 每个出图步骤完成后立即把该步生成的图表路径并入 context["charts"]：
+     * 断点续跑时已完成的图表不依赖中间件日志也能恢复。
+     */
+    private void appendChartsFromTrace(WorkflowState state, int stepIdx, int traceBefore) {
+        if (stepIdx != 1 && stepIdx != 4) {
+            return;
+        }
+        List<Map<String, String>> charts = contextCharts(state);
+        String agentName = stepIdx == 1 ? "step2_gen_distribution" : "step5_gen_charts";
+        List<String> tools = stepIdx == 1
+                ? List.of("generate_risk_distribution_map")
+                : List.of("generate_scour_heatmap", "generate_section_comparison_chart");
+
+        List<ReasoningTraceMiddleware.ThoughtLogEntry> entries = traceMiddleware.getLog();
+        for (int i = traceBefore; i < entries.size() - 1; i++) {
+            ReasoningTraceMiddleware.ThoughtLogEntry action = entries.get(i);
+            if (!agentName.equals(action.getAgentName()) || !"action".equals(action.getType())) {
+                continue;
+            }
+            String tool = toolOf(action.getContent());
+            if (tool == null || !tools.contains(tool)) {
+                continue;
+            }
+            ReasoningTraceMiddleware.ThoughtLogEntry result = entries.get(i + 1);
+            if (!"result".equals(result.getType())) {
+                continue;
+            }
+            String path = MarkdownReportService.extractFilePath(result.getContent());
+            if (path == null || containsPath(charts, path)) {
+                continue;
+            }
+            charts.add(Map.of("tool", tool, "result", "{\"file_path\":\"" + path + "\"}"));
+        }
+        if (!charts.isEmpty()) {
+            state.context.put("charts", charts);
+        }
+    }
+
+    @SuppressWarnings("unchecked")
+    private List<Map<String, String>> contextCharts(WorkflowState state) {
+        Object cached = state.context.get("charts");
+        if (cached instanceof List<?> list) {
+            List<Map<String, String>> charts = new ArrayList<>();
+            for (Object item : list) {
+                if (item instanceof Map<?, ?> map) {
+                    Map<String, String> copy = new LinkedHashMap<>();
+                    map.forEach((key, value) -> copy.put(String.valueOf(key), String.valueOf(value)));
+                    charts.add(copy);
+                }
+            }
+            return charts;
+        }
+        return new ArrayList<>();
+    }
+
+    private static String toolOf(String content) {
+        if (content == null) {
+            return null;
+        }
+        for (String candidate : List.of(
+                "generate_risk_distribution_map", "generate_scour_heatmap",
+                "generate_section_comparison_chart")) {
+            if (content.startsWith(candidate + "(")) {
+                return candidate;
+            }
+        }
+        return null;
+    }
+
+    private static boolean containsPath(List<Map<String, String>> charts, String path) {
+        return charts.stream()
+                .anyMatch(chart -> chart.get("result") != null && chart.get("result").contains(path));
     }
 
     private List<Map<String, String>> collectCharts(WorkflowState state) {
-        List<Map<String, String>> charts = new ArrayList<>();
+        List<Map<String, String>> charts = contextCharts(state);
+        if (!charts.isEmpty()) {
+            return charts;
+        }
+        // 兼容旧逻辑：从中间件全量日志提取（新流程每步已落库，正常不会走到这里）
         for (String p : extractPathsFromMiddleware(traceMiddleware, "step2_gen_distribution", "generate_risk_distribution_map")) {
             charts.add(Map.of("tool", "generate_risk_distribution_map",
                     "result", "{\"file_path\":\"" + p + "\"}"));
@@ -425,17 +605,87 @@ public class ReportWorkflowService {
         return paths;
     }
 
+    // ========== 辅助方法 ==========
+
+    private ReActAgent buildMiniAgent(String name, Toolkit toolkit, String sysPrompt) {
+        return ReActAgent.builder()
+                .name(name)
+                .sysPrompt(sysPrompt)
+                .model(model)
+                .toolkit(toolkit)
+                .skillRepositories(skillRepositories)
+                .middleware(traceMiddleware)
+                .maxIters(3)
+                .build();
+    }
+
+    private static Map<String, Object> toHighRiskMap(HighRiskSection section) {
+        Map<String, Object> map = new LinkedHashMap<>();
+        map.put("name", section.name());
+        map.put("lng", section.lng());
+        map.put("lat", section.lat());
+        map.put("level", section.level());
+        return map;
+    }
+
+    @SuppressWarnings("unchecked")
+    private static List<Map<String, Object>> readHighRiskSections(WorkflowState state) {
+        Object raw = state.context.get("highRiskSections");
+        if (raw instanceof List<?> list) {
+            List<Map<String, Object>> result = new ArrayList<>();
+            for (Object item : list) {
+                if (item instanceof Map<?, ?> map) {
+                    Map<String, Object> copy = new LinkedHashMap<>();
+                    map.forEach((key, value) -> copy.put(String.valueOf(key), value));
+                    result.add(copy);
+                }
+            }
+            return result;
+        }
+        return new ArrayList<>();
+    }
+
+    private static int levelOf(Map<String, Object> section) {
+        Object level = section.get("level");
+        return level instanceof Number number ? number.intValue() : 0;
+    }
+
     // ========== 内部数据类 ==========
 
     private static class WorkflowState {
-        final StepState[] stepStates = new StepState[STEPS.length];
+        final StepState[] stepStates;
         final Map<String, Object> context = new LinkedHashMap<>();
         volatile String lastError;
 
         WorkflowState() {
+            stepStates = new StepState[STEPS.length];
             for (int i = 0; i < STEPS.length; i++) {
                 stepStates[i] = StepState.TODO;
             }
+        }
+
+        static WorkflowState fromJson(ObjectMapper json, String stepStatesJson, String contextJson) {
+            WorkflowState state = new WorkflowState();
+            if (stepStatesJson != null && !stepStatesJson.isBlank()) {
+                try {
+                    List<String> names = json.readValue(
+                            stepStatesJson, new TypeReference<List<String>>() { });
+                    for (int i = 0; i < state.stepStates.length && i < names.size(); i++) {
+                        state.stepStates[i] = StepState.valueOf(names.get(i));
+                    }
+                } catch (Exception e) {
+                    log.warn("[workflow] 解析步骤状态失败，将从头开始: {}", e.getMessage());
+                }
+            }
+            if (contextJson != null && !contextJson.isBlank()) {
+                try {
+                    state.context.putAll(json.readValue(
+                            contextJson, new TypeReference<Map<String, Object>>() { }));
+                } catch (Exception e) {
+                    log.warn("[workflow] 解析工作流上下文失败，将丢弃旧上下文: {}", e.getMessage());
+                }
+            }
+            return state;
         }
     }
 
