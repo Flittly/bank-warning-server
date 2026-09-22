@@ -81,6 +81,69 @@ class SkillVersionServiceTest {
         assertEquals("1.0.0", SkillCacheService.normalizeVersion(" 1.0.0 "));
     }
 
+    /**
+     * 回归测试（核心修复）：classpath skill 的 resources 按框架设计不含 SKILL.md，
+     * 调用方必须把完整 SKILL.md（frontmatter + 正文）传进来。
+     * 修好之前：版本退成 0.0.0、目录里没有 SKILL.md → WARN + 激活永久失败 + 权限读不到。
+     */
+    @Test
+    void registerResourcesWritesSkillMdSoVersionMetadataAndActivationWork() {
+        SkillVersionService svc = newService();
+
+        // 模拟 ClasspathSkillRepository 给的资源：只有附件，没有 SKILL.md
+        Map<String, String> resources = new LinkedHashMap<>();
+        resources.put("scripts/hello.py", "print('hello')\n");
+
+        String fullSkillMd = "---\nname: word\nversion: 0.1.0\noutput: text\n"
+                + "permissions:\n  - network\n  - subprocess\n---\n\n# word\n正文\n";
+        svc.registerResources("word", resources, fullSkillMd, "classpath", "system");
+
+        // 1) 版本号从 SKILL.md frontmatter 解析出来，而不是退回默认值
+        assertEquals("0.1.0", svc.resolveActiveVersion("word").orElse(""));
+
+        // 2) 版本目录里真的有 SKILL.md —— 激活的前置判据就是它，所以能成功
+        assertTrue(svc.activate("word", "0.1.0", "admin"), "版本目录含 SKILL.md 时激活应成功");
+
+        // 3) 附件（脚本）也照常落盘，不只是说明书
+        Path versionDir = svc.resolveActiveDir("word").orElseThrow();
+        assertEquals(tempDir.resolve("word").resolve("0.1.0"), versionDir);
+        assertTrue(versionDir.resolve("SKILL.md").toFile().exists());
+        assertTrue(versionDir.resolve("scripts").resolve("hello.py").toFile().exists());
+
+        // 4) 权限元数据可读 —— 「Skill 审批」页不再是瞎的
+        assertTrue(PythonImportScanner.parsePermissions(versionDir).contains("network"));
+        assertTrue(PythonImportScanner.parsePermissions(versionDir).contains("subprocess"));
+    }
+
+    /** resources 里已带 SKILL.md（下载包形态）时原样保留，不被运行期拼装版覆盖 */
+    @Test
+    void registerResourcesKeepsSkillMdAlreadyInResourcePack() {
+        SkillVersionService svc = newService();
+
+        Map<String, String> resources = new LinkedHashMap<>();
+        resources.put("SKILL.md", "---\nname: pdf\nversion: 3.2.1\n---\n\n包内原样正文\n");
+        resources.put("scripts/a.py", "print(1)\n");
+
+        svc.registerResources("pdf", resources,
+                "---\nname: pdf\nversion: 9.9.9\n---\n\n运行期拼装正文\n", "nacos", "system");
+
+        assertEquals("3.2.1", svc.resolveActiveVersion("pdf").orElse(""),
+                "resources 里已有的 SKILL.md 应优先，不被传入的拼装版覆盖");
+    }
+
+    /** find-skills 这类 jar 内只有 SKILL.md 的 skill：resources 为空 map，也必须建出版本目录 */
+    @Test
+    void registerResourcesCreatesVersionDirWhenOnlySkillMdPresent() {
+        SkillVersionService svc = newService();
+
+        svc.registerResources("find-skills", new LinkedHashMap<>(),
+                "---\nname: find-skills\nversion: 0.0.1\n---\n\n正文\n", "classpath", "system");
+
+        assertEquals("0.0.1", svc.resolveActiveVersion("find-skills").orElse(""));
+        assertTrue(svc.activate("find-skills", "0.0.1", "admin"),
+                "resources 为空时也应建出含 SKILL.md 的版本目录");
+    }
+
     private SkillVersionService newService() {
         SkillCacheService cacheService = new SkillCacheService(
                 tempDir.toString(), PythonImportScanner.of(List.of(), true));

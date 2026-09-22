@@ -49,15 +49,55 @@ public class SkillVersionService {
     }
 
     /**
-     * 启动物化（classpath 等资源形态）：从 resources 的 SKILL.md 解析版本后按版本物化并登记。
+     * 启动物化（classpath 等资源形态）：先把完整 SKILL.md 并入资源，再从中解析版本号，
+     * 按版本目录物化并登记。
+     *
+     * <p>⚠️ {@code skillContent} 必须是<b>完整 SKILL.md（frontmatter + 正文）</b>，
+     * 由调用方用 {@code MarkdownSkillParser.generate(metadata, content)} 拼好 ——
+     * 框架的 {@code getResources()} 按设计不含 SKILL.md，而 {@code getSkillContent()}
+     * 只有正文、不含 frontmatter。缺了 frontmatter 会解析不出版本号（退回 0.0.0），
+     * 等于没修，所以这里不接受裸正文。
      */
-    public SkillVersion registerResources(String skillName, Map<String, String> resources, String source,
-                                          String updatedBy) {
-        String version = extractVersion(resources);
-        cacheService.materializeResourcesVersioned(skillName, version, resources);
+    public SkillVersion registerResources(String skillName, Map<String, String> resources,
+                                          String skillContent, String source, String updatedBy) {
+        Map<String, String> merged = mergeSkillMd(resources, skillContent);
+        String version = extractVersion(merged);
+        cacheService.materializeResourcesVersioned(skillName, version, merged);
+        if (!cacheService.hasVersion(skillName, version)) {
+            log.error("[skill-version] 物化后仍缺 SKILL.md：{}@{} —— 版本号与权限元数据将无法解析，"
+                    + "「版本与隔离」的激活按钮也会失效；请检查物化调用是否传入了完整 SKILL.md",
+                    skillName, version);
+        }
         SkillVersion record = store.registerOrActivate(skillName, version, source, updatedBy);
         log.info("[skill-version] 启动物化注册 {}@{} source={} status={}", skillName, version, source, record.status());
         return record;
+    }
+
+    /**
+     * 把调用方拼好的完整 SKILL.md 并入 resources。
+     * resources 里已带 SKILL.md 时原样保留、不覆盖 —— 下载包（Nacos）里的 SKILL.md
+     * 由框架落盘时写出，是权威版本，不该被运行期重新拼装的覆盖。
+     */
+    private static Map<String, String> mergeSkillMd(Map<String, String> resources, String skillContent) {
+        Map<String, String> merged = new LinkedHashMap<>();
+        if (resources != null) {
+            merged.putAll(resources);
+        }
+        if (skillContent != null && !skillContent.isBlank() && !hasSkillMd(merged)) {
+            merged.put("SKILL.md", skillContent);
+        }
+        return merged;
+    }
+
+    /** 资源 key 是否已包含 SKILL.md（归一化反斜杠，兼容 ./SKILL.md 写法） */
+    private static boolean hasSkillMd(Map<String, String> resources) {
+        for (String key : resources.keySet()) {
+            String normalized = key.replace('\\', '/');
+            if ("SKILL.md".equals(normalized) || "./SKILL.md".equals(normalized)) {
+                return true;
+            }
+        }
+        return false;
     }
 
     /**
@@ -156,13 +196,11 @@ public class SkillVersionService {
         if (resources == null) {
             return SkillMetadata.DEFAULT_VERSION;
         }
-        Map<String, String> normalized = new LinkedHashMap<>();
         for (Map.Entry<String, String> entry : resources.entrySet()) {
-            normalized.put(entry.getKey().replace('\\', '/'), entry.getValue());
-        }
-        String skillMd = normalized.get("SKILL.md");
-        if (skillMd != null) {
-            return SkillMetadata.parse(skillMd).getVersion();
+            String key = entry.getKey().replace('\\', '/');
+            if ("SKILL.md".equals(key) || "./SKILL.md".equals(key)) {
+                return SkillMetadata.parse(entry.getValue()).getVersion();
+            }
         }
         return SkillMetadata.DEFAULT_VERSION;
     }

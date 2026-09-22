@@ -28,6 +28,7 @@ import io.agentscope.core.rag.store.VDBStoreBase;
 import io.agentscope.core.skill.AgentSkill;
 import io.agentscope.core.skill.repository.AgentSkillRepository;
 import io.agentscope.core.skill.repository.ClasspathSkillRepository;
+import io.agentscope.core.skill.util.MarkdownSkillParser;
 import io.agentscope.core.tool.Toolkit;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -187,12 +188,43 @@ public class AgentScopeConfig {
         return repos;
     }
 
+    /**
+     * 把 classpath（或 Nacos）里的 skill 物化到 .skills-cache/&lt;skill&gt;/&lt;version&gt;/。
+     *
+     * <p>关键点：框架的 {@code skill.getResources()} <b>按设计不含 SKILL.md</b>
+     * （{@code SkillFileSystemHelper.isValidResource} 里明确把 SKILL.md 排除），
+     * 框架是把 SKILL.md 拆成两半存放的：
+     * <ul>
+     *   <li>{@code getMetadata()}   —— frontmatter（name / version / permissions / output …）</li>
+     *   <li>{@code getSkillContent()} —— 只有正文，不含 frontmatter</li>
+     * </ul>
+     *
+     * <p>所以这里必须用框架自己的 {@link MarkdownSkillParser#generate} 把两半拼回完整
+     * SKILL.md 再传下去（它内部对 metadata 整表 YAML dump，version/permissions 一个不丢；
+     * 手工拼串只留 name + description，会让权限声明蒸发）。
+     *
+     * <p>若省掉这一步，版本目录里就没有 SKILL.md，会连锁导致三件事同时坏掉：
+     * 版本号解析不出（退成 0.0.0）、权限元数据读不到（审批页显示无权限）、
+     * {@code hasVersion()} 恒为 false（激活按钮永久失效 + 每次列技能刷 WARN）。
+     */
     private void materializeSafe(SkillVersionService skillVersionService, AgentSkill skill) {
         try {
-            skillVersionService.registerResources(skill.getName(), skill.getResources(), "classpath", "system");
+            String fullSkillMd = composeSkillMd(skill);
+            skillVersionService.registerResources(skill.getName(), skill.getResources(),
+                    fullSkillMd, "classpath", "system");
         } catch (Exception e) {
             log.error("[SkillRepo] 物化失败 {}: {}", skill.getName(), e.getMessage());
         }
+    }
+
+    /** 用框架正规 API 把 metadata + 正文拼回完整 SKILL.md；内容缺失时返回 null（由下层决定是否补写）。 */
+    private static String composeSkillMd(AgentSkill skill) {
+        String content = skill.getSkillContent();
+        Map<String, Object> meta = skill.getMetadata();
+        if ((content == null || content.isBlank()) && (meta == null || meta.isEmpty())) {
+            return null;
+        }
+        return MarkdownSkillParser.generate(meta == null ? Map.of() : meta, content == null ? "" : content);
     }
 
     @Bean
