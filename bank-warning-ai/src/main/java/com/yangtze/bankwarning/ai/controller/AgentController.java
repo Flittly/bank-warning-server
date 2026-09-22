@@ -1,6 +1,7 @@
 package com.yangtze.bankwarning.ai.controller;
 
 import com.yangtze.bankwarning.ai.middleware.ReasoningTraceMiddleware;
+import com.yangtze.bankwarning.ai.security.SkillPathGuard;
 import com.yangtze.bankwarning.ai.service.KnowledgeService;
 import com.yangtze.bankwarning.ai.service.ModelService;
 import com.yangtze.bankwarning.ai.workflow.PlanProgress;
@@ -20,6 +21,7 @@ import org.springframework.web.bind.annotation.*;
 import java.io.File;
 import java.io.IOException;
 import java.nio.file.Files;
+import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
@@ -120,20 +122,34 @@ public class AgentController {
             log.warn("[chat] 预检索失败，跳过: {}", e.getMessage());
         }
 
-        boolean hasReports = reportIds != null && !reportIds.isEmpty();
+        // 把请求体传入的 reportIds 解析为 reports 目录内的真实文件。
+        // 只接受纯文件名（不含路径分隔符 / 盘符），越界项丢弃并记入 rejectedReports；
+        // 读写两个方向共用这一份 File 列表，杜绝 ../ 逃逸出 reports 目录。
+        File reportsDir = new File(outputDir, "reports");
+        List<File> reportFiles = new ArrayList<>();
+        List<String> rejectedReports = new ArrayList<>();
+        if (reportIds != null) {
+            for (String reportId : reportIds) {
+                try {
+                    reportFiles.add(resolveReportFile(reportsDir, reportId));
+                } catch (IllegalArgumentException e) {
+                    log.warn("[chat] 拒绝非法报告文件名: {} ({})", reportId, e.getMessage());
+                    rejectedReports.add(String.valueOf(reportId));
+                }
+            }
+        }
+        boolean hasReports = !reportFiles.isEmpty();
         // 拼入拖入的报告内容作为上下文
         if (hasReports) {
             prompt.append("以下是用户拖入的已有报告，请基于这些报告内容回答用户问题：\n\n");
-            File reportsDir = new File(outputDir, "reports");
-            for (String filename : reportIds) {
-                File f = new File(reportsDir, filename);
+            for (File f : reportFiles) {
                 if (f.exists()) {
                     try {
                         String content = Files.readString(f.toPath());
-                        prompt.append("--- 报告：").append(filename).append(" ---\n");
+                        prompt.append("--- 报告：").append(f.getName()).append(" ---\n");
                         prompt.append(content).append("\n");
                     } catch (IOException e) {
-                        log.warn("[chat] 无法读取报告文件: {}", filename, e);
+                        log.warn("[chat] 无法读取报告文件: {}", f.getName(), e);
                     }
                 }
             }
@@ -168,16 +184,14 @@ public class AgentController {
             chatReply = rawText.substring(0, sepIdx).trim();
             String modifiedReport = rawText.substring(sepIdx + separator.length()).trim();
             if (!modifiedReport.isEmpty()) {
-                File reportsDir = new File(outputDir, "reports");
-                for (String filename : reportIds) {
-                    File f = new File(reportsDir, filename);
+                for (File f : reportFiles) {
                     try {
                         Files.writeString(f.toPath(), modifiedReport);
-                        log.info("[chat] 报告已更新: {}", filename);
-                        updatedReports.add(Map.of("filename", filename, "updated", "true"));
+                        log.info("[chat] 报告已更新: {}", f.getName());
+                        updatedReports.add(Map.of("filename", f.getName(), "updated", "true"));
                     } catch (IOException e) {
-                        log.error("[chat] 写入报告失败: {}", filename, e);
-                        updatedReports.add(Map.of("filename", filename, "error", e.getMessage()));
+                        log.error("[chat] 写入报告失败: {}", f.getName(), e);
+                        updatedReports.add(Map.of("filename", f.getName(), "error", e.getMessage()));
                     }
                 }
             }
@@ -191,7 +205,34 @@ public class AgentController {
         if (!updatedReports.isEmpty()) {
             result.put("updatedReports", updatedReports);
         }
+        if (!rejectedReports.isEmpty()) {
+            result.put("rejectedReports", rejectedReports);
+        }
         return result;
+    }
+
+    /**
+     * 把请求体传入的 reportId 解析为 reportsDir 下的真实文件。
+     *
+     * 安全约束：只接受"单个文件名"——任何路径分隔符（/ \）、盘符冒号、
+     * 或以 . / .. 结尾的形式一律拒绝；再经 {@link SkillPathGuard#safeResolve}
+     * 做 normalize 后的目录包含校验兜底，确保结果必然落在 reportsDir 内。
+     *
+     * @throws IllegalArgumentException 文件名为空或试图逃逸出 reportsDir
+     */
+    private File resolveReportFile(File reportsDir, String reportId) {
+        if (reportId == null || reportId.isBlank()) {
+            throw new IllegalArgumentException("报告文件名不能为空");
+        }
+        String name = reportId.strip();
+        boolean hasSeparator = name.indexOf('/') >= 0 || name.indexOf('\\') >= 0;
+        // Windows 盘符相对路径（如 C:foo）带 root 但不是绝对路径，resolve 时会被特殊处理，一并挡掉
+        boolean hasDriveColon = name.indexOf(':') >= 0;
+        if (hasSeparator || hasDriveColon || name.equals(".") || name.equals("..")) {
+            throw new IllegalArgumentException("报告文件名不允许包含路径分隔符或盘符: " + name);
+        }
+        Path base = reportsDir.toPath().toAbsolutePath().normalize();
+        return SkillPathGuard.safeResolve(base, name).toFile();
     }
 
     private String extractText(Msg msg) {

@@ -20,8 +20,17 @@ bank-warning-app/src/main/resources/application-*.yml
 .env.local
 .env.*.local
 
+# skill 运行时缓存（框架物化产物，随时可重建）→ 忽略
 .skills-cache
-bank-warning-ai/src/main/resources/skills
+
+# 注意：bank-warning-ai/src/main/resources/skills/ 是 skill 的【源】目录，
+# 必须入库。这里曾有一条裸目录忽略规则，把 extract_text.py、word/、
+# find-skills/、skill-creator/ 挡在版本库外，导致新机器 clone 后
+# resolveScript 找不到脚本、PDF 知识库不可用。
+# 源目录里要忽略的只有产物（__pycache__、.venv 等），不是整个目录：
+bank-warning-ai/src/main/resources/skills/**/__pycache__/
+bank-warning-ai/src/main/resources/skills/**/.venv/
+bank-warning-ai/src/main/resources/skills/**/uv.lock
 
 visualization/output
 

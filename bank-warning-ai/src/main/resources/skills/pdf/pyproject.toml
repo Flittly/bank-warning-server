@@ -1,0 +1,19 @@
+# 本 skill 的 Python 依赖清单。
+#
+# 为什么必须放在这里（而不是随便某个公共目录）：
+#   沙箱执行命令是 `uv run --project <skillDir> python -I <bootstrap> <script>`，
+#   `--project` 指向本 skill 的目录，uv 以它为项目根向上查找 pyproject.toml
+#   来决定用哪个 venv、装哪些依赖。没有它 uv 退化为"无项目模式"，给一个空环境，
+#   scripts/ 里的 `from pypdf import PdfReader` 会直接 ModuleNotFoundError。
+#
+# 为什么必须提交进 git：
+#   它随本目录一起被 ClasspathSkillRepository 收集 → 打进上传给 Nacos 的 zip →
+#   别的实例下载解包后 `uv --project` 才找得到依赖。本文件不进库，
+#   分发出的 skill 就是"装不上机"的包裹。
+#
+# 自动排除的产物（勿提交）：同目录下的 .venv/、uv.lock
+[project]
+name = "pdf-extract"
+version = "0.1.0"
+requires-python = ">=3.10"
+dependencies = ["pypdf"]

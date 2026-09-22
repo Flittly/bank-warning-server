@@ -16,19 +16,32 @@ import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
+import java.util.ArrayList;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
+import java.util.Set;
 
 @Service
 public class PdfService {
 
     private static final Logger log = LoggerFactory.getLogger(PdfService.class);
 
+    /** 允许处理的输入文件后缀（小写比较） */
+    private static final Set<String> ALLOWED_SUFFIXES = Set.of(".pdf", ".docx");
+
     @Value("${app.ai.skill.cache-dir:${user.dir}/.skills-cache}")
     private String cacheDir;
 
     @Value("${app.ai.pdf.fallback-scripts-dir:${user.dir}/src/main/resources/skills/pdf/scripts}")
     private String fallbackScriptsDir;
+
+    /**
+     * 允许读取的根目录，逗号分隔；留空时使用默认集合（项目工作目录 + 系统临时目录）。
+     * 用于把 filePath 约束在可控范围内，避免 process_pdf 变成"读任意文件"的原语。
+     */
+    @Value("${app.ai.pdf.allowed-read-roots:}")
+    private String allowedReadRootsRaw;
 
     private final PythonImportScanner importScanner;
     private final SkillSandboxExecutor sandboxExecutor;
@@ -52,8 +65,15 @@ public class PdfService {
         log.info("[pdf] processPdf, skill={}, script={}, file={}", skillName, scriptName, filePath);
         String skill = skillName == null || skillName.isBlank() ? "pdf" : skillName.strip();
 
-        Path pdfFile = Paths.get(filePath);
-        if(!Files.exists(pdfFile)){
+        // 输入文件围栏：后缀白名单 + 读取根目录白名单（此前只检查"存在"，Agent 可借此读任意文件）
+        Path pdfFile;
+        try {
+            pdfFile = resolveInputFile(filePath);
+        } catch (IllegalArgumentException e) {
+            log.warn("[pdf] 拒绝非法输入文件: {} ({})", filePath, e.getMessage());
+            return Map.of("success", false, "error", "输入文件不被允许: " + e.getMessage());
+        }
+        if(!Files.isRegularFile(pdfFile)){
             return Map.of("success", false, "error", "PDF 文件不存在: " + filePath);
         }
 
@@ -104,8 +124,9 @@ public class PdfService {
                     .script(scriptFile.toPath().toAbsolutePath())
                     .skillDir(skillDir.toAbsolutePath())
                     .args(List.of(pdfAbs.toString()))
-                    // 输入文件目录只读挂载：脚本能读 PDF，但不能写回宿主任意路径
-                    .readRoots(List.of(pdfAbs.getParent()))
+                    // 只读挂载"这一个输入文件"本身，而不是它所在的整个目录：
+                    // 避免脚本顺带拿到同目录下其它文件的读取权
+                    .readRoots(List.of(pdfAbs))
                     .extraEnv(Map.of("PYTHONIOENCODING", "utf-8"))
                     .useUvProject(true)
                     .build();
@@ -197,6 +218,59 @@ public class PdfService {
             log.warn("[pdf] 非法脚本路径: base={} script={} reason={}", baseDir, scriptName, e.getMessage());
             return null;
         }
+    }
+
+    /**
+     * 校验并解析待处理的输入文件路径。
+     *
+     * 安全约束（此前完全缺失，只检查了"文件存在"）：
+     *   1. 后缀必须在白名单内（.pdf / .docx），杜绝把它当"读任意文件"的原语；
+     *   2. 路径必须落在允许的读取根目录之内，越界一律拒绝。
+     *
+     * 允许根默认取"项目工作目录 + 系统临时目录"（后者是 /knowledge/upload 落临时文件的位置），
+     * 可用 app.ai.pdf.allowed-read-roots 显式覆盖（逗号分隔）。
+     *
+     * @throws IllegalArgumentException 路径为空、后缀不允许、或落在允许根之外
+     */
+    private Path resolveInputFile(String filePath) {
+        if (filePath == null || filePath.isBlank()) {
+            throw new IllegalArgumentException("文件路径不能为空");
+        }
+        Path candidate = Paths.get(filePath).toAbsolutePath().normalize();
+
+        String name = candidate.getFileName() == null
+                ? "" : candidate.getFileName().toString().toLowerCase(Locale.ROOT);
+        if (ALLOWED_SUFFIXES.stream().noneMatch(name::endsWith)) {
+            throw new IllegalArgumentException("仅支持 PDF / DOCX 文件: " + name);
+        }
+
+        List<Path> roots = allowedReadRoots();
+        for (Path root : roots) {
+            if (candidate.startsWith(root)) {
+                return candidate;
+            }
+        }
+        throw new IllegalArgumentException("文件不在允许读取的目录内: " + candidate + "（允许根：" + roots + "）");
+    }
+
+    /** 解析允许读取的根目录列表；配置为空时回退到默认集合 */
+    private List<Path> allowedReadRoots() {
+        List<Path> roots = new ArrayList<>();
+        if (allowedReadRootsRaw != null && !allowedReadRootsRaw.isBlank()) {
+            for (String part : allowedReadRootsRaw.split(",")) {
+                if (!part.isBlank()) {
+                    roots.add(Paths.get(part.strip()).toAbsolutePath().normalize());
+                }
+            }
+        }
+        if (roots.isEmpty()) {
+            roots.add(Paths.get(System.getProperty("user.dir", ".")).toAbsolutePath().normalize());
+            String tmp = System.getProperty("java.io.tmpdir");
+            if (tmp != null && !tmp.isBlank()) {
+                roots.add(Paths.get(tmp).toAbsolutePath().normalize());
+            }
+        }
+        return roots;
     }
 
     private static String trimTo(String text, int max) {
