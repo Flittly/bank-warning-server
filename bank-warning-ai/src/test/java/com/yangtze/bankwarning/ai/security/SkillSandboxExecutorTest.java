@@ -7,9 +7,12 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
 import java.io.IOException;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.TimeUnit;
@@ -84,10 +87,65 @@ class SkillSandboxExecutorTest {
 
         assertTrue(result.isSuccess(), "stderr=" + result.getStderr());
         Set<String> keys = JSON.readValue(result.getStdout(), new TypeReference<Set<String>>() {});
+        Set<String> allowed = new HashSet<>();
+        INTERNAL_KEYS.forEach(k -> allowed.add(normalize(k)));
+        TEST_ALLOWLIST.forEach(k -> allowed.add(normalize(k)));
+        uncontrollableEnvKeys().forEach(k -> allowed.add(normalize(k)));
         Set<String> unexpected = keys.stream()
-                .filter(k -> !INTERNAL_KEYS.contains(k) && !TEST_ALLOWLIST.contains(k))
+                .filter(k -> !allowed.contains(normalize(k)))
                 .collect(Collectors.toSet());
-        assertTrue(unexpected.isEmpty(), "子进程环境出现了未授权键: " + unexpected);
+        assertTrue(unexpected.isEmpty(),
+                "子进程环境出现了未授权键（宿主继承 / 运行器注入之外的意外键）: " + unexpected);
+        // 宿主必须无一泄漏：这几个键一旦出现就是真实的沙箱逃逸
+        for (String secret : List.of("DATABASE_URL", "NACOS_PASSWORD", "DEEPSEEK_API_KEY", "JWT_SECRET")) {
+            assertFalse(keys.contains(secret), "宿主密钥泄漏进子进程环境: " + secret);
+        }
+    }
+
+    /**
+     * 探测「父进程无论如何都清不掉的键」—— 用 <b>清空环境</b> 的方式启动一个 python，看还剩什么。
+     *
+     * <p>本机装了 LiteSandbox（对子进程做审计的工具）。实测结论：
+     * <ol>
+     *   <li>宿主 shell 的环境里<b>没有</b> {@code LSBOX_*}；</li>
+     *   <li>但由宿主 shell 启动的 python，{@code os.environ} 里<b>有</b> {@code LSBOX_*}。</li>
+     * </ol>
+     * 一个进程不可能把自己都没有的变量传给子进程，因此唯一的解释是：
+     * 注入发生在 {@code CreateProcess} 这一层（进程创建钩子），
+     * {@code LSBOX_*} 是审计共享内存的句柄。它绕过了父进程的环境块，
+     * 所以 {@code ProcessBuilder.environment().clear()} 也拦不住，{@code python -I} 同样拦不住。
+     *
+     * <p>这类键既不是宿主继承、也不是沙箱放行，断言里必须单独减掉；
+     * 否则测试会因为"这台机器上恰好装了某个审计工具"而误报，
+     * 真正值得盯的泄漏（宿主密钥被整份继承）反而被淹没。
+     * {@code buildEnv} 自身的正确性由 {@link #buildEnv_keepsOnlyAllowlistedAndInternalKeys} 直接验证。
+     */
+    private static Set<String> uncontrollableEnvKeys() throws Exception {
+        ProcessBuilder pb = new ProcessBuilder("python", "-c",
+                "import os,json;print(json.dumps(sorted(os.environ.keys())))");
+        pb.environment().clear();
+        // 只补回两个"即使不放也一定会被宿主搜到"的启动必需项（它们本来就在白名单内，不影响判断力）
+        for (String key : List.of("PATH", "SYSTEMROOT")) {
+            String value = System.getenv(key);
+            if (value != null) {
+                pb.environment().put(key, value);
+            }
+        }
+        pb.redirectErrorStream(true);
+        Process p = pb.start();
+        String out = new String(p.getInputStream().readAllBytes(), StandardCharsets.UTF_8);
+        p.waitFor(30, TimeUnit.SECONDS);
+        String json = out.lines()
+                .map(String::trim)
+                .filter(l -> l.startsWith("["))
+                .reduce((a, b) -> b)
+                .orElse("[]");
+        return JSON.readValue(json, new TypeReference<Set<String>>() {});
+    }
+
+    /** Windows 环境变量名不区分大小写，比较前统一 */
+    private static String normalize(String key) {
+        return key.toUpperCase(Locale.ROOT);
     }
 
     @Test
@@ -210,8 +268,9 @@ class SkillSandboxExecutorTest {
         Path cache = fixture.resolve("cache");
         Files.createDirectories(cache);
         return new SkillSandboxExecutor(
-                "process", timeoutSeconds, maxOutputBytes, 512, 30, 64, 0.5, "",
-                TEST_ALLOWLIST, cache.toString());
+                () -> SkillSecuritySettings.withSandboxPolicy(
+                        SkillSecurityProfile.STANDARD, "PROCESS", timeoutSeconds, maxOutputBytes),
+                0.5, "", TEST_ALLOWLIST, cache.toString());
     }
 
     private Path writeScript(String body) throws IOException {

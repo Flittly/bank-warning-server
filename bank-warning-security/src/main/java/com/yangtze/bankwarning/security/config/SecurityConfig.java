@@ -2,6 +2,7 @@ package com.yangtze.bankwarning.security.config;
 
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
+import org.springframework.http.HttpMethod;
 import org.springframework.security.authentication.AuthenticationManager;
 import org.springframework.security.config.annotation.authentication.configuration.AuthenticationConfiguration;
 import org.springframework.security.config.annotation.method.configuration.EnableMethodSecurity;
@@ -39,6 +40,12 @@ public class SecurityConfig {
             .sessionManagement(session -> 
                 session.sessionCreationPolicy(SessionCreationPolicy.STATELESS))
             .authorizeHttpRequests(auth -> auth
+                // 浏览器跨源预检（OPTIONS）按规范**不携带 Authorization 头**，若不显式放行，
+                // 会被下面的 anyRequest().authenticated() 直接拒掉（403），导致所有跨源
+                // 写操作在预检阶段就失败 —— 表现为「GET 正常、POST 全挂」。
+                // 放行 OPTIONS 本身无副作用（不改变服务端状态），且请求随后仍会经过
+                // CorsConfig 的 CorsFilter：白名单外的 origin 依旧被 403 拦下。
+                .requestMatchers(HttpMethod.OPTIONS, "/**").permitAll()
                 .requestMatchers("/v0/auth/**", "/v0/bank/ai/viz-output/**").permitAll()
                 .requestMatchers("/v0/admin/**").hasRole("ADMIN")
                 .anyRequest().authenticated())

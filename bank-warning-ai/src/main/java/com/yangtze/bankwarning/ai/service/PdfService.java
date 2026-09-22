@@ -5,14 +5,14 @@ import com.yangtze.bankwarning.ai.security.SkillSandboxExecutor;
 import com.yangtze.bankwarning.ai.security.SkillMetadata;
 import com.yangtze.bankwarning.ai.security.SkillOutputValidator;
 import com.yangtze.bankwarning.ai.security.SkillPathGuard;
-import com.yangtze.bankwarning.ai.service.SkillGovernanceService;
+import com.yangtze.bankwarning.ai.security.SkillSecuritySettings;
+import com.yangtze.bankwarning.ai.security.SkillSecuritySettingsProvider;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 
 import java.io.File;
-import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
@@ -48,22 +48,27 @@ public class PdfService {
     private final SkillGovernanceService governance;
     private final SkillOutputValidator outputValidator;
     private final SkillVersionService versionService;
+    private final SkillSecuritySettingsProvider settingsProvider;
 
     public PdfService(PythonImportScanner importScanner,
                       SkillSandboxExecutor sandboxExecutor,
                       SkillGovernanceService governance,
                       SkillOutputValidator outputValidator,
-                      SkillVersionService versionService) {
+                      SkillVersionService versionService,
+                      SkillSecuritySettingsProvider settingsProvider) {
         this.importScanner = importScanner;
         this.sandboxExecutor = sandboxExecutor;
         this.governance = governance;
         this.outputValidator = outputValidator;
         this.versionService = versionService;
+        this.settingsProvider = settingsProvider;
     }
 
     public Map<String, Object> processPdf(String skillName, String scriptName, String filePath){
         log.info("[pdf] processPdf, skill={}, script={}, file={}", skillName, scriptName, filePath);
         String skill = skillName == null || skillName.isBlank() ? "pdf" : skillName.strip();
+        // 一次执行取一份档位快照，保证同一次请求里各道闸门看到的是同一套参数
+        SkillSecuritySettings settings = settingsProvider.settings();
 
         // 输入文件围栏：后缀白名单 + 读取根目录白名单（此前只检查"存在"，Agent 可借此读任意文件）
         Path pdfFile;
@@ -101,20 +106,28 @@ public class PdfService {
             log.warn("[pdf] skill 治理警告: skill={} version={} {}", skill, metadata.getVersion(), warning);
         }
 
-        //执行前静态扫描脚本
-        try {
-            List<String> violations = importScanner.scanFile(scriptFile.toPath(),
-                    PythonImportScanner.parsePermissions(scriptFile.toPath().getParent().getParent()));
-            if (!violations.isEmpty() && importScanner.isFailOnViolation()) {
-                log.warn("[pdf] 脚本被静态扫描拦截: {} violations={}", scriptFile, String.join(", ", violations));
-                return Map.of("success", false, "error", "脚本未通过安全扫描: " + String.join(", ", violations));
+        //执行前静态扫描脚本（是否参与由档位的静态扫描总开关决定）
+        if (!settings.verifyEnabled()) {
+            log.warn("[pdf] 静态扫描总开关已关闭（当前档位 {}），跳过危险 import 扫描: {}",
+                    settings.profile(), scriptFile);
+        } else {
+            try {
+                List<String> violations = importScanner.scanFile(scriptFile.toPath(),
+                        PythonImportScanner.parsePermissions(scriptFile.toPath().getParent().getParent()));
+                if (!violations.isEmpty() && settings.failOnViolation()) {
+                    log.warn("[pdf] 脚本被静态扫描拦截: {} violations={}", scriptFile, String.join(", ", violations));
+                    governance.recordAudit(skill, metadata.getVersion(), "EXECUTE_BLOCKED",
+                            "静态扫描命中危险 import: " + String.join(", ", violations), true);
+                    return Map.of("success", false, "error", "脚本未通过安全扫描: " + String.join(", ", violations));
+                }
+                if (!violations.isEmpty()) {
+                    log.warn("[pdf] 脚本存在潜在危险 import（当前档位放行）: {} violations={}",
+                            scriptFile, String.join(", ", violations));
+                }
+            } catch (Exception e) {
+                log.warn("[pdf] 扫描脚本失败，拒绝执行: {} error={}", scriptFile, e.getMessage());
+                return Map.of("success", false, "error", "脚本安全扫描失败: " + e.getMessage());
             }
-            if (!violations.isEmpty()) {
-                log.warn("[pdf] 脚本存在潜在危险 import（已放行）: {} violations={}", scriptFile, String.join(", ", violations));
-            }
-        } catch (Exception e) {
-            log.warn("[pdf] 扫描脚本失败，拒绝执行: {} error={}", scriptFile, e.getMessage());
-            return Map.of("success", false, "error", "脚本安全扫描失败: " + e.getMessage());
         }
 
         try {
@@ -146,17 +159,26 @@ public class PdfService {
                         "脚本执行失败: " + trimTo(result.getStderr(), 2000));
             }
 
-            // 阶段三：输出契约校验，失败即拒绝，绝不透传不可信输出
+            // 阶段三：输出契约校验。是否强制由档位决定：
+            //   标准/严格档 —— 失败即拒绝，绝不透传不可信输出；
+            //   宽松档     —— 仅告警 + 审计，仍透传（本地开发时便于看到原始输出）
             SkillOutputValidator.ValidationResult outputCheck = outputValidator.validate(metadata, result);
             if (!outputCheck.isValid()) {
+                if (settings.enforceOutputContract()) {
+                    governance.recordAudit(skill, metadata.getVersion(), "OUTPUT_INVALID",
+                            outputCheck.getReason(), true);
+                    log.warn("[pdf] 脚本输出未通过校验: skill={} version={} reason={}",
+                            skill, metadata.getVersion(), outputCheck.getReason());
+                    return Map.of("success", false, "error", "脚本输出未通过校验: " + outputCheck.getReason());
+                }
                 governance.recordAudit(skill, metadata.getVersion(), "OUTPUT_INVALID",
-                        outputCheck.getReason(), true);
-                log.warn("[pdf] 脚本输出未通过校验: skill={} version={} reason={}",
-                        skill, metadata.getVersion(), outputCheck.getReason());
-                return Map.of("success", false, "error", "脚本输出未通过校验: " + outputCheck.getReason());
+                        outputCheck.getReason() + "（当前档位 " + settings.profile() + " 不强制，已透传）", false);
+                log.warn("[pdf] 脚本输出未通过校验但当前档位不强制，已透传: skill={} reason={}",
+                        skill, outputCheck.getReason());
             }
             governance.recordAudit(skill, metadata.getVersion(), "EXECUTE_OK",
-                    "exit=" + result.getExitCode() + " durationMs=" + result.getDurationMs(), false);
+                    "exit=" + result.getExitCode() + " durationMs=" + result.getDurationMs()
+                            + " profile=" + settings.profile(), false);
             return Map.of("success", true, "content", result.getStdout());
         } catch (Exception e) {
             log.error("[pdf] execute failed", e);
@@ -187,7 +209,7 @@ public class PdfService {
         File fromUserDir = resolveWithin(
                 new File(System.getProperty("user.dir"), "src/main/resources/skills/pdf/scripts").getAbsolutePath(),
                 scriptName);
-        if (fromUserDir != null && fromUserDir.exists()) return fromUserDir;
+        if(fromUserDir != null && fromUserDir.exists()) return fromUserDir;
 
         return null;
     }

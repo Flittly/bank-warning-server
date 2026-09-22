@@ -10,6 +10,8 @@ import java.util.Set;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import com.yangtze.bankwarning.ai.security.SkillSecurityProfile;
+import com.yangtze.bankwarning.ai.security.SkillSecuritySettings;
 import com.yangtze.bankwarning.ai.store.SkillApprovalStore;
 import com.yangtze.bankwarning.ai.store.SkillApprovalStore.AuditRecord;
 import com.yangtze.bankwarning.ai.store.SkillApprovalStore.SkillApproval;
@@ -133,7 +135,8 @@ class SkillApprovalServiceTest {
         assertTrue(approval.approve(id, "admin"));
 
         SkillGovernanceService governance = new SkillGovernanceService(
-                store, true, false, List.of(), List.of(), true, null);
+                store, null, () -> SkillSecuritySettings.withGovernancePolicy(
+                        SkillSecurityProfile.STANDARD, true, false, List.of(), List.of(), true));
         assertTrue(governance.evaluate("search", "1.0.0", Set.of("network")).isAllowed());
         assertFalse(store.listAudit(10).isEmpty());
     }
@@ -148,7 +151,8 @@ class SkillApprovalServiceTest {
         assertTrue(approval.reject(id, "admin", "不允许联网"));
 
         SkillGovernanceService governance = new SkillGovernanceService(
-                store, true, false, List.of(), List.of(), true, null);
+                store, null, () -> SkillSecuritySettings.withGovernancePolicy(
+                        SkillSecurityProfile.STANDARD, true, false, List.of(), List.of(), true));
         assertFalse(governance.evaluate("search", "1.0.0", Set.of("network")).isAllowed());
     }
 
@@ -175,7 +179,8 @@ class SkillApprovalServiceTest {
         assertEquals(1, store.listPending().size());
 
         SkillGovernanceService governance = new SkillGovernanceService(
-                store, true, false, List.of(), List.of(), true, null);
+                store, null, () -> SkillSecuritySettings.withGovernancePolicy(
+                        SkillSecurityProfile.STANDARD, true, false, List.of(), List.of(), true));
         assertFalse(governance.evaluate("search", "1.0.0", Set.of("network")).isAllowed());
 
         assertTrue(approval.approve(id, "admin"));

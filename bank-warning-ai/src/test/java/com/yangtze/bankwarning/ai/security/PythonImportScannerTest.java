@@ -11,7 +11,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class PythonImportScannerTest {
 
-    private final PythonImportScanner scanner = new PythonImportScanner(null, true);
+    private final PythonImportScanner scanner = PythonImportScanner.of(null, true);
 
     @Test
     void scansPlainImport() {
@@ -76,7 +76,7 @@ class PythonImportScannerTest {
 
     @Test
     void failOnViolationControlsAllowedFlag() {
-        PythonImportScanner lenient = new PythonImportScanner(null, false);
+        PythonImportScanner lenient = PythonImportScanner.of(null, false);
         var result = lenient.scanSkillDir(tempSkillDir(), Set.of());
         assertTrue(result.isAllowed());
         assertFalse(result.getViolations().isEmpty());

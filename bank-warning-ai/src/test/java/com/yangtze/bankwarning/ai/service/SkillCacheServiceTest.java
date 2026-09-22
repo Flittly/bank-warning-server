@@ -22,7 +22,7 @@ class SkillCacheServiceTest {
     Path temp;
 
     private SkillCacheService service() {
-        return new SkillCacheService(temp.toString(), new PythonImportScanner(null, true));
+        return new SkillCacheService(temp.toString(), PythonImportScanner.of(null, true));
     }
 
     @Test

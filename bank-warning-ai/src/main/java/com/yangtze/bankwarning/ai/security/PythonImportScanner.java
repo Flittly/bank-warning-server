@@ -2,7 +2,6 @@ package com.yangtze.bankwarning.ai.security;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
 
 import java.io.IOException;
@@ -10,12 +9,10 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
-import java.util.Arrays;
 import java.util.Collection;
 import java.util.HashSet;
 import java.util.LinkedHashSet;
 import java.util.List;
-import java.util.Map;
 import java.util.Set;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
@@ -26,6 +23,11 @@ import java.util.regex.Pattern;
  * 解析 .py 文件中的顶层 import 语句，与危险模块黑名单比对。
  * 若 SKILL.md frontmatter 声明了 permissions（如 network、subprocess），
  * 则对应的黑名单项放行。
+ *
+ * <p>黑名单与「发现违规是否拒绝」都由当前 {@link SkillSecuritySettings} 决定，
+ * 每次扫描实时读取，因此改档位后立即生效：
+ * 宽松档把 {@code fail-on-violation} 置为 false 即变成"只告警不拦截"，
+ * 严格档则把黑名单扩充到反序列化 / 动态导入 / 直连网络相关模块。
  */
 @Component
 public class PythonImportScanner {
@@ -42,15 +44,47 @@ public class PythonImportScanner {
             Pattern.compile("^\\s*(?:import|from)\\s+([A-Za-z_][A-Za-z0-9_.]*)(?:\\s+import)?", Pattern.MULTILINE);
     // 逐行匹配 "import X" / "from X import Y"，捕获被 import 的顶层模块名 X
 
-    private final Set<String> forbidden;
-    private final boolean failOnViolation;
+    private final SkillSecuritySettingsProvider settingsProvider;
 
-    public PythonImportScanner(
-            @Value("${app.ai.skill.verify.forbidden-imports:}") List<String> forbidden,
-            @Value("${app.ai.skill.verify.fail-on-violation:true}") boolean failOnViolation) {
-        // 配置为空时兜底用默认黑名单，否则用配置覆盖（支持自定义扩充/收窄）
-        this.forbidden = new LinkedHashSet<>(forbidden == null || forbidden.isEmpty() ? DEFAULT_FORBIDDEN : forbidden);
-        this.failOnViolation = failOnViolation;
+    public PythonImportScanner(SkillSecuritySettingsProvider settingsProvider) {
+        this.settingsProvider = settingsProvider;
+    }
+
+    /**
+     * 用一个固定参数快照构造（黑名单 + 发现即拒绝），供单元测试与命令行场景使用。
+     * 黑名单传 null 或空列表表示使用 {@link #DEFAULT_FORBIDDEN}。
+     */
+    public static PythonImportScanner of(List<String> forbiddenImports, boolean failOnViolation) {
+        List<String> effective = (forbiddenImports == null || forbiddenImports.isEmpty())
+                ? DEFAULT_FORBIDDEN
+                : List.copyOf(forbiddenImports);
+        return new PythonImportScanner(() -> SkillSecuritySettings.withScanPolicy(
+                SkillSecurityProfile.STANDARD, effective, failOnViolation));
+    }
+
+    /** 静态扫描总开关（由档位决定；关闭时调用方应跳过扫描） */
+    public boolean isVerifyEnabled() {
+        return settingsProvider.settings().verifyEnabled();
+    }
+
+    /** 发现违规时是否拒绝执行（由档位决定） */
+    public boolean isFailOnViolation() {
+        return settingsProvider.settings().failOnViolation();
+    }
+
+    /**
+     * 缺清单 / 空清单时的兜底：<b>空不等于不设防</b>。
+     * 如果这里放行空集合，那么一次误配置（把 forbidden-imports 清空）就会静默关掉整条静态扫描，
+     * 而日志上看起来一切正常 —— 这是最危险的一种失效方式。
+     */
+    private static List<String> effectiveForbidden(SkillSecuritySettings settings) {
+        List<String> configured = settings.forbiddenImports();
+        return configured == null || configured.isEmpty() ? DEFAULT_FORBIDDEN : configured;
+    }
+
+    /** 当前生效的危险模块黑名单（为空时兜底默认黑名单，避免空清单静默关掉扫描） */
+    public List<String> forbiddenImports() {
+        return effectiveForbidden(settingsProvider.settings());
     }
 
     /** 扫描结果：违规 import 列表 + 是否放行 */
@@ -81,30 +115,37 @@ public class PythonImportScanner {
      */
     public ScanResult scanSkillDir(Path skillDir, Collection<String> skillPermissions) {
         Set<String> perms = new HashSet<>(skillPermissions == null ? Set.of() : skillPermissions);
+        SkillSecuritySettings settings = settingsProvider.settings();
         List<String> allViolations = new ArrayList<>();
         try {
             if (Files.exists(skillDir)) {
                 try (var stream = Files.walk(skillDir)) {
                     for (Path p : stream.filter(Files::isRegularFile)
                             .filter(f -> f.toString().endsWith(".py")).toList()) {
-                        allViolations.addAll(scanFile(p, perms));
+                        allViolations.addAll(scanFile(p, perms, effectiveForbidden(settings)));
                     }
                 }
             }
         } catch (IOException e) {
             log.warn("[skill-scan] 扫描目录失败 {}: {}", skillDir, e.getMessage());
         }
-        boolean allowed = allViolations.isEmpty() || !failOnViolation;
+        boolean allowed = allViolations.isEmpty() || !settings.failOnViolation();
         if (!allViolations.isEmpty()) {
-            log.warn("[skill-scan] 发现潜在危险 import: {}", String.join(", ", allViolations));
+            log.warn("[skill-scan] 发现潜在危险 import（放行={}）: {}",
+                    allowed, String.join(", ", allViolations));
         }
         return new ScanResult(allViolations, allowed);
     }
 
     /**
-     * 扫描单个 .py 文件。
+     * 扫描单个 .py 文件（按当前档位的黑名单）。
      */
     public List<String> scanFile(Path pyFile, Collection<String> skillPermissions) {
+        return scanFile(pyFile, skillPermissions, effectiveForbidden(settingsProvider.settings()));
+    }
+
+    private static List<String> scanFile(Path pyFile, Collection<String> skillPermissions,
+                                         Collection<String> forbidden) {
         Set<String> perms = new HashSet<>(skillPermissions == null ? Set.of() : skillPermissions);
         List<String> violations = new ArrayList<>();
         try {
@@ -146,7 +187,7 @@ public class PythonImportScanner {
         }
     }
 
-    private boolean isMatch(String importedModule, String forbidden) {
+    private static boolean isMatch(String importedModule, String forbidden) {
         // http / urllib 是标准库包，其子模块（http.server、urllib.request 等）同样具备网络能力，
         // 需要单独列出子模块名精确匹配，避免仅匹配到顶层包时漏掉实际发起网络请求的子模块
         if (forbidden.equals("http")) {
@@ -158,17 +199,16 @@ public class PythonImportScanner {
         }
         // 其余模块按"完全相等 或 顶层包名前缀"匹配（如 subprocess 覆盖 subprocess.Popen）
         if (importedModule.equals(forbidden)) return true;
-        if (importedModule.startsWith(forbidden + ".")) return true;
-        return false;
+        return importedModule.startsWith(forbidden + ".");
     }
 
-    private boolean permits(Set<String> perms, String forbidden) {
+    private static boolean permits(Set<String> perms, String forbidden) {
         // permissions 命名空间：network 放行网络类；subprocess/process 放行子进程类
         // 只有 SKILL.md frontmatter 显式声明了对应权限，才允许该类别下的黑名单 import
         if (perms.contains("network") || perms.contains("net")) {
             if (forbidden.equals("socket") || forbidden.equals("urllib") || forbidden.equals("http")
                     || forbidden.equals("ftplib") || forbidden.equals("telnetlib") || forbidden.equals("ftputil")
-                    || forbidden.equals("paramiko")) {
+                    || forbidden.equals("paramiko") || forbidden.equals("requests")) {
                 return true;
             }
         }
@@ -180,7 +220,8 @@ public class PythonImportScanner {
         return false;
     }
 
-    public boolean isFailOnViolation() {
-        return failOnViolation;
+    /** 便捷方法：返回去重后的黑名单（供面板展示） */
+    public Set<String> forbiddenImportSet() {
+        return new LinkedHashSet<>(forbiddenImports());
     }
 }

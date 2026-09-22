@@ -9,6 +9,9 @@ import java.util.Set;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import com.yangtze.bankwarning.ai.security.SkillSecurityProfile;
+import com.yangtze.bankwarning.ai.security.SkillSecuritySettings;
+import com.yangtze.bankwarning.ai.security.SkillSecuritySettingsProvider;
 import com.yangtze.bankwarning.ai.store.SkillApprovalStore;
 import com.yangtze.bankwarning.ai.store.SkillApprovalStore.SkillApproval;
 import com.yangtze.bankwarning.ai.store.SkillVersionStore;
@@ -140,7 +143,16 @@ class SkillGovernanceServiceTest {
             MemoryStore store, boolean enabled, boolean killSwitch,
             List<String> allowed, List<String> quarantined, boolean failOnUnapproved) {
         return new SkillGovernanceService(
-                store, enabled, killSwitch, allowed, quarantined, failOnUnapproved, null);
+                store, null, governanceProvider(enabled, killSwitch, allowed, quarantined, failOnUnapproved));
+    }
+
+    /** 测试用 provider：返回固定快照即可，不需要真的档位服务 */
+    private static SkillSecuritySettingsProvider governanceProvider(
+            boolean enabled, boolean killSwitch,
+            List<String> allowed, List<String> quarantined, boolean failOnUnapproved) {
+        SkillSecuritySettings settings = SkillSecuritySettings.withGovernancePolicy(
+                SkillSecurityProfile.STANDARD, enabled, killSwitch, allowed, quarantined, failOnUnapproved);
+        return () -> settings;
     }
 
     @Test
@@ -186,7 +198,7 @@ class SkillGovernanceServiceTest {
                 1L, "pdf", "1.0.0", "nacos", SkillVersionStore.STATUS_QUARANTINED,
                 "now", "now", "admin", "now"));
         SkillGovernanceService s = new SkillGovernanceService(
-                store, true, false, List.of(), List.of(), true, versions);
+                store, versions, governanceProvider(true, false, List.of(), List.of(), true));
         assertFalse(s.evaluate("pdf", "1.0.0", Set.of()).isAllowed());
         assertTrue(s.evaluate("pdf", "2.0.0", Set.of()).isAllowed());
     }

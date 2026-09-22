@@ -8,6 +8,8 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.yangtze.bankwarning.ai.security.SkillContentVerifier;
 import com.yangtze.bankwarning.ai.security.SkillPathGuard;
+import com.yangtze.bankwarning.ai.security.SkillSecuritySettings;
+import com.yangtze.bankwarning.ai.security.SkillSecuritySettingsProvider;
 import com.yangtze.bankwarning.ai.security.SkillMetadata;
 import com.yangtze.bankwarning.security.security.SecurityUtils;
 import io.agentscope.core.nacos.skill.NacosSkillRepository;
@@ -65,6 +67,7 @@ public class NacosSkillRepositoryHolder {
     private final java.util.concurrent.ConcurrentHashMap<String, String> cachedSkillNames = new java.util.concurrent.ConcurrentHashMap<>();
     private com.alibaba.nacos.api.ai.AiService aiService;
     private final SkillContentVerifier contentVerifier;
+    private final SkillSecuritySettingsProvider settingsProvider;
     private final SkillApprovalService approvalService;
     private final SkillCacheService skillCacheService;
     private final SkillVersionService skillVersionService;
@@ -77,12 +80,14 @@ public class NacosSkillRepositoryHolder {
             SkillContentVerifier contentVerifier,
             SkillApprovalService approvalService,
             SkillCacheService skillCacheService,
-            SkillVersionService skillVersionService) {
+            SkillVersionService skillVersionService,
+            SkillSecuritySettingsProvider settingsProvider) {
         this.serverAddr = serverAddr;
         this.namespace = namespace;
         this.username = username;
         this.password = password;
         this.contentVerifier = contentVerifier;
+        this.settingsProvider = settingsProvider;
         this.approvalService = approvalService;
         this.skillCacheService = skillCacheService;
         this.skillVersionService = skillVersionService;
@@ -153,7 +158,12 @@ public class NacosSkillRepositoryHolder {
         }
         if (zip == null || zip.length == 0) throw new RuntimeException("下载到空内容");
         // 下载后先做完整性校验（sha256 清单 + HMAC 签名），通过才允许落盘，拒绝被篡改的 skill
-        if (!contentVerifier.verifyZip(zip)) {
+        // 校验严格程度按当前安全档位：标准/严格档要求必须有清单（修掉原先缺清单即放行的 fail-open）
+        SkillSecuritySettings verifySettings = settingsProvider.settings();
+        SkillContentVerifier.VerifyPolicy verifyPolicy = new SkillContentVerifier.VerifyPolicy(
+                verifySettings.requireChecksumManifest(),
+                verifySettings.requireSignedManifest() || contentVerifier.isSigningEnabled());
+        if (!contentVerifier.verifyZip(zip, verifyPolicy)) {
             throw new RuntimeException("Skill 内容完整性校验失败，拒绝落盘: " + skillName);
         }
         // 校验通过后再解析并剥离公共根目录，得到归一化的文件集合

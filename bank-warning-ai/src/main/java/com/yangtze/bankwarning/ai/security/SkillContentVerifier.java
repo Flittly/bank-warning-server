@@ -30,6 +30,11 @@ import java.util.zip.ZipOutputStream;
  * 下载侧：先验清单 HMAC 签名，再逐文件比对 sha256，任一失败即拒绝落盘。
  *
  * zip 可能带一层公共根目录（如 Nacos 以 skill 名包裹），parseZip 统一剥离。
+ *
+ * <p>「缺清单算不算通过」过去是 fail-open（缺清单直接 true），
+ * 现在由调用方传入 {@link VerifyPolicy} 决定：标准/严格档要求必须有清单，
+ * 宽松档保持放行。策略从外部传入而不是本类自己读配置，
+ * 是为了让这个类保持成"给定密钥与策略就是纯函数"，便于单独验证。
  */
 @Component
 public class SkillContentVerifier {
@@ -49,6 +54,21 @@ public class SkillContentVerifier {
 
     public boolean isSigningEnabled() {
         return hmacKey.length > 0;
+    }
+
+    /**
+     * 校验策略（由当前安全档位决定）。
+     *
+     * @param requireManifest  清单缺失时是否拒绝
+     * @param requireSignature 清单是否必须带签名（即使未配置密钥也要求签名存在，
+     *                         此时只能确认签名"在"，无法验证签名"对"，调用方应据此提示）
+     */
+    public record VerifyPolicy(boolean requireManifest, boolean requireSignature) {
+
+        /** 历史行为：缺清单放行，有密钥才要求签名 */
+        public static VerifyPolicy permissive() {
+            return new VerifyPolicy(false, false);
+        }
     }
 
     /**
@@ -110,13 +130,25 @@ public class SkillContentVerifier {
     }
 
     /**
-     * 校验原始 zip 字节（下载后、解压前）。
-     *
-     * @return true=通过或无清单（本地/无签名 zip）；false=校验失败，应拒绝落盘
+     * 校验原始 zip 字节（下载后、解压前），沿用历史策略（缺清单放行）。
      */
     public boolean verifyZip(byte[] zip) {
+        return verifyZip(zip, VerifyPolicy.permissive());
+    }
+
+    /**
+     * 校验原始 zip 字节（下载后、解压前），按给定策略决定严格程度。
+     *
+     * @return true=通过；false=校验失败，应拒绝落盘
+     */
+    public boolean verifyZip(byte[] zip, VerifyPolicy policy) {
+        VerifyPolicy effective = policy == null ? VerifyPolicy.permissive() : policy;
         ZipContent content = parseZip(zip);
         if (content.checksumContent == null) {
+            if (effective.requireManifest()) {
+                log.error("[skill-verify] zip 无校验清单，当前档位要求必须有清单，拒绝落盘");
+                return false;
+            }
             log.warn("[skill-verify] zip 无校验清单，跳过");
             return true;
         }
@@ -130,7 +162,7 @@ public class SkillContentVerifier {
                 Files.write(target, e.getValue());
             }
             Files.write(tmp.resolve(CHECKSUM_ENTRY), content.checksumContent);
-            boolean ok = verifyDir(tmp);
+            boolean ok = verifyDir(tmp, effective);
             // 校验结束后清理临时目录（从最深路径开始删）
             try (var stream = Files.walk(tmp)) {
                 stream.sorted(java.util.Comparator.reverseOrder()).forEach(p -> {
@@ -148,14 +180,28 @@ public class SkillContentVerifier {
     }
 
     /**
+     * 校验解压后的 skill 目录，沿用历史策略。
+     */
+    public boolean verifyDir(Path skillDir) {
+        return verifyDir(skillDir, VerifyPolicy.permissive());
+    }
+
+    /**
      * 校验解压后的 skill 目录。
      *
      * @param skillDir 已解压到磁盘的 skill 目录
+     * @param policy   校验策略（清单是否必需、签名是否必需）
      * @return 校验是否通过
      */
-    public boolean verifyDir(Path skillDir) {
+    public boolean verifyDir(Path skillDir, VerifyPolicy policy) {
+        VerifyPolicy effective = policy == null ? VerifyPolicy.permissive() : policy;
         Path checksumFile = skillDir.resolve(CHECKSUM_ENTRY);
         if (!Files.exists(checksumFile)) {
+            if (effective.requireManifest()) {
+                log.error("[skill-verify] {} 缺失 {}，当前档位要求必须有清单，拒绝",
+                        skillDir, CHECKSUM_ENTRY);
+                return false;
+            }
             log.warn("[skill-verify] {} 缺失，无法校验（本地/无签名 skill 跳过）", skillDir);
             return true;
         }
@@ -168,8 +214,13 @@ public class SkillContentVerifier {
                 if (line.startsWith("signature=")) {
                     signed = true;
                     String sig = line.substring("signature=".length()).trim();
-                    // 只有配置了密钥（isSigningEnabled）才要求签名，且必须 constant-time 比较防时序侧信道
-                    if (isSigningEnabled() && !constantTimeEquals(hmacHex(body.toString()), sig)) {
+                    if (!isSigningEnabled()) {
+                        // 档位强制签名但未配置密钥：只能确认签名"在"，无法验证"对"
+                        log.warn("[skill-verify] {} 清单带签名，但未配置 SKILL_HMAC_SECRET，无法验证签名有效性", skillDir);
+                        continue;
+                    }
+                    // 只有配置了密钥才要求签名，且必须 constant-time 比较防时序侧信道
+                    if (!constantTimeEquals(hmacHex(body.toString()), sig)) {
                         log.error("[skill-verify] {} HMAC 签名不匹配，可能被篡改", skillDir);
                         return false;
                     }
@@ -182,12 +233,17 @@ public class SkillContentVerifier {
                     }
                 }
             }
-            // 配置了密钥但清单没签名，说明发布方未按约定签名，视为不可信
-            if (isSigningEnabled() && !signed) {
-                log.error("[skill-verify] {} 配置要求签名但清单未签名", skillDir);
+            // 配置了密钥、或当前档位强制要求签名时，清单必须带签名
+            if ((isSigningEnabled() || effective.requireSignature()) && !signed) {
+                log.error("[skill-verify] {} 要求签名但清单未签名（密钥已配置={}, 档位强制={}）",
+                        skillDir, isSigningEnabled(), effective.requireSignature());
                 return false;
             }
             if (expected.isEmpty()) {
+                if (effective.requireManifest()) {
+                    log.error("[skill-verify] {} 清单为空，当前档位要求必须有清单内容，拒绝", skillDir);
+                    return false;
+                }
                 log.warn("[skill-verify] {} 清单为空", skillDir);
                 return true;
             }

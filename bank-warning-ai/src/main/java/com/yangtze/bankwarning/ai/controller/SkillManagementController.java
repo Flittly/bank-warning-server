@@ -9,6 +9,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.beans.factory.annotation.Qualifier;
+import org.springframework.security.access.prepost.PreAuthorize;
 import org.springframework.web.bind.annotation.*;
 
 import java.util.ArrayList;
@@ -16,6 +17,22 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 
+/**
+ * Skill 管理接口（列表 / 上传 / 下载 / 发布 / 同步 / 删除）。
+ *
+ * <p>鉴权边界（修复「写权限宽于审批权限」）：
+ * <ul>
+ *   <li><b>只读</b>（{@code list} / {@code get}）：登录用户即可，供结果页与工作台展示技能清单；</li>
+ *   <li><b>写</b>（{@code upload} / {@code sync-local} / {@code publish} / {@code delete}）：
+ *       一律 ADMIN。这些端点会改动 Nacos 上的、以及本地即将执行的 skill 内容，
+ *       属于「改变将要在机器上运行的代码」的动作，门槛必须不低于
+ *       {@link SkillGovernanceController} 的审批（同为 ADMIN）。</li>
+ * </ul>
+ *
+ * <p>{@code download} 暂保持登录用户可用：它拉取的内容仍要过
+ * {@code SkillContentVerifier} 完整性校验与治理裁决，且按 SKILL.md 声明的权限
+ * 自动生成待审批记录，审批通过前权限类能力无法执行。是否进一步收紧待评估。
+ */
 @RestController
 @RequestMapping("/v0/bank/ai/skill")
 public class SkillManagementController {
@@ -79,6 +96,7 @@ public class SkillManagementController {
     }
 
     @PostMapping("/upload/{name}")
+    @PreAuthorize("hasAnyRole('SUPER_ADMIN', 'ADMIN')")
     public Map<String, Object> uploadOneSkill(@PathVariable String name) {
         if (!isReady()) return unavailable();
         try (ClasspathSkillRepository local = new ClasspathSkillRepository("skills")) {
@@ -97,6 +115,7 @@ public class SkillManagementController {
     }
 
     @PostMapping("/sync-local")
+    @PreAuthorize("hasAnyRole('SUPER_ADMIN', 'ADMIN')")
     public Map<String, Object> syncLocal(@RequestParam(defaultValue = "true") boolean force) {
         if (!isReady()) return unavailable();
         try (ClasspathSkillRepository local = new ClasspathSkillRepository("skills")) {
@@ -134,6 +153,7 @@ public class SkillManagementController {
     }
 
     @PostMapping("/publish")
+    @PreAuthorize("hasAnyRole('SUPER_ADMIN', 'ADMIN')")
     public Map<String, Object> publish(@RequestBody PublishRequest req) {
         if (!isReady()) return unavailable();
         if (req.name == null || req.name.isBlank() || req.content == null) {
@@ -151,6 +171,7 @@ public class SkillManagementController {
     }
 
     @DeleteMapping("/{name}")
+    @PreAuthorize("hasAnyRole('SUPER_ADMIN', 'ADMIN')")
     public Map<String, Object> delete(@PathVariable String name) {
         if (!isReady()) return unavailable();
         boolean ok = holder.getRepository().delete(name);

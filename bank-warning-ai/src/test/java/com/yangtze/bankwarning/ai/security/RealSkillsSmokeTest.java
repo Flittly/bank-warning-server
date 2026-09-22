@@ -18,7 +18,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  */
 class RealSkillsSmokeTest {
 
-    private final PythonImportScanner scanner = new PythonImportScanner(null, true);
+    private final PythonImportScanner scanner = PythonImportScanner.of(null, true);
 
     @Test
     void scanRealSkillsTree() throws IOException {

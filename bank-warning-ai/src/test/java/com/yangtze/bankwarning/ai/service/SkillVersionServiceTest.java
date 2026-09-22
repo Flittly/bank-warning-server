@@ -83,7 +83,7 @@ class SkillVersionServiceTest {
 
     private SkillVersionService newService() {
         SkillCacheService cacheService = new SkillCacheService(
-                tempDir.toString(), new PythonImportScanner(List.of(), true));
+                tempDir.toString(), PythonImportScanner.of(List.of(), true));
         return new SkillVersionService(new MemoryVersionStore(), cacheService);
     }
 

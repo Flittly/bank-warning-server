@@ -37,6 +37,11 @@ import java.util.stream.Stream;
  *   OFF      —— 阶段一原行为（直接跑脚本，不注入引导脚本）
  *   PROCESS  —— 进程级软沙箱：python -I + sandbox_bootstrap.py（audit hook + rlimit）
  *   DOCKER   —— 容器级硬沙箱：--network none --read-only --cap-drop ALL --no-new-privileges ...
+ *
+ * <p>mode / 超时 / 输出上限 / 内存 / CPU / 进程数这六项<b>不再固化在构造期</b>，
+ * 而是每次执行时从当前安全档位取一份快照（{@link #runtime()}），
+ * 因此管理员调档位后下一次执行即生效，无需重启。
+ * 只有与宿主环境耦合的 docker 镜像名、CPU 配额、环境变量白名单仍来自配置。
  */
 @Component
 public class SkillSandboxExecutor {
@@ -47,12 +52,7 @@ public class SkillSandboxExecutor {
         OFF, PROCESS, DOCKER
     }
 
-    private final Mode mode;
-    private final int timeoutSeconds;
-    private final int maxOutputBytes;
-    private final int memoryMb;
-    private final int cpuSeconds;
-    private final int pidsLimit;
+    private final SkillSecuritySettingsProvider settingsProvider;
     private final double cpus;
     private final String dockerImage;
     private final List<String> envAllowlist;
@@ -60,22 +60,12 @@ public class SkillSandboxExecutor {
     private final String uvCacheDir;
 
     public SkillSandboxExecutor(
-            @Value("${app.ai.skill.sandbox.mode:process}") String mode,
-            @Value("${app.ai.skill.sandbox.timeout-seconds:120}") int timeoutSeconds,
-            @Value("${app.ai.skill.sandbox.max-output-bytes:1048576}") int maxOutputBytes,
-            @Value("${app.ai.skill.sandbox.memory-mb:512}") int memoryMb,
-            @Value("${app.ai.skill.sandbox.cpu-seconds:30}") int cpuSeconds,
-            @Value("${app.ai.skill.sandbox.pids-limit:64}") int pidsLimit,
+            SkillSecuritySettingsProvider settingsProvider,
             @Value("${app.ai.skill.sandbox.cpus:0.5}") double cpus,
             @Value("${app.ai.skill.sandbox.docker-image:}") String dockerImage,
             @Value("${app.ai.skill.sandbox.env-allowlist:}") List<String> envAllowlist,
             @Value("${app.ai.skill.cache-dir:${user.dir}/.skills-cache}") String cacheDir) {
-        this.mode = parseMode(mode);
-        this.timeoutSeconds = timeoutSeconds;
-        this.maxOutputBytes = maxOutputBytes;
-        this.memoryMb = memoryMb;
-        this.cpuSeconds = cpuSeconds;
-        this.pidsLimit = pidsLimit;
+        this.settingsProvider = settingsProvider;
         this.cpus = cpus;
         this.dockerImage = dockerImage;
         this.envAllowlist = envAllowlist == null || envAllowlist.isEmpty()
@@ -85,16 +75,32 @@ public class SkillSandboxExecutor {
         Path cacheRoot = Paths.get(cacheDir).toAbsolutePath().normalize();
         this.uvCacheDir = cacheRoot.resolve("_uv").toString();
         this.bootstrapFile = extractBootstrap(cacheRoot);
-        log.info("[skill-sandbox] mode={}, timeout={}s, max-output={}B, memory={}MB, cpu={}s, pids={}",
-                this.mode, timeoutSeconds, maxOutputBytes, memoryMb, cpuSeconds, pidsLimit);
+        log.info("[skill-sandbox] 初始化完成（档位相关参数每次执行时从安全档位读取）");
     }
 
+    /** 一次执行所用的沙箱参数快照 */
+    private record SandboxRuntime(Mode mode, int timeoutSeconds, int maxOutputBytes,
+                                  int memoryMb, int cpuSeconds, int pidsLimit) {
+    }
+
+    private SandboxRuntime runtime() {
+        SkillSecuritySettings s = settingsProvider.settings();
+        return new SandboxRuntime(
+                parseMode(s.normalizedMode()),
+                s.sandboxTimeoutSeconds(),
+                s.sandboxMaxOutputBytes(),
+                s.sandboxMemoryMb(),
+                s.sandboxCpuSeconds(),
+                s.sandboxPidsLimit());
+    }
+
+    /** 当前沙箱档位（供面板与日志用） */
     public Mode getMode() {
-        return mode;
+        return runtime().mode();
     }
 
     public boolean isSandboxEnabled() {
-        return mode != Mode.OFF;
+        return runtime().mode() != Mode.OFF;
     }
 
     /**
@@ -105,6 +111,7 @@ public class SkillSandboxExecutor {
      * @throws IOException 进程启动失败
      */
     public SandboxResult execute(SandboxRequest request) throws IOException {
+        SandboxRuntime rt = runtime();
         Path script = request.script.toAbsolutePath().normalize();
         if (!Files.isRegularFile(script)) {
             throw new IllegalArgumentException("脚本不存在: " + script);
@@ -117,8 +124,8 @@ public class SkillSandboxExecutor {
                 : request.workDir.toAbsolutePath().normalize();
         Files.createDirectories(workDir);
 
-        Map<String, String> env = buildEnv(skillDir, request.readRoots, workDir, request.extraEnv);
-        List<String> command = buildCommand(request, script, skillDir, workDir);
+        Map<String, String> env = buildEnv(skillDir, request.readRoots, workDir, request.extraEnv, rt);
+        List<String> command = buildCommand(request, script, skillDir, workDir, rt);
         long started = System.nanoTime();
         Process process = null;
         boolean timedOut = false;
@@ -138,15 +145,15 @@ public class SkillSandboxExecutor {
             boolean[] stdoutTruncated = {false};
             boolean[] stderrTruncated = {false};
             Thread outThread = new Thread(
-                    () -> readBounded(startedProcess.getInputStream(), maxOutputBytes, stdout, stdoutTruncated));
+                    () -> readBounded(startedProcess.getInputStream(), rt.maxOutputBytes(), stdout, stdoutTruncated));
             Thread errThread = new Thread(
-                    () -> readBounded(startedProcess.getErrorStream(), maxOutputBytes, stderr, stderrTruncated));
+                    () -> readBounded(startedProcess.getErrorStream(), rt.maxOutputBytes(), stderr, stderrTruncated));
             outThread.start();
             errThread.start();
 
-            timedOut = !awaitCompletion(startedProcess, timeoutSeconds);
+            timedOut = !awaitCompletion(startedProcess, rt.timeoutSeconds());
             if (timedOut) {
-                log.warn("[skill-sandbox] 执行超时（>{}s），强杀进程树", timeoutSeconds);
+                log.warn("[skill-sandbox] 执行超时（>{}s），强杀进程树", rt.timeoutSeconds());
                 destroyTree(startedProcess);
                 awaitTermination(startedProcess);
             }
@@ -156,14 +163,15 @@ public class SkillSandboxExecutor {
 
             long durationMs = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - started);
             log.info("[skill-sandbox] done mode={} exit={} timedOut={} truncated={} duration={}ms",
-                    mode, process.exitValue(), timedOut, stdoutTruncated[0] || stderrTruncated[0], durationMs);
+                    rt.mode(), process.exitValue(), timedOut,
+                    stdoutTruncated[0] || stderrTruncated[0], durationMs);
             return new SandboxResult(
                     startedProcess.exitValue(),
                     stdout.toString(),
                     stderr.toString(),
                     timedOut,
                     stdoutTruncated[0] || stderrTruncated[0],
-                    mode.name(),
+                    rt.mode().name(),
                     durationMs);
         } finally {
             if (process != null && process.isAlive()) {
@@ -175,8 +183,14 @@ public class SkillSandboxExecutor {
         }
     }
 
-    /** 构建子进程环境：仅白名单 + 沙箱内部约定变量，绝不继承宿主密钥 */
+    /** 构建子进程环境（按当前档位） */
     Map<String, String> buildEnv(Path skillDir, List<Path> readRoots, Path workDir, Map<String, String> extraEnv) {
+        return buildEnv(skillDir, readRoots, workDir, extraEnv, runtime());
+    }
+
+    /** 构建子进程环境：仅白名单 + 沙箱内部约定变量，绝不继承宿主密钥 */
+    private Map<String, String> buildEnv(Path skillDir, List<Path> readRoots, Path workDir,
+                                         Map<String, String> extraEnv, SandboxRuntime rt) {
         Map<String, String> env = new LinkedHashMap<>();
         for (String key : envAllowlist) {
             String value = System.getenv(key);
@@ -192,9 +206,9 @@ public class SkillSandboxExecutor {
         env.put("TEMP", workDir.toString());
         env.put("TMPDIR", workDir.toString());
         env.put("SKILL_SANDBOX_WORKDIR", workDir.toString());
-        env.put("SKILL_SANDBOX_MEMORY_MB", String.valueOf(memoryMb));
-        env.put("SKILL_SANDBOX_CPU_SECONDS", String.valueOf(cpuSeconds));
-        if (mode == Mode.PROCESS || mode == Mode.OFF) {
+        env.put("SKILL_SANDBOX_MEMORY_MB", String.valueOf(rt.memoryMb()));
+        env.put("SKILL_SANDBOX_CPU_SECONDS", String.valueOf(rt.cpuSeconds()));
+        if (rt.mode() == Mode.PROCESS || rt.mode() == Mode.OFF) {
             // uv 缓存固定到沙箱自有目录，避免依赖/污染宿主用户目录
             env.put("UV_CACHE_DIR", uvCacheDir);
             env.put("UV_NO_PROGRESS", "1");
@@ -220,10 +234,11 @@ public class SkillSandboxExecutor {
         return env;
     }
 
-    private List<String> buildCommand(SandboxRequest request, Path script, Path skillDir, Path workDir) {
+    private List<String> buildCommand(SandboxRequest request, Path script, Path skillDir, Path workDir,
+                                      SandboxRuntime rt) {
         List<String> cmd = new ArrayList<>();
         // docker 硬沙箱：一次性容器，网络、文件系统、内核权限全部收紧，跑完即毁（--rm）
-        if (mode == Mode.DOCKER) {
+        if (rt.mode() == Mode.DOCKER) {
             if (dockerImage == null || dockerImage.isBlank()) {
                 throw new IllegalStateException("docker 模式需要配置 app.ai.skill.sandbox.docker-image");
             }
@@ -243,9 +258,9 @@ public class SkillSandboxExecutor {
             cmd.add("--security-opt");
             cmd.add("no-new-privileges");
             cmd.add("--pids-limit");
-            cmd.add(String.valueOf(pidsLimit));
+            cmd.add(String.valueOf(rt.pidsLimit()));
             cmd.add("--memory");
-            cmd.add(memoryMb + "m");
+            cmd.add(rt.memoryMb() + "m");
             cmd.add("--cpus");
             cmd.add(String.valueOf(cpus));
             cmd.add("-v");
@@ -261,9 +276,9 @@ public class SkillSandboxExecutor {
             cmd.add("-e");
             cmd.add("SKILL_SANDBOX_READ_ROOTS=/skill");
             cmd.add("-e");
-            cmd.add("SKILL_SANDBOX_MEMORY_MB=" + memoryMb);
+            cmd.add("SKILL_SANDBOX_MEMORY_MB=" + rt.memoryMb());
             cmd.add("-e");
-            cmd.add("SKILL_SANDBOX_CPU_SECONDS=" + cpuSeconds);
+            cmd.add("SKILL_SANDBOX_CPU_SECONDS=" + rt.cpuSeconds());
             cmd.add("-e");
             cmd.add("PYTHONIOENCODING=utf-8");
             cmd.add("-e");
@@ -285,7 +300,7 @@ public class SkillSandboxExecutor {
             } else {
                 cmd.add("python");
             }
-            if (mode == Mode.PROCESS) {
+            if (rt.mode() == Mode.PROCESS) {
                 cmd.add("-I");
                 cmd.add(bootstrapFile.toString());
             }
