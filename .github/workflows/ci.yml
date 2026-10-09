@@ -2,7 +2,7 @@ name: CI
 
 on:
   push:
-    branches: [master, experiment/dev-agentscope]
+    branches: [master, dev]
   pull_request:
 
 jobs:
