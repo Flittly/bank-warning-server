@@ -21,6 +21,11 @@
         INSERT INTO ai_models (model_key, label, api_key, base_url, model_name, is_default)
         VALUES (#{modelKey}, #{label}, #{apiKey}, #{baseUrl}, #{modelName}, #{isDefault})
     </insert>
+    <update id="updateByKey">
+        UPDATE ai_models
+        SET label = #{label}, api_key = #{apiKey}, base_url = #{baseUrl}, model_name = #{modelName}
+        WHERE model_key = #{modelKey}
+    </update>
     <delete id="deleteByKey">
         DELETE FROM ai_models WHERE model_key = #{modelKey}
     </delete>

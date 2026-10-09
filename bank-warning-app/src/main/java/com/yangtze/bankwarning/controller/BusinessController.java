@@ -9,6 +9,7 @@ import com.yangtze.bankwarning.domain.dto.SectionsCreateRequest;
 import com.yangtze.bankwarning.domain.dto.SectionBatchUpdateRequest;
 import com.yangtze.bankwarning.domain.dto.TasksCreateRequest;
 import com.yangtze.bankwarning.domain.dto.TaskStatusUpdateRequest;
+import com.yangtze.bankwarning.mapper.HydroConditionMapper;
 import com.yangtze.bankwarning.service.BusinessStoreService;
 import com.yangtze.bankwarning.service.SectionValidationService;
 import com.yangtze.bankwarning.service.TaskExecutionService;
@@ -34,13 +35,16 @@ public class BusinessController {
     private final BusinessStoreService businessStoreService;
     private final TaskExecutionService taskExecutionService;
     private final SectionValidationService sectionValidationService;
+    private final HydroConditionMapper hydroConditionMapper;
 
     public BusinessController(BusinessStoreService businessStoreService,
                               TaskExecutionService taskExecutionService,
-                              SectionValidationService sectionValidationService) {
+                              SectionValidationService sectionValidationService,
+                              HydroConditionMapper hydroConditionMapper) {
         this.businessStoreService = businessStoreService;
         this.taskExecutionService = taskExecutionService;
         this.sectionValidationService = sectionValidationService;
+        this.hydroConditionMapper = hydroConditionMapper;
     }
 
     @PostMapping("/banks")
@@ -146,6 +150,11 @@ public class BusinessController {
     public Map<String, Object> updateBasicParam(@PathVariable("param_id") String paramId, @RequestBody BasicParamPayload payload) {
         businessStoreService.updateBasicParam(paramId, payload);
         return Map.of("success", true, "param_id", paramId, "updated", true);
+    }
+
+    @GetMapping("/hydro-conditions")
+    public Map<String, Object> listHydroConditions() {
+        return Map.of("success", true, "conditions", hydroConditionMapper.selectDistinctConditions());
     }
 
     @PostMapping("/sections")

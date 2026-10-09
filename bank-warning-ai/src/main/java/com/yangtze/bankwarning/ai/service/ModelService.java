@@ -49,6 +49,22 @@ public class ModelService {
         agentCache.remove(modelKey);
     }
 
+    public boolean updateModel(String modelKey, String label, String apiKey, String baseUrl, String modelName) {
+        AiModelPO existing = mapper.selectByKey(modelKey);
+        if (existing == null) return false;
+        AiModelPO po = new AiModelPO();
+        po.setModelKey(modelKey);
+        po.setLabel(label != null ? label : existing.getLabel());
+        po.setApiKey(apiKey != null ? apiKey : existing.getApiKey());
+        po.setBaseUrl(baseUrl != null ? baseUrl : existing.getBaseUrl());
+        po.setModelName(modelName != null ? modelName : existing.getModelName());
+        mapper.updateByKey(po);
+        modelCache.remove(modelKey);
+        agentCache.remove(modelKey);
+        log.info("[ModelService] updated model: {}", modelKey);
+        return true;
+    }
+
     public Model getOrCreateModel(String modelKey) {
         return modelCache.computeIfAbsent(modelKey, k -> {
             AiModelPO po = mapper.selectByKey(k);

@@ -1,6 +1,6 @@
 <div align="center">
 
-# 🌊 长江河岸崩塌风险评估系统 — 后端服务
+# 🌊 长江崩岸重点险工段智能风险评估应用平台 — 后端服务
 
 **Yangtze River Bank Collapse Risk Assessment System — Backend Service**
 
@@ -32,7 +32,7 @@
 
 ## 项目简介
 
-`bank-warning-server` 是长江河岸崩塌风险评估系统的 Java 后端服务，负责：
+`bank-warning-server` 是长江崩岸重点险工段智能风险评估应用平台的 Java 后端服务，负责：
 
 - 对外暴露 `/v0/bank/*` 业务 API（任务管理、断面管理、结果查询等）
 - 直接操作 PostgreSQL/PostGIS 数据库，管理任务、断面、岸段、风险结果等数据
