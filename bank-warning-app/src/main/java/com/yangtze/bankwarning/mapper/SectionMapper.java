@@ -27,4 +27,6 @@ public interface SectionMapper {
     boolean existsBySectionId(@Param("sectionId") String sectionId, @Param("userId") Long userId);
 
     int batchUpdateParams(@Param("sectionIds") List<String> sectionIds, @Param("params") Map<String, Object> params, @Param("userId") Long userId);
+
+    int reverseSectionGeometry(@Param("sectionId") String sectionId, @Param("sectionGeometry") String sectionGeometry, @Param("otherParams") String otherParams, @Param("userId") Long userId);
 }

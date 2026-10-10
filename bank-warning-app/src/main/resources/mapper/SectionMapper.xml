@@ -130,6 +130,17 @@
         WHERE section_id = #{sectionId} AND deleted_at IS NULL AND (user_id = #{userId} OR #{userId, jdbcType=BIGINT} IS NULL)
     </update>
 
+    <update id="reverseSectionGeometry">
+        UPDATE cross_sections
+        SET section_geometry = #{sectionGeometry}::jsonb,
+            other_params = COALESCE(#{otherParams}::jsonb, other_params),
+            geom = ST_SetSRID(ST_GeomFromGeoJSON(#{sectionGeometry}::json), 4326),
+            start_point = ST_StartPoint(ST_SetSRID(ST_GeomFromGeoJSON(#{sectionGeometry}::json), 4326)),
+            end_point = ST_EndPoint(ST_SetSRID(ST_GeomFromGeoJSON(#{sectionGeometry}::json), 4326)),
+            updated_at = CURRENT_TIMESTAMP
+        WHERE section_id = #{sectionId} AND deleted_at IS NULL AND (user_id = #{userId} OR #{userId, jdbcType=BIGINT} IS NULL)
+    </update>
+
     <select id="countByTaskId" resultType="int">
         SELECT COUNT(*) FROM cross_sections WHERE task_id = #{taskId} AND deleted_at IS NULL AND (user_id = #{userId} OR #{userId, jdbcType=BIGINT} IS NULL)
     </select>

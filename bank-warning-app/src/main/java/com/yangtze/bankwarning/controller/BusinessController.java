@@ -186,6 +186,12 @@ public class BusinessController {
         return Map.of("success", true, "section_id", sectionId, "updated", true);
     }
 
+    @PutMapping("/sections/{section_id}/reverse")
+    public Map<String, Object> reverseSection(@PathVariable("section_id") String sectionId) {
+        businessStoreService.reverseSection(sectionId);
+        return Map.of("success", true, "section_id", sectionId, "reversed", true);
+    }
+
     @PutMapping("/sections/batch-params")
     public Map<String, Object> batchUpdateSectionParams(@RequestBody SectionBatchUpdateRequest request) {
         businessStoreService.batchUpdateSectionParams(request.sectionIds(), request.params());

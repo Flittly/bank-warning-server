@@ -4,6 +4,9 @@ import com.yangtze.bankwarning.domain.po.*;
 import com.yangtze.bankwarning.domain.dto.*;
 import com.yangtze.bankwarning.mapper.*;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.node.ArrayNode;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.yangtze.bankwarning.security.security.SecurityUtils;
 import org.springframework.stereotype.Service;
 
@@ -46,6 +49,10 @@ public class BusinessStoreService {
             BankPO existing = bankMapper.selectByBankId(payload.bankId(), userId);
             if (existing != null) {
                 BankPO po = toBankPO(payload);
+                // 覆盖更新时载荷未携带几何时保留库中已有几何，防止误清空岸段数据
+                if (payload.bankGeometry() == null) {
+                    po.setBankGeometry(existing.getBankGeometry());
+                }
                 bankMapper.update(po);
                 return BankResponse.from(bankMapper.selectByBankId(payload.bankId(), userId));
             }
@@ -72,9 +79,16 @@ public class BusinessStoreService {
 
     public void updateBank(String bankId, BankPayload payload) {
         Long userId = SecurityUtils.getCurrentUserIdForDataFilter();
-        getBank(bankId);
+        BankPO existing = bankMapper.selectByBankId(bankId, userId);
+        if (existing == null) {
+            throw new IllegalArgumentException("Bank not found: " + bankId);
+        }
         BankPO po = toBankPO(payload);
         po.setBankId(bankId);
+        // 载荷未携带几何时保留库中已有几何，防止误清空岸段数据
+        if (payload.bankGeometry() == null) {
+            po.setBankGeometry(existing.getBankGeometry());
+        }
         bankMapper.update(po);
     }
 
@@ -232,6 +246,57 @@ public class BusinessStoreService {
         SectionPO po = toSectionPO(null, null, null, payload);
         po.setSectionId(sectionId);
         sectionMapper.update(po);
+    }
+
+    public void reverseSection(String sectionId) {
+        Long userId = SecurityUtils.getCurrentUserIdForDataFilter();
+        SectionPO po = sectionMapper.selectBySectionId(sectionId, userId);
+        if (po == null) {
+            throw new IllegalArgumentException("Section not found: " + sectionId);
+        }
+        String reversedGeometry = reverseLineStringJson(po.getSectionGeometry());
+        String swappedOtherParams = swapLeftRightPoints(po.getOtherParams());
+        sectionMapper.reverseSectionGeometry(sectionId, reversedGeometry, swappedOtherParams, userId);
+    }
+
+    private String reverseLineStringJson(String geometryJson) {
+        if (geometryJson == null || geometryJson.isBlank()) {
+            return geometryJson;
+        }
+        try {
+            JsonNode root = objectMapper.readTree(geometryJson);
+            if (root instanceof ObjectNode obj && obj.has("coordinates")) {
+                JsonNode coords = obj.get("coordinates");
+                if (coords.isArray() && coords.size() >= 2) {
+                    ArrayNode reversed = objectMapper.createArrayNode();
+                    for (int i = coords.size() - 1; i >= 0; i--) {
+                        reversed.add(coords.get(i));
+                    }
+                    obj.set("coordinates", reversed);
+                }
+            }
+            return objectMapper.writeValueAsString(root);
+        } catch (Exception e) {
+            throw new IllegalArgumentException("断面几何 JSON 无法解析: " + e.getMessage());
+        }
+    }
+
+    private String swapLeftRightPoints(String otherParamsJson) {
+        if (otherParamsJson == null || otherParamsJson.isBlank()) {
+            return otherParamsJson;
+        }
+        try {
+            JsonNode root = objectMapper.readTree(otherParamsJson);
+            if (root instanceof ObjectNode obj && obj.has("leftPoint") && obj.has("rightPoint")) {
+                JsonNode left = obj.get("leftPoint");
+                obj.set("leftPoint", obj.get("rightPoint"));
+                obj.set("rightPoint", left);
+                return objectMapper.writeValueAsString(root);
+            }
+            return otherParamsJson;
+        } catch (Exception e) {
+            return otherParamsJson;
+        }
     }
 
     public void deleteSection(String sectionId) {
