@@ -2,7 +2,7 @@
 
 # 🌊 长江崩岸重点险工段智能风险评估应用平台 — 后端服务
 
-**Yangtze River Bank Collapse Risk Assessment System — Backend Service**
+**YRBC-IRAP — Yangtze River Bank Collapse Key Hazard Section Intelligent Risk Assessment Platform — Backend Service**
 
 基于 Spring Boot 4.0 + MyBatis + PostGIS 的多模块河岸崩塌风险评估后端服务。
 
@@ -263,7 +263,7 @@ mvn -pl bank-warning-app spring-boot:run \
 
 <a id="english-version"></a>
 
-# 🌊 Yangtze River Bank Collapse Risk Assessment System — Backend Service
+# 🌊 YRBC-IRAP — Yangtze River Bank Collapse Key Hazard Section Intelligent Risk Assessment Platform — Backend Service
 
 A multi-module Spring Boot 4.0 + MyBatis + PostGIS backend service for river bank collapse risk assessment.
 
@@ -283,7 +283,7 @@ A multi-module Spring Boot 4.0 + MyBatis + PostGIS backend service for river ban
 
 ## Introduction
 
-`bank-warning-server` is the Java backend service for the Yangtze River Bank Collapse Risk Assessment System. It handles:
+`bank-warning-server` is the Java backend service for YRBC-IRAP (Yangtze River Bank Collapse Key Hazard Section Intelligent Risk Assessment Platform). It handles:
 
 - Exposing `/v0/bank/*` business APIs (task management, section management, result queries)
 - Operating directly on PostgreSQL/PostGIS database for tasks, sections, river banks, and risk results
