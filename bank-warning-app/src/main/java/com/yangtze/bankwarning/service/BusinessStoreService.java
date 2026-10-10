@@ -49,6 +49,10 @@ public class BusinessStoreService {
             BankPO existing = bankMapper.selectByBankId(payload.bankId(), userId);
             if (existing != null) {
                 BankPO po = toBankPO(payload);
+                // 覆盖更新时载荷未携带几何时保留库中已有几何，防止误清空岸段数据
+                if (payload.bankGeometry() == null) {
+                    po.setBankGeometry(existing.getBankGeometry());
+                }
                 bankMapper.update(po);
                 return BankResponse.from(bankMapper.selectByBankId(payload.bankId(), userId));
             }
@@ -75,9 +79,16 @@ public class BusinessStoreService {
 
     public void updateBank(String bankId, BankPayload payload) {
         Long userId = SecurityUtils.getCurrentUserIdForDataFilter();
-        getBank(bankId);
+        BankPO existing = bankMapper.selectByBankId(bankId, userId);
+        if (existing == null) {
+            throw new IllegalArgumentException("Bank not found: " + bankId);
+        }
         BankPO po = toBankPO(payload);
         po.setBankId(bankId);
+        // 载荷未携带几何时保留库中已有几何，防止误清空岸段数据
+        if (payload.bankGeometry() == null) {
+            po.setBankGeometry(existing.getBankGeometry());
+        }
         bankMapper.update(po);
     }
 
