@@ -125,10 +125,10 @@
         WHERE section_id = #{sectionId} AND deleted_at IS NULL AND (user_id = #{userId} OR #{userId, jdbcType=BIGINT} IS NULL)
     </update>
 
-    <update id="deleteBySectionId">
-        UPDATE cross_sections SET deleted_at = CURRENT_TIMESTAMP
-        WHERE section_id = #{sectionId} AND deleted_at IS NULL AND (user_id = #{userId} OR #{userId, jdbcType=BIGINT} IS NULL)
-    </update>
+    <delete id="deleteBySectionId">
+        DELETE FROM cross_sections
+        WHERE section_id = #{sectionId} AND (user_id = #{userId} OR #{userId, jdbcType=BIGINT} IS NULL)
+    </delete>
 
     <update id="reverseSectionGeometry">
         UPDATE cross_sections
@@ -145,10 +145,10 @@
         SELECT COUNT(*) FROM cross_sections WHERE task_id = #{taskId} AND deleted_at IS NULL AND (user_id = #{userId} OR #{userId, jdbcType=BIGINT} IS NULL)
     </select>
 
-    <update id="deleteByTaskId">
-        UPDATE cross_sections SET deleted_at = CURRENT_TIMESTAMP
-        WHERE task_id = #{taskId} AND deleted_at IS NULL AND (user_id = #{userId} OR #{userId, jdbcType=BIGINT} IS NULL)
-    </update>
+    <delete id="deleteByTaskId">
+        DELETE FROM cross_sections
+        WHERE task_id = #{taskId} AND (user_id = #{userId} OR #{userId, jdbcType=BIGINT} IS NULL)
+    </delete>
 
     <select id="existsBySectionId" resultType="boolean">
         SELECT COUNT(*) > 0 FROM cross_sections WHERE section_id = #{sectionId} AND deleted_at IS NULL AND (user_id = #{userId} OR #{userId, jdbcType=BIGINT} IS NULL)
