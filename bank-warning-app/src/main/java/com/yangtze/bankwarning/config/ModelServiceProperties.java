@@ -28,10 +28,6 @@ public class ModelServiceProperties {
         this.defaultModelApi = defaultModelApi;
     }
 
-    public Duration getConnectTimeout() {
-        return connectTimeout;
-    }
-
     public void setConnectTimeout(Duration connectTimeout) {
         this.connectTimeout = connectTimeout;
     }

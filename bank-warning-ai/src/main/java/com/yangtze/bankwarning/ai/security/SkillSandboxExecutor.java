@@ -94,6 +94,8 @@ public class SkillSandboxExecutor {
                 s.sandboxPidsLimit());
     }
 
+    // TODO(冗余审计 2026-10-12): getMode() 与 isSandboxEnabled() 均零调用方 ——
+    //  沙箱档位/开关已定义却无人查询，属「配置可设、无人读取」的接线缺口，保留勿删。
     /** 当前沙箱档位（供面板与日志用） */
     public Mode getMode() {
         return runtime().mode();
@@ -482,16 +484,6 @@ public class SkillSandboxExecutor {
 
             public Builder extraEnv(Map<String, String> extraEnv) {
                 this.extraEnv = extraEnv;
-                return this;
-            }
-
-            public Builder stdin(byte[] stdin) {
-                this.stdin = stdin;
-                return this;
-            }
-
-            public Builder workDir(Path workDir) {
-                this.workDir = workDir;
                 return this;
             }
 

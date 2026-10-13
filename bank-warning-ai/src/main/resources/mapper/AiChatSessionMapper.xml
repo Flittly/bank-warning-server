@@ -28,9 +28,4 @@
     <delete id="deleteBySessionId">
         DELETE FROM ai_chat_sessions WHERE session_id = #{sessionId} AND (user_id = #{userId} OR #{userId, jdbcType=BIGINT} IS NULL)
     </delete>
-
-    <update id="updateTitle">
-        UPDATE ai_chat_sessions SET title = #{title}, updated_at = CURRENT_TIMESTAMP
-        WHERE session_id = #{sessionId} AND (user_id = #{userId} OR #{userId, jdbcType=BIGINT} IS NULL)
-    </update>
 </mapper>

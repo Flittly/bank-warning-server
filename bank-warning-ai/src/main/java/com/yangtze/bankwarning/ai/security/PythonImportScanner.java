@@ -62,11 +62,14 @@ public class PythonImportScanner {
                 SkillSecurityProfile.STANDARD, effective, failOnViolation));
     }
 
+    // TODO(冗余审计 2026-10-12): 零调用方 —— 档位开关已定义却无处查询，
+    //  属「配置可设、无人读取」的接线缺口，保留勿删。
     /** 静态扫描总开关（由档位决定；关闭时调用方应跳过扫描） */
     public boolean isVerifyEnabled() {
         return settingsProvider.settings().verifyEnabled();
     }
 
+    // TODO(冗余审计 2026-10-12): 零调用方 —— 同上，接线缺口，保留勿删。
     /** 发现违规时是否拒绝执行（由档位决定） */
     public boolean isFailOnViolation() {
         return settingsProvider.settings().failOnViolation();
@@ -220,6 +223,7 @@ public class PythonImportScanner {
         return false;
     }
 
+    // TODO(冗余审计 2026-10-12): 零调用方 —— 供面板展示的取值口子尚未接上，保留勿删。
     /** 便捷方法：返回去重后的黑名单（供面板展示） */
     public Set<String> forbiddenImportSet() {
         return new LinkedHashSet<>(forbiddenImports());

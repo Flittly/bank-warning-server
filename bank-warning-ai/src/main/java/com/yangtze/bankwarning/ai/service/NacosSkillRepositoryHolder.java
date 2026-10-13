@@ -141,10 +141,6 @@ public class NacosSkillRepositoryHolder {
         cachedSkillNames.put(name, "");
     }
 
-    public void untrackSkill(String name) {
-        cachedSkillNames.remove(name);
-    }
-
     public void downloadSkillToLocal(String skillName) throws Exception {
         if (aiService == null) throw new IllegalStateException("Nacos AI service not available");
         byte[] zip;

@@ -124,48 +124,6 @@ public class VisualizationService {
     }
 
     /**
-     * 查询剖面数据
-     */
-    private String queryDemPath(String taskId, String bankId) {
-        try {
-            // 从 tiff_bounds 表获取最新的 TIFF 路径
-            List<Map<String, Object>> tiffs = jdbcTemplate.queryForList(
-                    "SELECT tiff_key, min_x, min_y, max_x, max_y FROM tiff_bounds ORDER BY id DESC LIMIT 5"
-            );
-            log.info("[viz] found {} tiff records", tiffs.size());
-            
-            if (!tiffs.isEmpty()) {
-                for (Map<String, Object> tiff : tiffs) {
-                    String tiffKey = String.valueOf(tiff.get("tiff_key"));
-                    log.info("[viz] tiff_key: {}", tiffKey);
-                    
-                    // 转换为绝对路径：tiff/YZ/2012/standard/2012/2012-YZ.tif -> resource/tiff/...
-                    String relativePath = tiffKey.replace("tiff/", "resource/tiff/");
-                    
-                    // 获取 bank-model-server 的绝对路径
-                    File scriptBase = new File(scriptDir).getAbsoluteFile();
-                    if (!scriptBase.exists()) {
-                        scriptBase = new File(System.getProperty("user.dir"), scriptDir).getAbsoluteFile();
-                    }
-                    
-                    File demFile = new File(scriptBase, relativePath);
-                    log.info("[viz] DEM path: {} (exists: {})", demFile.getAbsolutePath(), demFile.exists());
-                    
-                    if (demFile.exists()) {
-                        return demFile.getAbsolutePath();
-                    }
-                }
-                log.warn("[viz] no valid DEM file found");
-            } else {
-                log.warn("[viz] tiff_bounds table is empty");
-            }
-        } catch (Exception e) {
-            log.error("[viz] failed to query DEM path", e);
-        }
-        return null;
-    }
-
-    /**
      * 生成冲淤热力图
      */
     public Map<String, Object> generateHeatmap(String sectionId, String taskId) {

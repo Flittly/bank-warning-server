@@ -48,15 +48,6 @@ public class JwtTokenProvider {
                 .compact();
     }
 
-    public Long getUserIdFromToken(String token) {
-        Claims claims = Jwts.parser()
-                .verifyWith(key)
-                .build()
-                .parseSignedClaims(token)
-                .getPayload();
-        return claims.get("userId", Long.class);
-    }
-
     public String getUsernameFromToken(String token) {
         Claims claims = Jwts.parser()
                 .verifyWith(key)

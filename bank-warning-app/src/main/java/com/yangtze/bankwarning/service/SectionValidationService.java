@@ -225,44 +225,10 @@ public class SectionValidationService extends AbstractJdbcRepository {
         );
     }
 
-    /**
-     * 保存 tiff 边界信息
-     */
-    public void saveTiffBounds(String tiffKey, String regionCode, String year, String timepoint,
-                               double minX, double minY, double maxX, double maxY, String geomWkt) {
-        Long userId = SecurityUtils.getCurrentUserId();
-        update(
-                """
-                        INSERT INTO tiff_bounds (tiff_key, region_code, year, timepoint,
-                                                 min_x, min_y, max_x, max_y, geom, user_id)
-                        VALUES (:tiffKey, :regionCode, :year, :timepoint,
-                                :minX, :minY, :maxX, :maxY, ST_GeomFromText(:geomWkt, 4326), :userId)
-                        ON CONFLICT (tiff_key) DO UPDATE SET
-                            user_id = :userId,
-                            region_code = EXCLUDED.region_code,
-                            year = EXCLUDED.year,
-                            timepoint = EXCLUDED.timepoint,
-                            min_x = EXCLUDED.min_x,
-                            min_y = EXCLUDED.min_y,
-                            max_x = EXCLUDED.max_x,
-                            max_y = EXCLUDED.max_y,
-                            geom = EXCLUDED.geom,
-                            updated_at = CURRENT_TIMESTAMP
-                        """,
-                new LinkedHashMap<>() {{
-                    put("tiffKey", tiffKey);
-                    put("regionCode", regionCode);
-                    put("year", year);
-                    put("timepoint", timepoint);
-                    put("minX", minX);
-                    put("minY", minY);
-                    put("maxX", maxX);
-                    put("maxY", maxY);
-                    put("geomWkt", geomWkt);
-                    put("userId", userId);
-                }}
-        );
-    }
+    // 冗余清理 2026-10-13：已删除原 saveTiffBounds(...)（Java 侧自存的 tiff 边界 upsert 实现）。
+    // 全仓库零调用；tiff_bounds 的真实写入由 Python 侧承担（register_tiff / extract_tiff_bounds /
+    // util/extract_tiff_bounds.py），本方法属与 Python 重复的实现。
+    // 详见 docs/后端冗余代码审计-2026-10-12.md 第 11.6 节。
 
     /**
      * 更新 section 的验证状态

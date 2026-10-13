@@ -37,9 +37,4 @@ public class AiChatSessionService {
         Long userId = SecurityUtils.getCurrentUserIdForDataFilter();
         mapper.deleteBySessionId(sessionId, userId);
     }
-
-    public void updateTitle(String sessionId, String title) {
-        Long userId = SecurityUtils.getCurrentUserIdForDataFilter();
-        mapper.updateTitle(sessionId, title, userId);
-    }
 }

@@ -3,7 +3,6 @@ package com.yangtze.bankwarning.security.controller;
 import com.yangtze.bankwarning.security.domain.dto.LoginRequest;
 import com.yangtze.bankwarning.security.domain.dto.RegisterRequest;
 import com.yangtze.bankwarning.security.domain.dto.UserResponse;
-import com.yangtze.bankwarning.security.domain.po.UserPO;
 import com.yangtze.bankwarning.security.security.JwtTokenProvider;
 import com.yangtze.bankwarning.security.service.AuthService;
 import org.junit.jupiter.api.BeforeEach;

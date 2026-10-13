@@ -450,18 +450,9 @@ public class BusinessStoreService {
 
     // ==================== Helper Methods ====================
 
-    public Integer getTaskDbId(String taskId) {
-        TaskResponse t = getTask(taskId);
-        return t == null || t.id() == null ? null : t.id().intValue();
-    }
-
     public String getTaskCode(String taskId) {
         TaskResponse t = getTask(taskId);
         return t == null ? null : t.taskId();
-    }
-
-    public Integer getSectionDbId(String sectionId) {
-        return toInteger(getSectionForResult(sectionId).get("id"));
     }
 
     public List<Map<String, Object>> getSectionsByTask(String taskId) {
@@ -664,13 +655,6 @@ public class BusinessStoreService {
         if (value != null) {
             map.put(key, value);
         }
-    }
-
-    private Integer toInteger(Object value) {
-        if (value instanceof Number number) {
-            return number.intValue();
-        }
-        return Integer.parseInt(String.valueOf(value));
     }
 
     private Double toDouble(Object value) {
