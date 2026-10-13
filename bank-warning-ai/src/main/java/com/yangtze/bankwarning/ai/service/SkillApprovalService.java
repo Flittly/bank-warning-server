@@ -60,10 +60,6 @@ public class SkillApprovalService {
         return permissions.size();
     }
 
-    public List<SkillApprovalStore.SkillApproval> listPending() {
-        return store.listPending();
-    }
-
     public List<SkillApprovalStore.SkillApproval> listByStatus(String status) {
         return store.listByStatus(status);
     }

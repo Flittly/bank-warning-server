@@ -134,18 +134,11 @@ public record SkillSecuritySettings(
         return VALID_SANDBOX_MODES.contains(upper) ? upper : "PROCESS";
     }
 
+    // TODO(冗余审计 2026-10-12): 零调用方 —— 熔断开关可设、可持久化，但没有任何代码
+    //  在决策前查询它。「一键熔断」目前只有写入端，缺读取端，保留勿删（见接线缺口）。
     /** 是否处于应急熔断 */
     public boolean halted() {
         return killSwitch;
-    }
-
-    /** 复制并替换档位标签（其余项不变） */
-    public SkillSecuritySettings withProfile(SkillSecurityProfile next) {
-        return new SkillSecuritySettings(next, verifyEnabled, failOnViolation, forbiddenImports,
-                requireChecksumManifest, requireSignedManifest, sandboxMode, sandboxTimeoutSeconds,
-                sandboxMaxOutputBytes, sandboxMemoryMb, sandboxCpuSeconds, sandboxPidsLimit,
-                governanceEnabled, allowedVersions, quarantinedVersions, failOnUnapprovedPermission,
-                enforceOutputContract, killSwitch, updatedBy, updatedAt);
     }
 
     /**

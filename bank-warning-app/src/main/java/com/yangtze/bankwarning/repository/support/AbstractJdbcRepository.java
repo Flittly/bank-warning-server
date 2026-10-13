@@ -49,43 +49,10 @@ public abstract class AbstractJdbcRepository {
         return statement.query(Integer.class).optional().orElse(0);
     }
 
-    protected boolean exists(String sql, Map<String, Object> params) {
-        return !queryList(sql, params).isEmpty();
-    }
-
     protected Map<String, Object> params(String key, Object value) {
         Map<String, Object> params = new LinkedHashMap<>();
         params.put(key, value);
         return params;
-    }
-
-    protected void appendEqualsCondition(StringBuilder sql, Map<String, Object> args, String column, String paramName, Object value) {
-        if (value == null) {
-            return;
-        }
-        sql.append(args.isEmpty() ? " WHERE " : " AND ")
-                .append(column)
-                .append(" = :")
-                .append(paramName);
-        args.put(paramName, value);
-    }
-
-    protected String writeJson(Object value) {
-        if (value == null) {
-            return null;
-        }
-        try {
-            return objectMapper.writeValueAsString(value);
-        } catch (Exception exception) {
-            throw new IllegalStateException("Failed to write JSON", exception);
-        }
-    }
-
-    protected Integer toInteger(Object value) {
-        if (value instanceof Number number) {
-            return number.intValue();
-        }
-        return Integer.parseInt(String.valueOf(value));
     }
 
     private Map<String, Object> toMap(ResultSet rs, int rowNum) throws SQLException {

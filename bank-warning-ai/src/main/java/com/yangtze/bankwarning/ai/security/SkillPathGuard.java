@@ -44,13 +44,4 @@ public final class SkillPathGuard {
         Path targetNorm = target.toAbsolutePath().normalize();
         return targetNorm.startsWith(baseNorm);
     }
-
-    /**
-     * 检查目标是否位于 base 内，不在则抛异常。
-     */
-    public static void requireWithin(Path base, Path target) {
-        if (!isWithin(base, target)) {
-            throw new IllegalArgumentException("非法路径逃逸: " + target);
-        }
-    }
 }

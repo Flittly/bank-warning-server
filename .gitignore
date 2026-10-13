@@ -4,6 +4,8 @@
 **/target/
 /hs_err_pid15300.log
 /hs_err_pid30056.log
+/hs_err_pid*.log
+/replay_pid*.log
 /demo-example/README_原理说明.md
 /demo-example/对比说明.md
 /验证单JVM.bat

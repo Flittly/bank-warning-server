@@ -5,8 +5,6 @@ import com.yangtze.bankwarning.ai.security.SkillSecurityProfile;
 import com.yangtze.bankwarning.ai.security.SkillSecuritySettings;
 import com.yangtze.bankwarning.ai.service.SkillSecurityService;
 import com.yangtze.bankwarning.security.security.SecurityUtils;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
 import org.springframework.security.access.prepost.PreAuthorize;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PatchMapping;
@@ -43,8 +41,6 @@ import java.util.Map;
 @RequestMapping("/v0/admin/skill-security")
 @PreAuthorize("hasAnyRole('SUPER_ADMIN', 'ADMIN')")
 public class SkillSecurityController {
-
-    private static final Logger log = LoggerFactory.getLogger(SkillSecurityController.class);
 
     private final SkillSecurityService securityService;
     private final SkillContentVerifier contentVerifier;

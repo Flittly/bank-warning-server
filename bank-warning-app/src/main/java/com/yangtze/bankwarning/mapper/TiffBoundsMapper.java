@@ -11,7 +11,4 @@ public interface TiffBoundsMapper {
 
     List<TiffBoundsPO> selectAll(@Param("userId") Long userId);
 
-    TiffBoundsPO selectByTiffKey(@Param("tiffKey") String tiffKey, @Param("userId") Long userId);
-
-    int insertOrUpdate(TiffBoundsPO tiffBounds, @Param("userId") Long userId);
 }

@@ -12,5 +12,4 @@ public interface AiChatSessionMapper {
     AiChatSessionPO selectBySessionId(@Param("sessionId") String sessionId, @Param("userId") Long userId);
     int insert(AiChatSessionPO po);
     int deleteBySessionId(@Param("sessionId") String sessionId, @Param("userId") Long userId);
-    int updateTitle(@Param("sessionId") String sessionId, @Param("title") String title, @Param("userId") Long userId);
 }
