@@ -10,7 +10,7 @@ public class BasicParamPO {
     private Long userId;
     private String paramId;
     private String paramName;
-    private String segment;
+    private String benchSegment;
     private String currentTimepoint;
     private String setName;
     private String waterQs;

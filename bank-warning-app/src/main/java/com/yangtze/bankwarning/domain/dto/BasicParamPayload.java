@@ -8,7 +8,7 @@ import java.util.Map;
 public record BasicParamPayload(
         @JsonProperty("param_id") @NotBlank String paramId,
         @JsonProperty("param_name") @NotBlank String paramName,
-        String segment,
+        @JsonProperty("segment") String benchSegment,
         @JsonProperty("current_timepoint") String currentTimepoint,
         @JsonProperty("set_name") String setName,
         @JsonProperty("water_qs") String waterQs,

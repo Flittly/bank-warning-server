@@ -19,7 +19,7 @@ public class SectionPO {
     private Double distance;
     private Integer basicParamId;
     private String paramName;
-    private String segment;
+    private String benchSegment;
     private String currentTimepoint;
     private String setName;
     private String waterQs;

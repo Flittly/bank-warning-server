@@ -156,7 +156,7 @@ public class TaskExecutionService {
 
     private Map<String, Object> buildRiskLevelPayload(Map<String, Object> section) {
         Map<String, Object> payload = new LinkedHashMap<>();
-        payload.put("segment", section.get("segment"));
+        payload.put("segment", section.get("bench_segment"));
         payload.put("current-timepoint", section.get("current_timepoint"));
         payload.put("set", section.get("set_name"));
         payload.put("water-qs", section.get("water_qs"));
