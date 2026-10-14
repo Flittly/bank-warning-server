@@ -10,7 +10,7 @@ public class BankPO {
     private Long userId;
     private String bankId;
     private String bankName;
-    private String regionCode;
+    private String reachGroup;
     private String bankGeometry;
     private Boolean reversed;
     private String description;

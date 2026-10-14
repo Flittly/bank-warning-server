@@ -8,7 +8,7 @@ public record BasicParamResponse(
     @JsonProperty("id") Long id,
     @JsonProperty("param_id") String paramId,
     @JsonProperty("param_name") String paramName,
-    @JsonProperty("segment") String segment,
+    @JsonProperty("segment") String benchSegment,
     @JsonProperty("current_timepoint") String currentTimepoint,
     @JsonProperty("set_name") String setName,
     @JsonProperty("water_qs") String waterQs,
@@ -29,7 +29,7 @@ public record BasicParamResponse(
     public static BasicParamResponse from(BasicParamPO po) {
         if (po == null) return null;
         return new BasicParamResponse(
-            po.getId(), po.getParamId(), po.getParamName(), po.getSegment(),
+            po.getId(), po.getParamId(), po.getParamName(), po.getBenchSegment(),
             po.getCurrentTimepoint(), po.getSetName(), po.getWaterQs(), po.getTidalLevel(),
             po.getBenchId(), po.getRefId(), po.getHs(), po.getHc(),
             po.getProtectionLevel(), po.getControlLevel(), po.getComparisonTimepoint(),

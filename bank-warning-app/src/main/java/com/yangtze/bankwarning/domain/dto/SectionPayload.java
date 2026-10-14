@@ -18,7 +18,7 @@ public record SectionPayload(
         Double distance,
         @JsonProperty("basic_param_id") Integer basicParamId,
         @JsonProperty("param_name") String paramName,
-        String segment,
+        @JsonProperty("segment") String benchSegment,
         @JsonProperty("current_timepoint") String currentTimepoint,
         @JsonProperty("set_name") String setName,
         @JsonProperty("water_qs") String waterQs,

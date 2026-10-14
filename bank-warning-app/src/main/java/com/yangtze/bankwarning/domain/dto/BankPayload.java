@@ -8,7 +8,7 @@ import jakarta.validation.constraints.NotBlank;
 public record BankPayload(
         @JsonProperty("bank_id") @NotBlank String bankId,
         @JsonProperty("bank_name") @NotBlank String bankName,
-        @JsonProperty("region_code") @NotBlank String regionCode,
+        @JsonProperty("region_code") @NotBlank String reachGroup,
         Map<String, Object> geometry,
         @JsonProperty("bank_geometry") Map<String, Object> bankGeometry,
         String description,

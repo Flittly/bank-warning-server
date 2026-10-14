@@ -67,7 +67,7 @@ public class SectionProfileService {
         Map<String, Object> payload = new LinkedHashMap<>();
         payload.put("dem-id", section.get("bench_id"));
         payload.put("section-geometry", section.get("section_geometry"));
-        payload.put("segment", section.get("segment"));
+        payload.put("segment", section.get("bench_segment"));
         payload.put("current-timepoint", section.get("current_timepoint"));
         return payload;
     }

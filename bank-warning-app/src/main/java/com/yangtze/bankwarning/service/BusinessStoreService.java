@@ -472,7 +472,7 @@ public class BusinessStoreService {
         map.put("id", po.getId());
         map.put("bank_id", po.getBankId());
         map.put("bank_name", po.getBankName());
-        map.put("region_code", po.getRegionCode());
+        map.put("region_code", po.getReachGroup());
         map.put("bank_geometry", parseJson(po.getBankGeometry()));
         map.put("reversed", po.getReversed());
         map.put("description", po.getDescription());
@@ -497,7 +497,7 @@ public class BusinessStoreService {
         map.put("distance", po.getDistance());
         map.put("basic_param_id", po.getBasicParamId());
         map.put("param_name", po.getParamName());
-        map.put("segment", po.getSegment());
+        map.put("bench_segment", po.getBenchSegment());
         map.put("current_timepoint", po.getCurrentTimepoint());
         map.put("set_name", po.getSetName());
         map.put("water_qs", po.getWaterQs());
@@ -527,7 +527,7 @@ public class BusinessStoreService {
         map.put("id", po.getId());
         map.put("param_id", po.getParamId());
         map.put("param_name", po.getParamName());
-        map.put("segment", po.getSegment());
+        map.put("bench_segment", po.getBenchSegment());
         map.put("current_timepoint", po.getCurrentTimepoint());
         map.put("set_name", po.getSetName());
         map.put("water_qs", po.getWaterQs());
@@ -553,7 +553,7 @@ public class BusinessStoreService {
         BankPO po = new BankPO();
         po.setBankId(payload.bankId());
         po.setBankName(payload.bankName());
-        po.setRegionCode(payload.regionCode());
+        po.setReachGroup(payload.reachGroup());
         po.setBankGeometry(writeJson(payload.bankGeometry()));
         po.setDescription(payload.description());
         po.setReversed(payload.reversed() != null && payload.reversed());
@@ -573,7 +573,7 @@ public class BusinessStoreService {
         BasicParamPO po = new BasicParamPO();
         po.setParamId(payload.paramId());
         po.setParamName(payload.paramName());
-        po.setSegment(payload.segment());
+        po.setBenchSegment(payload.benchSegment());
         po.setCurrentTimepoint(payload.currentTimepoint());
         po.setSetName(payload.setName());
         po.setWaterQs(payload.waterQs());
@@ -604,7 +604,7 @@ public class BusinessStoreService {
         po.setDistance(payload.distance());
         po.setBasicParamId(basicParamId);
         po.setParamName(merged != null ? (String) merged.get("param_name") : payload.paramName());
-        po.setSegment(merged != null ? (String) merged.get("segment") : payload.segment());
+        po.setBenchSegment(merged != null ? (String) merged.get("bench_segment") : payload.benchSegment());
         po.setCurrentTimepoint(merged != null ? (String) merged.get("current_timepoint") : payload.currentTimepoint());
         po.setSetName(merged != null ? (String) merged.get("set_name") : payload.setName());
         po.setWaterQs(merged != null ? (String) merged.get("water_qs") : payload.waterQs());
@@ -633,7 +633,7 @@ public class BusinessStoreService {
         putIfNotNull(merged, "vertical_foot_point", payload.verticalFootPoint());
         putIfNotNull(merged, "distance", payload.distance());
         putIfNotNull(merged, "param_name", payload.paramName());
-        putIfNotNull(merged, "segment", payload.segment());
+        putIfNotNull(merged, "bench_segment", payload.benchSegment());
         putIfNotNull(merged, "current_timepoint", payload.currentTimepoint());
         putIfNotNull(merged, "set_name", payload.setName());
         putIfNotNull(merged, "water_qs", payload.waterQs());

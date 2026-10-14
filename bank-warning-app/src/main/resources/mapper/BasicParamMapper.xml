@@ -6,7 +6,7 @@
         <id property="id" column="id"/>
         <result property="paramId" column="param_id"/>
         <result property="paramName" column="param_name"/>
-        <result property="segment" column="segment"/>
+        <result property="benchSegment" column="bench_segment"/>
         <result property="currentTimepoint" column="current_timepoint"/>
         <result property="setName" column="set_name"/>
         <result property="waterQs" column="water_qs"/>
@@ -41,11 +41,11 @@
 
     <insert id="insert" parameterType="com.yangtze.bankwarning.domain.po.BasicParamPO" useGeneratedKeys="true" keyProperty="id">
         INSERT INTO basic_params (
-            param_id, param_name, segment, current_timepoint, set_name, water_qs, tidal_level,
+            param_id, param_name, bench_segment, current_timepoint, set_name, water_qs, tidal_level,
             bench_id, ref_id, hs, hc, protection_level, control_level,
             comparison_timepoint, risk_thresholds, weights, other_params, user_id
         ) VALUES (
-            #{paramId}, #{paramName}, #{segment}, #{currentTimepoint}, #{setName}, #{waterQs}, #{tidalLevel},
+            #{paramId}, #{paramName}, #{benchSegment}, #{currentTimepoint}, #{setName}, #{waterQs}, #{tidalLevel},
             #{benchId}, #{refId}, #{hs}, #{hc}, #{protectionLevel}, #{controlLevel},
             #{comparisonTimepoint}, #{riskThresholds}::jsonb, #{weights}::jsonb, #{otherParams}::jsonb, #{userId}
         )
@@ -54,7 +54,7 @@
     <update id="update" parameterType="com.yangtze.bankwarning.domain.po.BasicParamPO">
         UPDATE basic_params
         SET param_name = COALESCE(#{paramName}, param_name),
-            segment = COALESCE(#{segment}, segment),
+            bench_segment = COALESCE(#{benchSegment}, bench_segment),
             current_timepoint = COALESCE(#{currentTimepoint}, current_timepoint),
             set_name = COALESCE(#{setName}, set_name),
             water_qs = COALESCE(#{waterQs}, water_qs),

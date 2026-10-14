@@ -9,7 +9,7 @@ import java.util.List;
 @Mapper
 public interface BankMapper {
 
-    List<BankPO> selectAll(@Param("regionCode") String regionCode, @Param("userId") Long userId);
+    List<BankPO> selectAll(@Param("reachGroup") String reachGroup, @Param("userId") Long userId);
 
     BankPO selectByBankId(@Param("bankId") String bankId, @Param("userId") Long userId);
 

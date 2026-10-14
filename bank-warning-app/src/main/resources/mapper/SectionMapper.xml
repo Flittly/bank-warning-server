@@ -15,7 +15,7 @@
         <result property="distance" column="distance"/>
         <result property="basicParamId" column="basic_param_id"/>
         <result property="paramName" column="param_name"/>
-        <result property="segment" column="segment"/>
+        <result property="benchSegment" column="bench_segment"/>
         <result property="currentTimepoint" column="current_timepoint"/>
         <result property="setName" column="set_name"/>
         <result property="waterQs" column="water_qs"/>
@@ -64,14 +64,14 @@
         INSERT INTO cross_sections (
             task_id, section_id, section_name, bank_id, region_code, segment_index,
             section_geometry, vertical_foot_point, distance, basic_param_id,
-            param_name, segment, current_timepoint, set_name, water_qs, tidal_level,
+            param_name, bench_segment, current_timepoint, set_name, water_qs, tidal_level,
             bench_id, ref_id, hs, hc, protection_level, control_level,
             comparison_timepoint, risk_thresholds, weights, other_params,
             user_id, geom, start_point, end_point
         ) VALUES (
             #{taskId}, #{sectionId}, #{sectionName}, #{bankId}, #{regionCode}, #{segmentIndex},
             #{sectionGeometry}::jsonb, #{verticalFootPoint}::jsonb, #{distance}, #{basicParamId},
-            #{paramName}, #{segment}, #{currentTimepoint}, #{setName}, #{waterQs}, #{tidalLevel},
+            #{paramName}, #{benchSegment}, #{currentTimepoint}, #{setName}, #{waterQs}, #{tidalLevel},
             #{benchId}, #{refId}, #{hs}, #{hc}, #{protectionLevel}, #{controlLevel},
             #{comparisonTimepoint}, #{riskThresholds}::jsonb, #{weights}::jsonb, #{otherParams}::jsonb,
             #{userId},
@@ -98,7 +98,7 @@
             distance = COALESCE(#{distance}, distance),
             basic_param_id = COALESCE(#{basicParamId}, basic_param_id),
             param_name = COALESCE(#{paramName}, param_name),
-            segment = COALESCE(#{segment}, segment),
+            bench_segment = COALESCE(#{benchSegment}, bench_segment),
             current_timepoint = COALESCE(#{currentTimepoint}, current_timepoint),
             set_name = COALESCE(#{setName}, set_name),
             water_qs = COALESCE(#{waterQs}, water_qs),
@@ -159,7 +159,7 @@
         <set>
             updated_at = CURRENT_TIMESTAMP,
             <if test="params.param_name != null">param_name = #{params.param_name},</if>
-            <if test="params.segment != null">segment = #{params.segment},</if>
+            <if test="params.segment != null">bench_segment = #{params.segment},</if>
             <if test="params.current_timepoint != null">current_timepoint = #{params.current_timepoint},</if>
             <if test="params.set_name != null">set_name = #{params.set_name},</if>
             <if test="params.water_qs != null">water_qs = #{params.water_qs},</if>
