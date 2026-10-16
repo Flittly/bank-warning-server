@@ -23,11 +23,19 @@ public class RiskDataTools {
     public String queryRiskData(@ToolParam(name = "task_id", description = "任务ID") String taskId) {
         log.info("[tool] querying risk data, taskId={}", taskId);
 
+        // 坐标必须一并查回：报告要按经纬度分区汇总（与出图同一套分区），
+        // 且 Step 4 的天气查询需要 (lng, lat)——此前不带坐标，天气只能拿到 null。
+        // 口径与 VisualizationService.queryRiskData 完全一致：
+        // 断面端点在 cross_sections.geom 上（banks.geom 不被写入，不要用它）。
         String sql = "SELECT r.section_id, cs.section_name, r.risk_level, " +
-                "r.indicators->>'result' as risk_value, b.bank_name " +
+                "r.indicators->>'result' as risk_value, b.bank_name, " +
+                "ST_X(ST_StartPoint(cs.geom)) as start_lng, " +
+                "ST_Y(ST_StartPoint(cs.geom)) as start_lat, " +
+                "ST_X(ST_EndPoint(cs.geom)) as end_lng, " +
+                "ST_Y(ST_EndPoint(cs.geom)) as end_lat " +
                 "FROM bank_risk_results r " +
                 "LEFT JOIN cross_sections cs ON r.section_id = cs.section_id " +
-                "LEFT JOIN banks b ON cs.bank_id = b.bank_id " +
+                "LEFT JOIN banks b ON COALESCE(cs.bank_id, r.bank_id) = b.bank_id " +
                 "WHERE r.task_id = ? AND r.deleted_at IS NULL " +
                 "ORDER BY r.risk_level DESC";
 
@@ -51,12 +59,28 @@ public class RiskDataTools {
             String sectionName = String.valueOf(row.getOrDefault("section_name", "未知"));
             String riskValue = String.valueOf(row.getOrDefault("risk_value", "无"));
             String bankName = String.valueOf(row.getOrDefault("bank_name", ""));
-            return String.format("  - 断面：%s（%s）| 风险等级：%d | 评估指标：%s",
-                    sectionName, bankName, level, riskValue);
+            return String.format("  - 断面：%s（%s）| 风险等级：%d | 评估指标：%s | 坐标：%s",
+                    sectionName, bankName, level, riskValue, coordText(row));
         }).collect(Collectors.joining("\n"));
 
         return String.format(
                 "任务 %s 的风险评估结果（共 %d 个断面）：\n高风险：%d 个 | 中风险：%d 个 | 低风险：%d 个\n\n详细数据：\n%s",
                 taskId, rows.size(), counts[0], counts[1], counts[2], details);
+    }
+
+    /**
+     * 断面起点坐标的文本形式：{@code (经度, 纬度)}，6 位小数；缺失时返回「未知」。
+     *
+     * <p>这段格式是**订阅契约**：报告工作流按 `坐标：(lng, lat)` 正则解析回坐标，
+     * 用于「按经纬度分区汇总」与 Step 4 的天气查询。改格式要同步
+     * {@code ReportWorkflowService.COORD_PATTERN}。
+     */
+    static String coordText(Map<String, Object> row) {
+        Object lng = row.get("start_lng");
+        Object lat = row.get("start_lat");
+        if (lng instanceof Number l && lat instanceof Number a) {
+            return String.format("(%.6f, %.6f)", l.doubleValue(), a.doubleValue());
+        }
+        return "未知";
     }
 }
