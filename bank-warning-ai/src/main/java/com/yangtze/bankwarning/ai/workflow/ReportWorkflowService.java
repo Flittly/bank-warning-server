@@ -5,8 +5,10 @@ import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.yangtze.bankwarning.ai.middleware.ReasoningTraceMiddleware;
 import com.yangtze.bankwarning.ai.service.MarkdownReportService;
+import com.yangtze.bankwarning.ai.service.PartitionSectionCsvService;
 import com.yangtze.bankwarning.ai.service.VisualizationService;
 import com.yangtze.bankwarning.ai.store.ReportRunStore;
+import com.yangtze.bankwarning.ai.tool.BoundRiskDistributionTool;
 import com.yangtze.bankwarning.ai.tool.RiskDataTools;
 import com.yangtze.bankwarning.ai.tool.VisualizationTools;
 import com.yangtze.bankwarning.ai.tool.WeatherTools;
@@ -29,6 +31,8 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 /**
  * 报告生成工作流服务。
@@ -51,6 +55,18 @@ public class ReportWorkflowService {
 
     private static final Logger log = LoggerFactory.getLogger(ReportWorkflowService.class);
 
+    /**
+     * 出图工具回传的分区明细行前缀（见 {@code VisualizationTools.partitionsJson}）。
+     * 报告分区边界只认这一行——即本次出图**实际生效**的 bbox，而不是 Java 侧另算一套。
+     */
+    static final String PARTITION_MARKER = "分区明细(JSON)：";
+
+    /** {@code query_risk_data} 输出的坐标段，格式见 {@code RiskDataTools.coordText}。 */
+    private static final Pattern COORD_PATTERN =
+            Pattern.compile("坐标：\\(([-\\d.]+),\\s*([-\\d.]+)\\)");
+    private static final Pattern LEVEL_PATTERN = Pattern.compile("风险等级：(\\d+)");
+    private static final Pattern SECTION_NAME_PATTERN = Pattern.compile("断面：([^（|]+)");
+
     private static final StepInfo[] STEPS = {
             new StepInfo("query_data", "查询任务所有断面风险评估数据",
                     "返回所有 section 的 risk_level、指标、所属银行"),
@@ -69,28 +85,34 @@ public class ReportWorkflowService {
     private final Model model;
     private final RiskDataTools riskDataTools;
     private final VisualizationTools visualizationTools;
+    private final VisualizationService visualizationService;
     private final WeatherTools weatherTools;
     private final List<AgentSkillRepository> skillRepositories;
     private final ReasoningTraceMiddleware traceMiddleware;
     private final MarkdownReportService markdownReportService;
+    private final PartitionSectionCsvService partitionSectionCsvService;
     private final ReportRunStore reportRunStore;
     private final ObjectMapper json = new ObjectMapper();
 
     public ReportWorkflowService(Model model,
                                  RiskDataTools riskDataTools,
                                  VisualizationTools visualizationTools,
+                                 VisualizationService visualizationService,
                                  WeatherTools weatherTools,
                                  List<AgentSkillRepository> skillRepositories,
                                  @Qualifier("reportTraceMiddleware") ReasoningTraceMiddleware traceMiddleware,
                                  MarkdownReportService markdownReportService,
+                                 PartitionSectionCsvService partitionSectionCsvService,
                                  ReportRunStore reportRunStore) {
         this.model = model;
         this.riskDataTools = riskDataTools;
         this.visualizationTools = visualizationTools;
+        this.visualizationService = visualizationService;
         this.weatherTools = weatherTools;
         this.skillRepositories = skillRepositories;
         this.traceMiddleware = traceMiddleware;
         this.markdownReportService = markdownReportService;
+        this.partitionSectionCsvService = partitionSectionCsvService;
         this.reportRunStore = reportRunStore;
     }
 
@@ -108,7 +130,34 @@ public class ReportWorkflowService {
     }
 
     public String executeTaskReport(String taskId) {
-        log.info("[workflow] start report generation, taskId={}", taskId);
+        return executeTaskReport(taskId, null, null, null);
+    }
+
+    /**
+     * 生成报告（支持按经纬度分幅）。
+     *
+     * <p>分幅语义与出图**完全一致**——校验、归一化都复用
+     * {@link VisualizationService#validateSplitConfig}：
+     * <ul>
+     *   <li>{@code splitRows/splitCols} 为行（纬度方向）× 列（经度方向）分块数，1 = 该方向不分；</li>
+     *   <li>{@code splitTiles} 为逐幅自定义边界的 JSON 数组，缺省的边沿用均分网格；</li>
+     *   <li>三段全空 = 不分幅，报告结构与历史版本一致。</li>
+     * </ul>
+     *
+     * <p>参数非法时**在起工作流之前**就抛 {@link IllegalArgumentException}，不会白跑 Step 1。
+     */
+    public String executeTaskReport(String taskId, Integer splitRows, Integer splitCols,
+                                    String splitTiles) {
+        log.info("[workflow] start report generation, taskId={}, split={}x{}",
+                taskId, splitRows, splitCols);
+
+        Map<String, Object> splitConfig;
+        try {
+            splitConfig = visualizationService.validateSplitConfig(splitRows, splitCols, splitTiles);
+        } catch (IllegalArgumentException e) {
+            throw new IllegalArgumentException("分幅参数非法：" + e.getMessage(), e);
+        }
+
         Long userId = SecurityUtils.getCurrentUserId();
         Long dataFilter = SecurityUtils.getCurrentUserIdForDataFilter();
 
@@ -123,6 +172,17 @@ public class ReportWorkflowService {
                 ? WorkflowState.fromJson(json, existing.stepStatesJson(), existing.contextJson())
                 : new WorkflowState();
         String runId = resuming ? existing.runId() : UUID.randomUUID().toString();
+
+        // 分幅参数写进 context（随 checkpoint 落库）：
+        // - 续跑时不带参数也仍能沿用首次触发时的分幅，保证 Step 2 的图与报告分区不换口径；
+        // - 带参数时以本次为准（显式覆盖）。
+        if (splitConfig != null) {
+            state.context.put("split", splitConfig);
+            state.context.put("splitTilesJson", splitTiles);
+            log.info("[workflow] 分幅出图 rows={} cols={} customTiles={}",
+                    splitConfig.get("rows"), splitConfig.get("cols"),
+                    splitConfig.getOrDefault("tiles", "无"));
+        }
 
         if (resuming) {
             if (!reportRunStore.claimRunning(runId, dataFilter)) {
@@ -181,13 +241,18 @@ public class ReportWorkflowService {
             String finalReport = (String) state.context.getOrDefault("finalReport", "");
             log.info("[workflow] finished, total length={}", finalReport.length());
 
+            // 分区断面详情：报告按经纬度分成 N 个区时，同时落 N 个独立 CSV，
+            // 与报告（及子图）同目录，导出报告时一并打包下载。
+            // 失败不影响报告本身（服务内部已吞异常并返回空结果）。
+            PartitionSectionCsvService.CsvExport sectionCsvs = writeSectionCsvs(taskId, taskDir, state);
+
             String mdContent = markdownReportService.buildMarkdownContent(
-                    taskId, finalReport, collectCharts(state));
+                    taskId, finalReport, collectCharts(state), sectionCsvs);
 
             String savedFileName = reportFileName;
             try {
                 String mdPath = markdownReportService.generateMarkdownReport(
-                        taskId, finalReport, collectCharts(state));
+                        taskId, finalReport, collectCharts(state), sectionCsvs);
                 savedFileName = new java.io.File(mdPath).getName();
                 log.info("[workflow] markdown report saved: {}", mdPath);
             } catch (Exception e) {
@@ -317,19 +382,32 @@ public class ReportWorkflowService {
 
     private String step2GenDistribution(String taskId, WorkflowState state) {
         Toolkit toolkit = new Toolkit();
-        toolkit.registerTool(visualizationTools);
-        toolkit.removeTool("generate_scour_heatmap");
-        toolkit.removeTool("generate_section_comparison_chart");
+        Map<String, Object> split = splitConfigOf(state);
+        if (split == null) {
+            toolkit.registerTool(visualizationTools);
+            toolkit.removeTool("generate_scour_heatmap");
+            toolkit.removeTool("generate_section_comparison_chart");
+        } else {
+            // 分幅参数**闭包进工具**而不是写进提示词让模型转述：
+            // 模型漏传/改坏 JSON 会让出图分区与报告分区对不上，而且不报错。
+            // 绑定版工具对模型只暴露 task_id，其余参数由 Java 侧固定。
+            toolkit.registerTool(new BoundRiskDistributionTool(
+                    visualizationService,
+                    intOf(split.get("rows")), intOf(split.get("cols")),
+                    (String) state.context.get("splitTilesJson")));
+        }
 
         ReActAgent agent = buildMiniAgent("step2_gen_distribution", toolkit, """
                 你正在执行 Step 2：生成任务的风险分布图。
                 必须且只能调用工具 generate_risk_distribution_map，参数 taskId 为：%s。
-                返回工具的原始输出。
+                返回工具的原始输出（必须原样返回，尤其是其中的「分区明细(JSON)」一行，不要精简）。
                 """.formatted(taskId));
 
         Msg out = agent.call(List.of(new UserMessage("user", "开始生成风险分布图"))).block();
         String result = out.getTextContent();
         state.context.put("distributionMapText", result);
+        // 兜底捕获：模型若没原样回传，appendChartsFromTrace 还会从中间件的工具结果里再取一次
+        capturePartitions(state, result);
         return result;
     }
 
@@ -339,24 +417,11 @@ public class ReportWorkflowService {
             throw new IllegalStateException("Step 1 未执行，无法筛选");
         }
         List<HighRiskSection> highRisk = new ArrayList<>();
-        for (String line : riskDataText.split("\n")) {
-            if (!line.contains("风险等级")) continue;
-            int levelIdx = line.lastIndexOf("风险等级：");
-            if (levelIdx < 0) continue;
-            String tail = line.substring(levelIdx + "风险等级：".length()).trim();
-            int level;
-            try {
-                level = Integer.parseInt(tail.split("\\s+")[0]);
-            } catch (NumberFormatException e) {
-                continue;
-            }
-            if (level >= 3) {
-                String sectionMarker = "断面：";
-                int s = line.indexOf(sectionMarker);
-                String sectionName = s >= 0
-                        ? line.substring(s + sectionMarker.length()).split("（")[0]
-                        : "未知";
-                highRisk.add(new HighRiskSection(sectionName.trim(), null, null, level));
+        for (RiskRow row : parseRiskRows(riskDataText)) {
+            // 坐标一并带出：Step 4 的天气查询按 (lng, lat) 调外部接口，
+            // 以及 Step 6 的经纬度分区归属，都需要它。
+            if (row.level() >= 3) {
+                highRisk.add(new HighRiskSection(row.name(), row.lng(), row.lat(), row.level()));
             }
         }
         // 序列化友好的 Map 形式落库（断点续跑时按 Map 读回）
@@ -365,6 +430,12 @@ public class ReportWorkflowService {
             serializable.add(toHighRiskMap(section));
         }
         state.context.put("highRiskSections", serializable);
+        long withCoord = highRisk.stream().filter(s -> s.lng() != null && s.lat() != null).count();
+        if (withCoord < highRisk.size()) {
+            log.warn("[workflow] {}/{} 个高风险断面缺坐标（cross_sections.geom 为空？），"
+                            + "这些断面无法归入经纬度分区、也无法查天气",
+                    highRisk.size() - withCoord, highRisk.size());
+        }
         return "筛选出 " + highRisk.size() + " 个高风险断面（风险等级 >= 3）";
     }
 
@@ -446,6 +517,12 @@ public class ReportWorkflowService {
         String dist = (String) state.context.getOrDefault("distributionMapText", "");
         String weather = (String) state.context.getOrDefault("weatherResultsText", "");
         String charts = (String) state.context.getOrDefault("sectionChartsText", "");
+        // 确定性预处理：按出图回传的分区边界把断面归区并汇总（不经 LLM）
+        String partitionSummary = buildPartitionSummary(state);
+        boolean partitioned = !partitionSummary.isBlank();
+        String partitionBlock = partitioned
+                ? partitionSummary
+                : "本次未按经纬度分幅（未提供分幅参数）。请按原结构撰写，不要虚构分区。";
 
         String fullPrompt = """
                 你正在执行 Step 6：综合所有数据，撰写最终风险评估报告。
@@ -465,6 +542,9 @@ public class ReportWorkflowService {
                 === Step 5：断面图（热力图+对比图） ===
                 %s
 
+                === 按经纬度分区汇总（分区边界与 Step 2 出图完全一致） ===
+                %s
+
                 === 输出要求 ===
                 1. 用中文撰写完整报告
                 2. 结构：概述 → 指标分析 → 风险评估 → 叠加天气影响 → 建议措施
@@ -473,7 +553,13 @@ public class ReportWorkflowService {
                 5. 若天气数据显示未来 24h 累计降水 ≥ 25mm 或 72h 内任一日 ≥ 50mm 或有暴雨/台风/大风预警，必须新增"叠加天气风险"章节
                 6. 若 24h 降水 ≥ 50mm 或有红色/橙色预警，必须新增"应急建议"章节
                 7. 输出报告正文，不要加任何"以下是报告"之类的开场白
-                """.formatted(taskId, riskData, dist, weather, charts);
+                8. **若上面给出了分区汇总**：正文必须按分区组织——每个分区一个二级章节，标题写明
+                   「分区 N（第 r 行第 c 列，经度 x~y，纬度 u~v）」，在该章节内汇总**该分区自己的**
+                   断面数量、风险等级分布、高风险断面清单与天气影响，并指向附录中该分区对应的地图；
+                   分区章节之后，再写一个「跨分区总体研判」章节做横向对比（哪个分区风险最高、为什么）。
+                   分区的经纬度范围与数量**只能引用上面给出的数字**，不要自行划分或改写。
+                   若只有 1 个分区，可略过分区章节，按原结构撰写。
+                """.formatted(taskId, riskData, dist, weather, charts, partitionBlock);
 
         ReActAgent agent = buildMiniAgent("step6_synthesize", toolkit, fullPrompt);
 
@@ -481,6 +567,309 @@ public class ReportWorkflowService {
         String report = out.getTextContent();
         state.context.put("finalReport", report);
         return report;
+    }
+
+    // ========== 经纬度分区（与出图同源） ==========
+
+    /**
+     * 本次运行的分幅配置（{@code {rows, cols, tiles?}}）；null = 不分幅。
+     */
+    @SuppressWarnings("unchecked")
+    private static Map<String, Object> splitConfigOf(WorkflowState state) {
+        Object raw = state.context.get("split");
+        return raw instanceof Map<?, ?> map ? (Map<String, Object>) map : null;
+    }
+
+    private static Integer intOf(Object value) {
+        return value instanceof Number number ? number.intValue() : null;
+    }
+
+    /**
+     * 捕获出图工具回传的**实际生效**分区边界，落 context。
+     *
+     * <p>只解析 {@code VisualizationTools.partitionsJson} 自己产出的标记行——
+     * 那是 Java 侧生成的确定性文本，不是 LLM 的转述。解析不到就保持原值不动
+     * （不分幅时本来就没有这一行，报告按原结构写）。
+     */
+    void capturePartitions(WorkflowState state, String toolResultText) {
+        List<Map<String, Object>> partitions = partitionsFrom(toolResultText);
+        if (partitions.isEmpty()) {
+            return;
+        }
+        state.context.put("partitions", partitions);
+        log.info("[workflow] 捕获 {} 个出图分区边界（报告分区将沿用同一组数字）", partitions.size());
+    }
+
+    /**
+     * 解析「分区明细(JSON)：[...]」这一行。
+     *
+     * <p>行由 {@code VisualizationTools.partitionsJson} 生成，字段固定：
+     * row/col/west/south/east/north/sections/file_name。
+     */
+    List<Map<String, Object>> partitionsFrom(String text) {
+        if (text == null) {
+            return List.of();
+        }
+        int marker = text.indexOf(PARTITION_MARKER);
+        if (marker < 0) {
+            return List.of();
+        }
+        int from = marker + PARTITION_MARKER.length();
+        int lineEnd = text.indexOf('\n', from);
+        String payload = (lineEnd < 0 ? text.substring(from) : text.substring(from, lineEnd)).trim();
+        if (payload.isEmpty() || "[]".equals(payload)) {
+            return List.of();
+        }
+        try {
+            List<Map<String, Object>> parsed = json.readValue(
+                    payload, new TypeReference<List<Map<String, Object>>>() { });
+            return parsed == null ? List.of() : parsed;
+        } catch (Exception e) {
+            log.warn("[workflow] 分区明细解析失败，本次按不分幅处理: {}", e.getMessage());
+            return List.of();
+        }
+    }
+
+    private static List<Map<String, Object>> readPartitions(WorkflowState state) {
+        Object raw = state.context.get("partitions");
+        if (!(raw instanceof List<?> list)) {
+            return List.of();
+        }
+        List<Map<String, Object>> out = new ArrayList<>();
+        for (Object item : list) {
+            if (item instanceof Map<?, ?> map) {
+                Map<String, Object> copy = new LinkedHashMap<>();
+                map.forEach((key, value) -> copy.put(String.valueOf(key), value));
+                out.add(copy);
+            }
+        }
+        return out;
+    }
+
+    /**
+     * 断面是否落在该分区里。
+     *
+     * <p>**含边判定**（west ≤ lng ≤ east 且 south ≤ lat ≤ north），与 Python
+     * {@code generate_risk_map_tiles} 统计 {@code sections_in_tile} 的口径完全一致。
+     * 自定义分幅出现重叠时，一个断面会同时计进多个分区——报告也照此处理，
+     * 否则「分区断面数」与图上的数字会对不上。
+     */
+    static boolean partitionContains(Map<String, Object> partition, double lng, double lat) {
+        return PartitionBounds.contains(partition, lng, lat);
+    }
+
+    /** 分区标题：「第 r 行第 c 列（经度 a~b，纬度 c~d）」。报告正文、附录、CSV 共用同一份文案。 */
+    static String partitionLabel(Map<String, Object> partition) {
+        return PartitionBounds.label(partition);
+    }
+
+    static String partitionKey(Map<String, Object> partition) {
+        return PartitionBounds.key(partition);
+    }
+
+    /** Step 1 文本里的一条断面记录；坐标可能缺失（cross_sections 缺行）。 */
+    record RiskRow(String name, int level, Double lng, Double lat) {}
+
+    /**
+     * 解析 Step 1 的断面行。坐标缺失**不**丢弃该行——它仍要进高风险清单与断面图，
+     * 只是无法归入经纬度分区（会在汇总里单列为「未落入任何分区」）。
+     */
+    List<RiskRow> parseRiskRows(String riskDataText) {
+        List<RiskRow> rows = new ArrayList<>();
+        if (riskDataText == null) {
+            return rows;
+        }
+        for (String line : riskDataText.split("\n")) {
+            if (!line.contains("风险等级")) {
+                continue;
+            }
+            Matcher levelMatcher = LEVEL_PATTERN.matcher(line);
+            if (!levelMatcher.find()) {
+                continue;
+            }
+            int level;
+            try {
+                level = Integer.parseInt(levelMatcher.group(1));
+            } catch (NumberFormatException e) {
+                continue;
+            }
+            Matcher nameMatcher = SECTION_NAME_PATTERN.matcher(line);
+            String name = nameMatcher.find() ? nameMatcher.group(1).trim() : "未知";
+            Double lng = null;
+            Double lat = null;
+            Matcher coordMatcher = COORD_PATTERN.matcher(line);
+            if (coordMatcher.find()) {
+                try {
+                    lng = Double.valueOf(coordMatcher.group(1));
+                    lat = Double.valueOf(coordMatcher.group(2));
+                } catch (NumberFormatException ignored) {
+                    lng = null;
+                    lat = null;
+                }
+            }
+            rows.add(new RiskRow(name, level, lng, lat));
+        }
+        return rows;
+    }
+
+    /** Step 4 的天气结果是 LLM 输出的 {@code {"断面名": "天气摘要"}}；解析失败就跳过归并。 */
+    @SuppressWarnings("unchecked")
+    private Map<String, String> parseWeatherBySection(String weatherText) {
+        if (weatherText == null || weatherText.isBlank()) {
+            return Map.of();
+        }
+        int start = weatherText.indexOf('{');
+        int end = weatherText.lastIndexOf('}');
+        if (start < 0 || end <= start) {
+            return Map.of();
+        }
+        try {
+            Map<String, Object> parsed = json.readValue(
+                    weatherText.substring(start, end + 1), Map.class);
+            Map<String, String> out = new LinkedHashMap<>();
+            parsed.forEach((key, value) -> {
+                if (value != null) {
+                    out.put(String.valueOf(key), String.valueOf(value));
+                }
+            });
+            return out;
+        } catch (Exception e) {
+            log.debug("[workflow] 天气结果不是合法 JSON，分区内不做天气归并: {}", e.getMessage());
+            return Map.of();
+        }
+    }
+
+    private static String riskLabel(int level) {
+        return switch (level) {
+            case 4 -> "极高风险";
+            case 3 -> "高风险";
+            case 2 -> "一般风险";
+            case 1 -> "低风险";
+            default -> "未知";
+        };
+    }
+
+    /**
+     * 按经纬度分区汇总断面结果——**确定性计算，不经 LLM**。
+     *
+     * <p>分区边界取自出图工具回传的 tiles[].bbox（本次出图实际生效的那组数），
+     * 而不是在 Java 侧按公式另算一遍：只要两边都源自同一次 Python 调用，
+     * 「报告分区 = 出图分区」就是构造性成立的，不依赖公式复刻得对不对。
+     *
+     * @return 直接喂给 Step 6 的汇总文本；不分幅 / 无数据时返回空串
+     */
+    String buildPartitionSummary(WorkflowState state) {
+        List<Map<String, Object>> partitions = readPartitions(state);
+        List<RiskRow> rows = parseRiskRows((String) state.context.get("riskDataText"));
+        if (partitions.isEmpty() || rows.isEmpty()) {
+            state.context.put("partitionSummary", "");
+            return "";
+        }
+
+        List<List<RiskRow>> buckets = new ArrayList<>();
+        for (int i = 0; i < partitions.size(); i++) {
+            buckets.add(new ArrayList<>());
+        }
+        List<RiskRow> unassigned = new ArrayList<>();
+        for (RiskRow row : rows) {
+            boolean hit = false;
+            if (row.lng() != null && row.lat() != null) {
+                for (int i = 0; i < partitions.size(); i++) {
+                    if (partitionContains(partitions.get(i), row.lng(), row.lat())) {
+                        buckets.get(i).add(row);
+                        hit = true;
+                    }
+                }
+            }
+            if (!hit) {
+                unassigned.add(row);
+            }
+        }
+
+        Map<String, String> weatherBySection = parseWeatherBySection(
+                (String) state.context.getOrDefault("weatherResultsText", ""));
+
+        StringBuilder sb = new StringBuilder();
+        sb.append("分区总数：").append(partitions.size())
+                .append("；断面总数：").append(rows.size())
+                .append("（按断面起点坐标归属，含边判定）\n");
+
+        for (int i = 0; i < partitions.size(); i++) {
+            Map<String, Object> partition = partitions.get(i);
+            List<RiskRow> bucket = buckets.get(i);
+            int[] byLevel = new int[5];     // 下标 1..4 对应等级，0 装「等级未知」
+            int maxLevel = 0;
+            StringBuilder highRiskNames = new StringBuilder();
+            for (RiskRow row : bucket) {
+                int idx = (row.level() >= 1 && row.level() <= 4) ? row.level() : 0;
+                byLevel[idx]++;
+                maxLevel = Math.max(maxLevel, row.level());
+                if (row.level() >= 3) {
+                    if (highRiskNames.length() > 0) {
+                        highRiskNames.append('、');
+                    }
+                    highRiskNames.append(row.name()).append('(').append(row.level()).append(')');
+                    String weather = weatherBySection.get(row.name());
+                    if (weather != null && !weather.isBlank()) {
+                        highRiskNames.append('[').append(weather.replace('\n', ' ')).append(']');
+                    }
+                }
+            }
+            sb.append("- 分区 ").append(i + 1)
+                    .append("（").append(partitionLabel(partition)).append("）：")
+                    .append("断面 ").append(bucket.size()).append(" 条")
+                    .append("｜等级分布：极高风险 ").append(byLevel[4])
+                    .append("、高风险 ").append(byLevel[3])
+                    .append("、一般风险 ").append(byLevel[2])
+                    .append("、低风险 ").append(byLevel[1]);
+            if (byLevel[0] > 0) {
+                sb.append("、等级未知 ").append(byLevel[0]);
+            }
+            sb.append("｜最高等级：").append(maxLevel == 0 ? "未知" : riskLabel(maxLevel))
+                    .append("｜高风险断面（等级≥3）：")
+                    .append(highRiskNames.length() == 0 ? "无" : highRiskNames);
+            Object fileName = partition.get("file_name");
+            if (fileName != null && !String.valueOf(fileName).isBlank()) {
+                sb.append("｜对应地图：").append(fileName);
+            }
+            sb.append('\n');
+        }
+
+        if (!unassigned.isEmpty()) {
+            sb.append("- 未落入任何分区的断面 ").append(unassigned.size()).append(" 条：")
+                    .append(unassigned.stream().limit(20).map(RiskRow::name)
+                            .collect(java.util.stream.Collectors.joining("、")))
+                    .append(unassigned.size() > 20 ? " 等" : "")
+                    .append("（坐标缺失或落在自定义边界之外，无对应子图）\n");
+        }
+
+        String summary = sb.toString();
+        state.context.put("partitionSummary", summary);
+        return summary;
+    }
+
+    /**
+     * 按分区写出断面详情 CSV（本次报告若分幅）。
+     *
+     * <p>分区边界与正文/附录**同源**（{@code state.context["partitions"]}，即出图工具回传的
+     * tiles[].bbox），归区判定复用 {@code PartitionBounds.contains} 的含边规则 ——
+     * 于是「CSV 里某分区的断面数」与报告正文该分区的数字必然一致。
+     *
+     * <p>不分幅（无 partitions）时不产出任何 CSV，导出行为与历史版本一致。
+     */
+    private PartitionSectionCsvService.CsvExport writeSectionCsvs(
+            String taskId, String taskDir, WorkflowState state) {
+        List<Map<String, Object>> partitions = readPartitions(state);
+        if (partitions.isEmpty()) {
+            return PartitionSectionCsvService.CsvExport.empty();
+        }
+        try {
+            return partitionSectionCsvService
+                    .writePartitionCsvs(taskId, new java.io.File(taskDir), partitions);
+        } catch (Exception e) {
+            log.warn("[workflow] 分区断面详情 CSV 导出失败（不影响报告）: {}", e.getMessage(), e);
+            return PartitionSectionCsvService.CsvExport.empty();
+        }
     }
 
     // ========== 图表收集（逐步落库，支持断点续跑） ==========
@@ -513,14 +902,44 @@ public class ReportWorkflowService {
             if (!"result".equals(result.getType())) {
                 continue;
             }
-            String path = MarkdownReportService.extractFilePath(result.getContent());
-            if (path == null || containsPath(charts, path)) {
-                continue;
+            // 先收分区边界（分幅出图的结果里带「分区明细(JSON)」一行），
+            // 后面的图表才能按分区打标；非分幅结果这里是无操作。
+            capturePartitions(state, result.getContent());
+            // 分幅出图一次返回 N 条路径（r0c0…r0c4）→ **每幅各收一条图表记录**。
+            // 只取第一条的话：附录会少 N-1 张图，而且那一条的路径还容易粘上
+            // 紧随其后的「分区明细(JSON)」行而变成坏链接。
+            for (String path : MarkdownReportService.extractFilePaths(result.getContent())) {
+                if (containsPath(charts, path)) {
+                    continue;
+                }
+                Map<String, String> chart = new LinkedHashMap<>();
+                chart.put("tool", tool);
+                chart.put("result", filePathJson(path));
+                appendPartitionTag(chart, state, path);
+                charts.add(chart);
             }
-            charts.add(Map.of("tool", tool, "result", "{\"file_path\":\"" + path + "\"}"));
         }
         if (!charts.isEmpty()) {
             state.context.put("charts", charts);
+        }
+    }
+
+    /**
+     * 子图文件 → 分区标签。报告附录据此把每张地图归到它所属的分区名下，
+     * 与正文的分区小节一一对应。非分幅的图表匹配不到分区，保持原样。
+     */
+    private static void appendPartitionTag(Map<String, String> chart, WorkflowState state, String path) {
+        String fileName = new java.io.File(path).getName();
+        List<Map<String, Object>> partitions = readPartitions(state);
+        for (int i = 0; i < partitions.size(); i++) {
+            Map<String, Object> partition = partitions.get(i);
+            if (fileName.equals(String.valueOf(partition.get("file_name")))) {
+                chart.put("partitionKey", partitionKey(partition));
+                // 序号与正文「分区 N」对齐：partitions 与子图同为行优先顺序
+                chart.put("partitionIndex", String.valueOf(i + 1));
+                chart.put("partitionLabel", partitionLabel(partition));
+                return;
+            }
         }
     }
 
@@ -560,6 +979,24 @@ public class ReportWorkflowService {
                 .anyMatch(chart -> chart.get("result") != null && chart.get("result").contains(path));
     }
 
+    /**
+     * 图表路径落库用的 {@code {"file_path":"…"}}。
+     *
+     * <p>**必须走 JSON 序列化**，不能拼字符串：一旦路径里混进引号（例如尾部粘上了
+     * 「分区明细(JSON)：[{…}]」），拼出来的就不是合法 JSON，下游重新解析会在第一个
+     * 引号处截断，产出一条不存在的图片路径。
+     */
+    private String filePathJson(String path) {
+        try {
+            return json.writeValueAsString(Map.of("file_path", path));
+        } catch (Exception e) {
+            // 兜底也必须转义，否则又回到「路径里一个引号就把 JSON 截断」的老问题
+            return "{\"file_path\":\""
+                    + path.replace("\\", "\\\\").replace("\"", "\\\"")
+                    + "\"}";
+        }
+    }
+
     private List<Map<String, String>> collectCharts(WorkflowState state) {
         List<Map<String, String>> charts = contextCharts(state);
         if (!charts.isEmpty()) {
@@ -568,15 +1005,15 @@ public class ReportWorkflowService {
         // 兼容旧逻辑：从中间件全量日志提取（新流程每步已落库，正常不会走到这里）
         for (String p : extractPathsFromMiddleware(traceMiddleware, "step2_gen_distribution", "generate_risk_distribution_map")) {
             charts.add(Map.of("tool", "generate_risk_distribution_map",
-                    "result", "{\"file_path\":\"" + p + "\"}"));
+                    "result", filePathJson(p)));
         }
         for (String p : extractPathsFromMiddleware(traceMiddleware, "step5_gen_charts", "generate_scour_heatmap")) {
             charts.add(Map.of("tool", "generate_scour_heatmap",
-                    "result", "{\"file_path\":\"" + p + "\"}"));
+                    "result", filePathJson(p)));
         }
         for (String p : extractPathsFromMiddleware(traceMiddleware, "step5_gen_charts", "generate_section_comparison_chart")) {
             charts.add(Map.of("tool", "generate_section_comparison_chart",
-                    "result", "{\"file_path\":\"" + p + "\"}"));
+                    "result", filePathJson(p)));
         }
         log.info("[workflow] collectCharts found {} chart(s)", charts.size());
         return charts;
@@ -595,11 +1032,12 @@ public class ReportWorkflowService {
             ReasoningTraceMiddleware.ThoughtLogEntry result = entries.get(i + 1);
             if (!"result".equals(result.getType())) continue;
 
-            String path = MarkdownReportService.extractFilePath(result.getContent());
-            if (path != null) {
-                paths.add(path);
-            } else {
+            // 一次工具调用可能产出多幅（分幅出图）→ 全部收下
+            List<String> found = MarkdownReportService.extractFilePaths(result.getContent());
+            if (found.isEmpty()) {
                 log.warn("[workflow] cannot extract path from middleware result: {}", result.getContent());
+            } else {
+                paths.addAll(found);
             }
         }
         return paths;
@@ -652,7 +1090,11 @@ public class ReportWorkflowService {
 
     // ========== 内部数据类 ==========
 
-    private static class WorkflowState {
+    /**
+     * 工作流状态。可见性放宽为包级：分区汇总（{@link #buildPartitionSummary}）
+     * 需要能被单元测试直接驱动，否则这块逻辑只能靠跑完整工作流才能验证。
+     */
+    static class WorkflowState {
         final StepState[] stepStates;
         final Map<String, Object> context = new LinkedHashMap<>();
         volatile String lastError;

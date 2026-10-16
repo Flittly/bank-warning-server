@@ -1,6 +1,7 @@
 package com.yangtze.bankwarning.controller;
 
 import com.yangtze.bankwarning.ai.security.SkillPathGuard;
+import com.yangtze.bankwarning.ai.service.ReportPackageService;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
@@ -35,6 +36,21 @@ public class ReportsController {
     @Value("${app.ai.visualization.script-dir:../bank-model-server}")
     private String scriptDir;
 
+    private final ReportPackageService reportPackageService;
+
+    public ReportsController(ReportPackageService reportPackageService) {
+        this.reportPackageService = reportPackageService;
+    }
+
+    /**
+     * 导出报告。
+     *
+     * <p>报告按经纬度分幅生成时，本次任务的输出目录里还留着各分区的断面详情 CSV
+     * （见 {@code PartitionSectionCsvService}）。此时导出返回一个 zip：
+     * {@code 报告.docx + 分区1_断面详情.csv + … + 分区N_断面详情.csv}，
+     * 让「报告」与其各分区断面详情是同一次导出的产物。
+     * 没有分区 CSV（不分幅 / 老报告）时行为与历史版本一致——直接返回 docx。
+     */
     @GetMapping("/reports/{filename}/export")
     public ResponseEntity<byte[]> exportReport(@PathVariable String filename) {
         File mdFile;
@@ -75,11 +91,26 @@ public class ReportsController {
                 return ResponseEntity.status(500).body(("导出失败: " + out).getBytes(StandardCharsets.UTF_8));
             }
             byte[] docx = Files.readAllBytes(docxFile);
+            File reportDir = reportPackageService.resolveReportDir(new File(outputDir), safeName);
+            List<File> sectionCsvs = reportPackageService.listPartitionCsvs(reportDir);
+            byte[] zip = reportPackageService.zipWithCsvs(
+                    safeName.replace(".md", ".docx"), docx, sectionCsvs);
             Files.deleteIfExists(docxFile);
             Files.deleteIfExists(logFile);
             Files.deleteIfExists(tmpDir);
+
+            if (zip != null) {
+                String zipName = safeName.replace(".md", "_导出包.zip");
+                log.info("[reports] 导出报告包：{}（含 {} 个分区断面详情 CSV）", zipName, sectionCsvs.size());
+                return ResponseEntity.ok()
+                    .header(HttpHeaders.CONTENT_DISPOSITION, ReportPackageService.contentDisposition(zipName))
+                    .header("X-Section-Csv-Count", String.valueOf(sectionCsvs.size()))
+                    .contentType(MediaType.parseMediaType("application/zip"))
+                    .body(zip);
+            }
             return ResponseEntity.ok()
-                .header(HttpHeaders.CONTENT_DISPOSITION, "attachment; filename=\"" + safeName.replace(".md", ".docx") + "\"")
+                .header(HttpHeaders.CONTENT_DISPOSITION,
+                        ReportPackageService.contentDisposition(safeName.replace(".md", ".docx")))
                 .contentType(MediaType.parseMediaType("application/vnd.openxmlformats-officedocument.wordprocessingml.document"))
                 .body(docx);
         } catch (Exception e) {
@@ -152,19 +183,12 @@ public class ReportsController {
         boolean deleted = file.delete();
         log.info("[reports] 报告文件删除: {} -> {}", file.getName(), deleted);
 
-        // 2. 同步清理关联的图片目录（格式: report_{taskId}_{timestamp}）
-        java.util.regex.Matcher m = FILENAME_PTN.matcher(file.getName());
-        if (m.matches()) {
-            String taskId = m.group(1);
-            String ts = m.group(2);
-            String imageDirName = "report_" + taskId + "_" + ts;
-            File imageDir = new File(outputDir, imageDirName);
-            // 图片目录同样限定在 outputDir 之内，避免组合出的名字越界
-            if (SkillPathGuard.isWithin(new File(outputDir).toPath(), imageDir.toPath())
-                    && imageDir.exists() && imageDir.isDirectory()) {
-                boolean dirDeleted = deleteDirectory(imageDir);
-                log.info("[reports] 图片目录删除: {} -> {}", imageDir.getAbsolutePath(), dirDeleted);
-            }
+        // 2. 同步清理关联的输出目录（子图 + 分区断面详情 CSV；格式 report_{taskId}_{timestamp}）
+        File reportDir = reportPackageService.resolveReportDir(new File(outputDir), file.getName());
+        if (reportDir != null) {
+            boolean dirDeleted = deleteDirectory(reportDir);
+            log.info("[reports] 报告输出目录删除（含子图与分区 CSV）: {} -> {}",
+                    reportDir.getAbsolutePath(), dirDeleted);
         }
 
         return Map.of("success", deleted, "filename", file.getName(), "deleted", deleted);

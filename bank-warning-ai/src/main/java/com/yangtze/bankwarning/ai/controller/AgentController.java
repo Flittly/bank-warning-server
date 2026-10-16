@@ -54,11 +54,34 @@ public class AgentController {
         this.knowledgeService = knowledgeService;
     }
 
+    /**
+     * 生成任务风险评估报告。
+     *
+     * <p>请求体（可选）：{@code {"splitRows":2,"splitCols":2,"splitTiles":"[{...}]"}}。
+     * 分幅语义、校验与出图接口 {@code /viz/risk-map/batch} **完全一致**（复用
+     * {@code VisualizationService.validateSplitConfig}）：三段全空 = 不分幅，
+     * 报告结构与历史版本一致。
+     *
+     * <p>非法的分幅参数在起工作流之前就返回 error，不会白跑 Step 1。
+     */
     @PostMapping("/report/task/{task_id}")
-    public Map<String, Object> generateTaskReport(@PathVariable("task_id") String taskId) {
-        log.info("[api] workflow report for task={}", taskId);
+    public Map<String, Object> generateTaskReport(
+            @PathVariable("task_id") String taskId,
+            @RequestBody(required = false) Map<String, Object> body) {
+        Integer splitRows;
+        Integer splitCols;
         try {
-            String report = reportWorkflow.executeTaskReport(taskId);
+            splitRows = SplitParams.asInteger(body == null ? null : body.get("splitRows"));
+            splitCols = SplitParams.asInteger(body == null ? null : body.get("splitCols"));
+        } catch (IllegalArgumentException e) {
+            return Map.of("success", false, "taskId", taskId, "error", e.getMessage());
+        }
+        String splitTiles = SplitParams.asString(body == null ? null : body.get("splitTiles"));
+        log.info("[api] workflow report for task={}, split={}x{}, tiles={}",
+                taskId, splitRows, splitCols,
+                splitTiles == null || splitTiles.isBlank() ? "无" : "自定义");
+        try {
+            String report = reportWorkflow.executeTaskReport(taskId, splitRows, splitCols, splitTiles);
             Map<String, Object> result = new HashMap<>();
             result.put("success", true);
             result.put("taskId", taskId);
@@ -72,7 +95,14 @@ public class AgentController {
             result.put("success", false);
             result.put("taskId", taskId);
             result.put("error", e.getMessage());
-            result.put("progress", reportWorkflow.getProgress(taskId));
+            // 进度只是「附加信息」：它自身再失败也不能把已捕获的真实错误顶掉，
+            // 否则会被 Spring 转成无 JSON 的 500，前端只能看到解析失败，
+            // 真正的报错原因（本次即 pgjdbc 的 SQL 异常）就被掩盖了。
+            try {
+                result.put("progress", reportWorkflow.getProgress(taskId));
+            } catch (Exception progressError) {
+                log.warn("[api] 附带进度查询失败（忽略）: {}", progressError.getMessage());
+            }
             return result;
         }
     }
