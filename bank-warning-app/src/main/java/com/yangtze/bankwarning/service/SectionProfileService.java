@@ -32,7 +32,7 @@ public class SectionProfileService {
         this.modelGatewayService = modelGatewayService;
     }
 
-    public void saveForSection(String taskCode, Map<String, Object> section) {
+    public void saveForSection(String taskId, Map<String, Object> section) {
         String sectionId = String.valueOf(section.get("section_id"));
         Map<String, Object> payload = buildSectionViewPayload(section);
         Map<String, Object> sectionViewResult = modelGatewayService.runLegacyModelAndWaitForCase(
@@ -47,7 +47,7 @@ public class SectionProfileService {
         Map<String, Object> profileData = buildProfileData(sectionJson, result.get("interval"));
 
         businessStoreService.saveSectionProfile(
-                taskCode,
+                taskId,
                 sectionId,
                 String.valueOf(section.get("section_name")),
                 String.valueOf(section.get("region_code")),
@@ -60,7 +60,7 @@ public class SectionProfileService {
                 countPoints(sectionJson.get("points")),
                 profileData,
                 castMap(section.get("geometry")));
-        log.info("[section-profile] saved, taskCode={}, sectionId={}, caseId={}", taskCode, sectionId, caseId);
+        log.info("[section-profile] saved, taskId={}, sectionId={}, caseId={}", taskId, sectionId, caseId);
     }
 
     private Map<String, Object> buildSectionViewPayload(Map<String, Object> section) {

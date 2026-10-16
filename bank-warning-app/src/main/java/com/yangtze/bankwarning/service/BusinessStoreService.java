@@ -103,18 +103,21 @@ public class BusinessStoreService {
 
     public TaskResponse saveTask(TaskPayload payload, boolean overwrite) {
         Long userId = SecurityUtils.getCurrentUserIdForDataFilter();
-        if (overwrite) {
-            TaskPO existing = taskMapper.selectByTaskId(payload.taskId(), userId);
+        String taskId = payload.taskId();
+        if (overwrite && taskId != null) {
+            TaskPO existing = taskMapper.selectByTaskId(taskId, userId);
             if (existing != null) {
                 TaskPO po = toTaskPO(payload);
+                po.setTaskId(taskId);
                 taskMapper.update(po);
-                return TaskResponse.from(taskMapper.selectByTaskId(payload.taskId(), userId));
+                return TaskResponse.from(taskMapper.selectByTaskId(taskId, userId));
             }
         }
         TaskPO po = toTaskPO(payload);
+        po.setTaskId(taskId);
         po.setUserId(SecurityUtils.getCurrentUserId());
         taskMapper.insert(po);
-        return TaskResponse.from(taskMapper.selectByTaskId(payload.taskId(), userId));
+        return TaskResponse.from(taskMapper.selectByTaskId(taskId, userId));
     }
 
     public List<TaskResponse> listTasks() {
@@ -222,13 +225,12 @@ public class BusinessStoreService {
             return getSection(payload.sectionId());
         }
 
-        String taskCode = getTaskCode(taskId);
         Integer basicParamId = payload.basicParamId();
         Map<String, Object> baseParams = inheritFromBasicParam && basicParamId != null
                 ? toMap(basicParamMapper.selectById(basicParamId, userId))
                 : new LinkedHashMap<>();
         Map<String, Object> merged = mergeSectionParams(baseParams, payload);
-        SectionPO po = toSectionPO(taskCode, basicParamId, merged, payload);
+        SectionPO po = toSectionPO(taskId, basicParamId, merged, payload);
         po.setUserId(SecurityUtils.getCurrentUserId());
         sectionMapper.insert(po);
             return SectionResponse.from(sectionMapper.selectBySectionId(payload.sectionId(), userId));
@@ -236,8 +238,7 @@ public class BusinessStoreService {
 
     public List<SectionResponse> listSections(String taskId, String bankId) {
         Long userId = SecurityUtils.getCurrentUserIdForDataFilter();
-        String taskCode = taskId == null ? null : getTaskCode(taskId);
-        return sectionMapper.selectByTaskIdAndBankId(taskCode, bankId, userId).stream().map(SectionResponse::from).collect(Collectors.toList());
+        return sectionMapper.selectByTaskIdAndBankId(taskId, bankId, userId).stream().map(SectionResponse::from).collect(Collectors.toList());
     }
 
     public SectionResponse getSection(String sectionId) {
@@ -323,19 +324,17 @@ public class BusinessStoreService {
 
     public Map<String, Integer> clearTaskData(String taskId) {
         Long userId = SecurityUtils.getCurrentUserIdForDataFilter();
-        String taskCode = getTaskCode(taskId);
-        int resultCount = riskResultMapper.countByTaskId(taskCode, userId);
-        int sectionCount = sectionMapper.countByTaskId(taskCode, userId);
-        riskResultMapper.deleteByTaskId(taskCode, userId);
-        sectionMapper.deleteByTaskId(taskCode, userId);
+        int resultCount = riskResultMapper.countByTaskId(taskId, userId);
+        int sectionCount = sectionMapper.countByTaskId(taskId, userId);
+        riskResultMapper.deleteByTaskId(taskId, userId);
+        sectionMapper.deleteByTaskId(taskId, userId);
         return Map.of("sections", sectionCount, "results", resultCount);
     }
 
     public void clearTaskResults(String taskId) {
         Long userId = SecurityUtils.getCurrentUserIdForDataFilter();
-        String taskCode = getTaskCode(taskId);
-        riskResultMapper.deleteByTaskId(taskCode, userId);
-        sectionProfileMapper.deleteByTaskId(taskCode, userId);
+        riskResultMapper.deleteByTaskId(taskId, userId);
+        sectionProfileMapper.deleteByTaskId(taskId, userId);
     }
 
     public void batchUpdateSectionParams(List<String> sectionIds, Map<String, Object> params) {
@@ -348,8 +347,7 @@ public class BusinessStoreService {
 
     public List<RiskResultResponse> listRiskResults(String taskId, String bankId, String regionCode) {
         Long userId = SecurityUtils.getCurrentUserIdForDataFilter();
-        String taskCode = taskId == null ? null : getTaskCode(taskId);
-        return riskResultMapper.selectByTaskIdAndBankIdAndRegionCode(taskCode, bankId, regionCode, userId)
+        return riskResultMapper.selectByTaskIdAndBankIdAndRegionCode(taskId, bankId, regionCode, userId)
                 .stream().map(RiskResultResponse::from).collect(Collectors.toList());
     }
 
@@ -412,7 +410,7 @@ public class BusinessStoreService {
 
     public List<SectionProfileResponse> listSectionProfiles(String taskId) {
         Long userId = SecurityUtils.getCurrentUserIdForDataFilter();
-        return sectionProfileMapper.selectByTaskId(getTaskCode(taskId), userId)
+        return sectionProfileMapper.selectByTaskId(taskId, userId)
                 .stream().map(SectionProfileResponse::from).collect(Collectors.toList());
     }
 
@@ -459,13 +457,8 @@ public class BusinessStoreService {
 
     // ==================== Helper Methods ====================
 
-    public String getTaskCode(String taskId) {
-        TaskResponse t = getTask(taskId);
-        return t == null ? null : t.taskId();
-    }
-
     public List<Map<String, Object>> getSectionsByTask(String taskId) {
-        return sectionMapper.selectByTaskIdAndBankId(getTaskCode(taskId), null, SecurityUtils.getCurrentUserIdForDataFilter())
+        return sectionMapper.selectByTaskIdAndBankId(taskId, null, SecurityUtils.getCurrentUserIdForDataFilter())
                 .stream().map(this::toMap).collect(Collectors.toList());
     }
 
@@ -571,7 +564,6 @@ public class BusinessStoreService {
 
     private TaskPO toTaskPO(TaskPayload payload) {
         TaskPO po = new TaskPO();
-        po.setTaskId(payload.taskId());
         po.setTaskName(payload.taskName());
         po.setBankIds(writeJson(payload.bankIds()));
         po.setDescription(payload.description());
@@ -600,9 +592,9 @@ public class BusinessStoreService {
         return po;
     }
 
-    private SectionPO toSectionPO(String taskCode, Integer basicParamId, Map<String, Object> merged, SectionPayload payload) {
+    private SectionPO toSectionPO(String taskId, Integer basicParamId, Map<String, Object> merged, SectionPayload payload) {
         SectionPO po = new SectionPO();
-        po.setTaskId(taskCode);
+        po.setTaskId(taskId);
         po.setSectionId(payload.sectionId());
         po.setSectionName(payload.sectionName());
         po.setBankId(payload.bankId());

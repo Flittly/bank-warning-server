@@ -40,7 +40,7 @@
     </resultMap>
 
     <select id="selectByTaskIdAndBankId" resultMap="SectionResultMap">
-        SELECT cs.*, t.task_id AS task_code, t.task_name
+        SELECT cs.*
         FROM cross_sections cs
         JOIN tasks t ON cs.task_id = t.task_id
         WHERE cs.deleted_at IS NULL AND t.deleted_at IS NULL AND (cs.user_id = #{userId} OR #{userId, jdbcType=BIGINT} IS NULL)
@@ -54,7 +54,7 @@
     </select>
 
     <select id="selectBySectionId" resultMap="SectionResultMap">
-        SELECT cs.*, t.task_id AS task_code, t.task_name
+        SELECT cs.*
         FROM cross_sections cs
         JOIN tasks t ON cs.task_id = t.task_id
         WHERE cs.section_id = #{sectionId} AND cs.deleted_at IS NULL AND t.deleted_at IS NULL AND (cs.user_id = #{userId} OR #{userId, jdbcType=BIGINT} IS NULL)

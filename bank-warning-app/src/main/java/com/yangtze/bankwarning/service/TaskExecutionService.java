@@ -62,9 +62,8 @@ public class TaskExecutionService {
         taskCancelRegistry.register(taskId);
 
         try {
-            String taskCode = businessStoreService.getTaskCode(taskId);
             List<Map<String, Object>> sections = businessStoreService.getSectionsByTask(taskId);
-            log.info("[task-run] loaded sections, taskId={}, taskCode={}, sectionCount={}", taskId, taskCode, sections.size());
+            log.info("[task-run] loaded sections, taskId={}, sectionCount={}", taskId, sections.size());
             List<Map<String, Object>> results = new ArrayList<>();
             List<Map<String, Object>> failures = new ArrayList<>();
 
@@ -81,8 +80,8 @@ public class TaskExecutionService {
                 String sectionId = String.valueOf(section.get("section_id"));
                 try {
                     validateSectionGeometry(taskId, sectionId, section.get("section_geometry"));
-                    log.info("[task-run] processing section, taskId={}, taskCode={}, sectionId={}, sectionName={}",
-                            taskId, taskCode, sectionId, section.get("section_name"));
+                    log.info("[task-run] processing section, taskId={}, sectionId={}, sectionName={}",
+                            taskId, sectionId, section.get("section_name"));
                     Map<String, Object> payload = buildRiskLevelPayload(section);
                     log.info("[task-run] built model payload, taskId={}, sectionId={}, payloadKeys={}", taskId, sectionId, payload.keySet());
                     Map<String, Object> rawResult = modelGatewayService.runLegacyModelAndWait(
@@ -96,10 +95,10 @@ public class TaskExecutionService {
                     Integer riskLevel = toRiskLevel(rawResult.get("risk-level"));
                     log.info("[task-run] parsed risk level, taskId={}, sectionId={}, riskLevel={}", taskId, sectionId, riskLevel);
 
-                    sectionProfileService.saveForSection(taskCode, section);
+                    sectionProfileService.saveForSection(taskId, section);
 
                     businessStoreService.saveRiskResult(
-                            taskCode,
+                            taskId,
                             sectionId,
                             String.valueOf(section.get("section_name")),
                             String.valueOf(section.get("region_code")),
@@ -107,7 +106,7 @@ public class TaskExecutionService {
                             riskLevel,
                             rawResult,
                             castMap(section.get("geometry")));
-                    log.info("[task-run] saved risk result, taskId={}, taskCode={}, sectionId={}", taskId, taskCode, sectionId);
+                    log.info("[task-run] saved risk result, taskId={}, sectionId={}", taskId, sectionId);
 
                     Map<String, Object> result = new LinkedHashMap<>();
                     result.put("section_id", section.get("section_id"));
@@ -170,9 +169,8 @@ public class TaskExecutionService {
                 businessStoreService.markTaskPartialFailed(taskId, joinFailureMessages(failures));
             }
 
-            log.info("[task-run] task finished, taskId={}, taskCode={}, successCount={}, failureCount={}, finalStatus={}",
+            log.info("[task-run] task finished, taskId={}, successCount={}, failureCount={}, finalStatus={}",
                     taskId,
-                    taskCode,
                     results.size(),
                     failures.size(),
                     finalStatus);
@@ -315,10 +313,9 @@ public class TaskExecutionService {
         businessStoreService.markTaskRunning(taskId);
 
         try {
-            String taskCode = businessStoreService.getTaskCode(taskId);
             List<Map<String, Object>> sections = businessStoreService.getSectionsByTask(taskId);
-            log.info("[task-submit-kafka] 加载断面完成 taskId={} taskCode={} sectionCount={}",
-                    taskId, taskCode, sections.size());
+            log.info("[task-submit-kafka] 加载断面完成 taskId={} sectionCount={}",
+                    taskId, sections.size());
 
             // 4. 生成 runId
             String runId = taskRunStatePort.createRun(taskId, sections.size());
