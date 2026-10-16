@@ -27,6 +27,13 @@ public class CorsConfig {
 
     @Bean
     public CorsFilter corsFilter() {
+        UrlBasedCorsConfigurationSource source = new UrlBasedCorsConfigurationSource();
+        source.registerCorsConfiguration("/**", buildConfiguration());
+        return new CorsFilter(source);
+    }
+
+    /** 包级可见：让单测能直接断言暴露头等契约，不必真跑一遍过滤器。 */
+    CorsConfiguration buildConfiguration() {
         CorsConfiguration configuration = new CorsConfiguration();
         // 必须用 allowedOriginPatterns 而不是 setAllowedOrigins：
         // 1) setAllowedOrigins 只接受字面量精确匹配（通配符仅 "*" 且不能与凭证共存），
@@ -43,11 +50,12 @@ public class CorsConfig {
         );
         configuration.setAllowedMethods(List.of("GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"));
         configuration.setAllowedHeaders(List.of("*"));
+        // 非「简单响应头」默认不暴露给前端 JS：报告导出要按 Content-Disposition
+        // 决定下载名（分幅报告导出的是 .zip 而不是 .docx），并读 X-Section-Csv-Count
+        // 提示压缩包里带了几个分区 CSV。跨域部署（前端与后端不同源）时必须显式暴露。
+        configuration.setExposedHeaders(List.of("Content-Disposition", "X-Section-Csv-Count"));
         configuration.setAllowCredentials(true);
         configuration.setMaxAge(3600L);
-
-        UrlBasedCorsConfigurationSource source = new UrlBasedCorsConfigurationSource();
-        source.registerCorsConfiguration("/**", configuration);
-        return new CorsFilter(source);
+        return configuration;
     }
 }
