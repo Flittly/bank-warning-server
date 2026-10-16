@@ -15,6 +15,18 @@ import java.util.Optional;
  *
  * 启动时自举建表（与 migration/V9 脚本一致）；同一 task 只能有一个
  * 活动（PENDING/RUNNING）运行，用 PostgreSQL 部分唯一索引保证。
+ *
+ * <p><b>行级可见性约定</b>：所有语句都用 {@code (user_id = ? OR ... IS NULL)} 表达
+ * 「传 null = 管理员，不加用户过滤」，与 MyBatis 侧
+ * {@code #{userId, jdbcType=BIGINT}} 的语义一致。
+ *
+ * <p><b>那个 {@code CAST(? AS BIGINT)} 不能删</b>：pgjdbc 对「无类型」的 NULL 参数
+ * 会以 OID 0（unspecified）下发，而 PostgreSQL 无法据此推断 {@code $n IS NULL}
+ * 里 {@code $n} 的类型，会直接抛
+ * {@code PSQLException: 错误: 无法确定参数 $n 的数据类型}。
+ * 显式 CAST 后服务端即可完成推断；MyBatis 侧靠显式 jdbcType 达到同样效果。
+ * 历史上这里没有 CAST 却一直没暴露 —— 因为管理员权限曾被
+ * {@code SecurityUtils} 错判成普通用户，dataFilter 永远非 null，走了 {@code user_id = ?} 那一支。
  */
 @Component
 public class JdbcReportRunStore implements ReportRunStore {
@@ -76,7 +88,7 @@ public class JdbcReportRunStore implements ReportRunStore {
     public Optional<ReportRun> findLatestByTaskId(String taskId, Long userId) {
         return jdbcTemplate.query(
                 "SELECT " + SELECT_COLUMNS
-                        + "FROM ai_report_runs WHERE task_id = ? AND (user_id = ? OR ? IS NULL) "
+                        + "FROM ai_report_runs WHERE task_id = ? AND (user_id = ? OR CAST(? AS BIGINT) IS NULL) "
                         + "ORDER BY id DESC LIMIT 1",
                 ROW_MAPPER, taskId, userId, userId).stream().findFirst();
     }
@@ -84,7 +96,7 @@ public class JdbcReportRunStore implements ReportRunStore {
     private Optional<ReportRun> findByRunId(String runId, Long userId) {
         return jdbcTemplate.query(
                 "SELECT " + SELECT_COLUMNS
-                        + "FROM ai_report_runs WHERE run_id = ? AND (user_id = ? OR ? IS NULL) LIMIT 1",
+                        + "FROM ai_report_runs WHERE run_id = ? AND (user_id = ? OR CAST(? AS BIGINT) IS NULL) LIMIT 1",
                 ROW_MAPPER, runId, userId, userId).stream().findFirst();
     }
 
@@ -94,7 +106,7 @@ public class JdbcReportRunStore implements ReportRunStore {
                 UPDATE ai_report_runs
                    SET status = ?, started_at = COALESCE(started_at, CURRENT_TIMESTAMP),
                        updated_at = CURRENT_TIMESTAMP
-                 WHERE run_id = ? AND status IN (?, ?) AND (user_id = ? OR ? IS NULL)
+                 WHERE run_id = ? AND status IN (?, ?) AND (user_id = ? OR CAST(? AS BIGINT) IS NULL)
                 """, STATUS_RUNNING, runId, STATUS_PENDING, STATUS_FAILED, userId, userId) > 0;
     }
 
@@ -105,7 +117,7 @@ public class JdbcReportRunStore implements ReportRunStore {
                 UPDATE ai_report_runs
                    SET current_step = ?, step_states_json = ?, context_json = ?,
                        updated_at = CURRENT_TIMESTAMP
-                 WHERE run_id = ? AND status = ? AND (user_id = ? OR ? IS NULL)
+                 WHERE run_id = ? AND status = ? AND (user_id = ? OR CAST(? AS BIGINT) IS NULL)
                 """, currentStep, stepStatesJson, contextJson, runId, STATUS_RUNNING, userId, userId);
     }
 
@@ -115,7 +127,7 @@ public class JdbcReportRunStore implements ReportRunStore {
                 UPDATE ai_report_runs
                    SET status = ?, last_error = ?, completed_at = CURRENT_TIMESTAMP,
                        updated_at = CURRENT_TIMESTAMP
-                 WHERE run_id = ? AND status = ? AND (user_id = ? OR ? IS NULL)
+                 WHERE run_id = ? AND status = ? AND (user_id = ? OR CAST(? AS BIGINT) IS NULL)
                 """, STATUS_FAILED, error, runId, STATUS_RUNNING, userId, userId);
     }
 
@@ -125,7 +137,7 @@ public class JdbcReportRunStore implements ReportRunStore {
                 UPDATE ai_report_runs
                    SET status = ?, report_file_name = ?, completed_at = CURRENT_TIMESTAMP,
                        updated_at = CURRENT_TIMESTAMP
-                 WHERE run_id = ? AND status = ? AND (user_id = ? OR ? IS NULL)
+                 WHERE run_id = ? AND status = ? AND (user_id = ? OR CAST(? AS BIGINT) IS NULL)
                 """, STATUS_FINISHED, reportFileName, runId, STATUS_RUNNING, userId, userId);
     }
 

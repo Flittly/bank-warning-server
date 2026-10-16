@@ -38,7 +38,15 @@ public class SecurityUtils {
 
     /**
      * 获取当前用户ID用于数据过滤。
-     * ADMIN返回null（SQL中 #{userId} IS NULL 可看到全部），普通用户返回自己的ID。
+     * 管理员（ADMIN / SUPER_ADMIN）返回 null —— SQL 中 #{userId} IS NULL 即看全部；
+     * 普通用户返回自己的 ID，只看自己的数据。
+     *
+     * 注意：这里必须同时判 ROLE_ADMIN 与 ROLE_SUPER_ADMIN。
+     * UserDetailsServiceImpl 发放的权限是 "ROLE_" + users.role，而 admin 账号的 role 是
+     * SUPER_ADMIN（权限 = ROLE_SUPER_ADMIN）。JWT 过滤器直接注入该单一权限、不走
+     * GrantedAuthoritiesMapper，因此 RoleHierarchy（ROLE_SUPER_ADMIN > ROLE_ADMIN）不会在
+     * getAuthorities() 里展开。历史上只精确匹配 ROLE_ADMIN，导致 SUPER_ADMIN 被当作普通用户，
+     * 只能看到自己名下的数据（表现为"资源树里的 DEM 少了一大半"）。
      */
     public static Long getCurrentUserIdForDataFilter() {
         Authentication authentication = SecurityContextHolder.getContext().getAuthentication();
@@ -46,7 +54,7 @@ public class SecurityUtils {
             CustomUserDetails userDetails = (CustomUserDetails) authentication.getPrincipal();
             boolean isAdmin = userDetails.getAuthorities().stream()
                     .map(GrantedAuthority::getAuthority)
-                    .anyMatch(auth -> auth.equals("ROLE_ADMIN"));
+                    .anyMatch(auth -> auth.equals("ROLE_ADMIN") || auth.equals("ROLE_SUPER_ADMIN"));
             return isAdmin ? null : userDetails.getUserId();
         }
         return null;
