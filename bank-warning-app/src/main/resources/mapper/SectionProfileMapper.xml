@@ -34,6 +34,19 @@
         ORDER BY id DESC LIMIT 1
     </select>
 
+    <!--
+        重跑任务时"复活"这一行，必须显式把 deleted_at 置回 NULL。
+
+        【为什么】每次运行任务的第一件事是 clearTaskResults() → deleteByTaskId()，
+        把该任务的档案全部软删；随后逐断面 saveForSection() 用本语句写回。
+        但 ON CONFLICT DO UPDATE 只更新列出的字段，**原本漏了 deleted_at** ——
+        结果是数据被整批刷新（updated_at 是本次运行时间），行却仍然"已删除"，
+        于是 selectByTaskId 的 `deleted_at IS NULL` 过滤把它全部挡掉：
+        重跑一次不但不修复，反而必然复现「任务有结果但读不到断面档案」。
+
+        影响面（2026-10-16 实测）：界面侧表现为结果页拿不到 dem_id ⇒ 流场场景
+        无法按任务 DEM 自动匹配，退回内置 68 km 工况（"点了还是老流场范围"）。
+    -->
     <insert id="insertOrUpdate" parameterType="com.yangtze.bankwarning.domain.po.SectionProfilePO" useGeneratedKeys="true" keyProperty="id">
         INSERT INTO section_profiles (
             task_id, section_id, section_name, region_code, bank_id, dem_id,
@@ -56,7 +69,8 @@
             point_count = EXCLUDED.point_count,
             profile_data = EXCLUDED.profile_data,
             updated_at = CURRENT_TIMESTAMP,
-            user_id = EXCLUDED.user_id
+            user_id = EXCLUDED.user_id,
+            deleted_at = NULL
     </insert>
 
     <update id="deleteByTaskId">
