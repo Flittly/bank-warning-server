@@ -33,4 +33,10 @@ public interface TaskMapper {
     int markError(@Param("taskId") String taskId, @Param("errorMessage") String errorMessage, @Param("userId") Long userId);
 
     int markPartialFailed(@Param("taskId") String taskId, @Param("errorMessage") String errorMessage, @Param("userId") Long userId);
+
+    /**
+     * 标记为「已终止」。同样写 run_completed_at —— 前端 {@code isTaskCompleted} 靠它判断收尾，
+     * 结果页的进度轮询据此停下来，否则终止后进度条会一直转。
+     */
+    int markCancelled(@Param("taskId") String taskId, @Param("errorMessage") String errorMessage, @Param("userId") Long userId);
 }

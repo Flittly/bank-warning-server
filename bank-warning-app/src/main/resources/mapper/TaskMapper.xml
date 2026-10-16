@@ -86,4 +86,12 @@
         WHERE task_id = #{taskId} AND deleted_at IS NULL AND (user_id = #{userId} OR #{userId, jdbcType=BIGINT} IS NULL)
     </update>
 
+    <update id="markCancelled">
+        UPDATE tasks
+        SET status = 'cancelled',
+            run_completed_at = CURRENT_TIMESTAMP,
+            error_message = #{errorMessage}
+        WHERE task_id = #{taskId} AND deleted_at IS NULL AND (user_id = #{userId} OR #{userId, jdbcType=BIGINT} IS NULL)
+    </update>
+
 </mapper>

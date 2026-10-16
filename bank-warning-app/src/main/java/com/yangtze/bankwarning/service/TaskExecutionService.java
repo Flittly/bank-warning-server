@@ -28,6 +28,7 @@ public class TaskExecutionService {
     private final TaskRunStatePort taskRunStatePort;
     private final TerrainMappingProperties terrainMappingProperties;
     private final SectionProfileService sectionProfileService;
+    private final TaskCancelRegistry taskCancelRegistry;
 
     @Value("${app.kafka.enabled:false}")
     private boolean kafkaEnabled;
@@ -38,13 +39,15 @@ public class TaskExecutionService {
             TaskDispatchPort taskDispatchPort,
             TaskRunStatePort taskRunStatePort,
             TerrainMappingProperties terrainMappingProperties,
-            SectionProfileService sectionProfileService) {
+            SectionProfileService sectionProfileService,
+            TaskCancelRegistry taskCancelRegistry) {
         this.businessStoreService = businessStoreService;
         this.modelGatewayService = modelGatewayService;
         this.taskDispatchPort = taskDispatchPort;
         this.taskRunStatePort = taskRunStatePort;
         this.terrainMappingProperties = terrainMappingProperties;
         this.sectionProfileService = sectionProfileService;
+        this.taskCancelRegistry = taskCancelRegistry;
     }
 
     public Map<String, Object> runTask(String taskId) {
@@ -54,6 +57,9 @@ public class TaskExecutionService {
         businessStoreService.clearTaskResults(taskId);
         log.info("[task-run] old results cleared, marking running, taskId={}", taskId);
         businessStoreService.markTaskRunning(taskId);
+        // 登记进中断表：从这里开始到 finally 注销为止，本进程"确实在跑"这个任务。
+        // 取消接口靠这张表区分「真在跑（可协作式停）」与「进程已死的僵尸（直接改库收尾）」。
+        taskCancelRegistry.register(taskId);
 
         try {
             String taskCode = businessStoreService.getTaskCode(taskId);
@@ -62,7 +68,16 @@ public class TaskExecutionService {
             List<Map<String, Object>> results = new ArrayList<>();
             List<Map<String, Object>> failures = new ArrayList<>();
 
+            boolean cancelRequested = false;
             for (Map<String, Object> section : sections) {
+                // 协作式取消的唯一检查点：断面之间。刻意不打断正在进行的模型调用 ——
+                // 既保证"已算完的断面结果不丢"，也让停止时机可解释（最迟当前这条算完就停）。
+                if (taskCancelRegistry.isCancelRequested(taskId)) {
+                    cancelRequested = true;
+                    log.info("[task-run] cancel requested, stop before next section, taskId={}, done={}",
+                            taskId, results.size() + failures.size());
+                    break;
+                }
                 String sectionId = String.valueOf(section.get("section_id"));
                 try {
                     validateSectionGeometry(taskId, sectionId, section.get("section_geometry"));
@@ -118,6 +133,31 @@ public class TaskExecutionService {
                 }
             }
 
+            // 终止优先于任何终态。用「或」而不是只看循环里那个布尔量：取消请求可能刚好落在
+            // 最后一次检查之后（循环已正常跑完），此时若不补这一下，本方法返回前写下的
+            // completed / partial_failed 会盖掉取消接口刚写下的 cancelled —— 那就是"假停止"的翻版。
+            if (cancelRequested || taskCancelRegistry.isCancelRequested(taskId)) {
+                int handled = results.size() + failures.size();
+                String cancelMessage = String.format(
+                        "已由用户手动终止：成功 %d 个断面、失败 %d 个，%d 个未处理；已完成的结果全部保留。",
+                        results.size(), failures.size(), Math.max(0, sections.size() - handled));
+                businessStoreService.markTaskCancelled(taskId, cancelMessage);
+                log.info("[task-run] task cancelled, taskId={}, completed={}, failed={}, total={}",
+                        taskId, results.size(), failures.size(), sections.size());
+                return Map.<String, Object>of(
+                        "success", false,
+                        "task_id", taskId,
+                        "status", "cancelled",
+                        "results", results,
+                        "failures", failures,
+                        "summary", Map.of(
+                                "total", sections.size(),
+                                "success", results.size(),
+                                "failed", failures.size(),
+                                "skipped", Math.max(0, sections.size() - handled)
+                        ));
+            }
+
             String finalStatus;
             if (failures.isEmpty()) {
                 finalStatus = "completed";
@@ -151,7 +191,64 @@ public class TaskExecutionService {
             log.error("[task-run] task failed, taskId={}, message={}", taskId, exception.getMessage(), exception);
             businessStoreService.markTaskError(taskId, exception.getMessage());
             throw exception;
+        } finally {
+            // 必须注销：留着的话取消接口会把"其实已经跑完的任务"判成仍在跑（cooperative），
+            // 于是它只置标志、不写库，界面上那个 running 就再也没人收了。
+            taskCancelRegistry.unregister(taskId);
         }
+    }
+
+    /**
+     * 终止一个正在运行的任务。
+     *
+     * <p>两条路径分开处理，这是这个接口唯一需要小心的地方：
+     * <ol>
+     *   <li><b>cooperative</b> —— 中断登记表里有它，说明本进程确实有线程在跑：
+     *       只置标志并立即返回，**由那个循环自己写终态**。刻意不在这里写库，
+     *       是为了保住"终态只有一个写入者"这条不变量（否则两个写入者会互相盖）。</li>
+     *   <li><b>stale</b> —— 登记表里没有它，说明跑它的进程已经不在了（后端重启 / 请求被中断），
+     *       也就是面板上那种挂了几个月的僵尸。此时**必须由本接口收尾**，
+     *       否则它永远停在 running，而且前端还会因为它一直"运行中"而永远轮询。</li>
+     * </ol>
+     */
+    public Map<String, Object> cancelTask(String taskId) {
+        log.info("[task-cancel] cancel requested, taskId={}", taskId);
+        var task = businessStoreService.getTask(taskId);
+        String status = task.status() == null ? "" : task.status().trim();
+
+        if (!"running".equalsIgnoreCase(status)) {
+            log.info("[task-cancel] task is not running, nothing to cancel, taskId={}, status={}", taskId, status);
+            return Map.of(
+                    "success", true,
+                    "task_id", taskId,
+                    "cancel_requested", false,
+                    "mode", "not-running",
+                    "status", status,
+                    "message", "该任务当前不是运行中状态，无需终止");
+        }
+
+        if (taskCancelRegistry.requestCancel(taskId)) {
+            log.info("[task-cancel] cooperative cancel armed, taskId={}", taskId);
+            return Map.of(
+                    "success", true,
+                    "task_id", taskId,
+                    "cancel_requested", true,
+                    "mode", "cooperative",
+                    "status", "running",
+                    "message", "已请求终止：当前断面算完后停止，已完成的结果保留");
+        }
+
+        String staleMessage = "执行进程已不存在（后端可能已重启或请求已中断），"
+                + "本次运行没有产生任何计算结果，已直接标记为终止。";
+        businessStoreService.markTaskCancelled(taskId, staleMessage);
+        log.warn("[task-cancel] stale running task marked cancelled, taskId={}", taskId);
+        return Map.of(
+                "success", true,
+                "task_id", taskId,
+                "cancel_requested", true,
+                "mode", "stale",
+                "status", "cancelled",
+                "message", staleMessage);
     }
 
     private Map<String, Object> buildRiskLevelPayload(Map<String, Object> section) {

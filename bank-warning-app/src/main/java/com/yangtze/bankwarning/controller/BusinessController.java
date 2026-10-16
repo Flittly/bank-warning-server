@@ -115,6 +115,16 @@ public class BusinessController {
         return taskExecutionService.runTask(taskId);
     }
 
+    /**
+     * 终止正在运行的任务。返回体里的 {@code mode} 是给前端区分文案用的：
+     * {@code cooperative}（真在跑，已请求停止）/ {@code stale}（进程已死的僵尸，已直接标记）/
+     * {@code not-running}（本来就没在跑）。
+     */
+    @PostMapping("/tasks/{task_id}/cancel")
+    public Map<String, Object> cancelTask(@PathVariable("task_id") String taskId) {
+        return taskExecutionService.cancelTask(taskId);
+    }
+
     @GetMapping("/tasks/{task_id}/full")
     public Map<String, Object> getTaskFull(@PathVariable("task_id") String taskId) {
         return Map.of("success", true, "task_id", taskId, "data", businessStoreService.getTaskFullData(taskId));

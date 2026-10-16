@@ -157,6 +157,15 @@ public class BusinessStoreService {
         taskMapper.markPartialFailed(taskId, errorMessage, userId);
     }
 
+    /**
+     * 标记任务「已终止」。用于用户主动终止（协作式取消收尾），以及把执行进程已消失的
+     * 僵尸 running 补掉 —— 补僵尸这一步必须由调用方做，因为已经没有任何线程会替它写终态了。
+     */
+    public void markTaskCancelled(String taskId, String errorMessage) {
+        Long userId = SecurityUtils.getCurrentUserIdForDataFilter();
+        taskMapper.markCancelled(taskId, errorMessage, userId);
+    }
+
     public void deleteTask(String taskId) {
         Long userId = SecurityUtils.getCurrentUserIdForDataFilter();
         if (taskMapper.deleteByTaskId(taskId, userId) == 0) {
