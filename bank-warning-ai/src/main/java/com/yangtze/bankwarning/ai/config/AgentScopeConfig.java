@@ -68,8 +68,12 @@ public class AgentScopeConfig {
             @Value("${agentscope.dashscope.api-key:}") String apiKey,
             @Value("${agentscope.dashscope.embedding-model-name:text-embedding-v3}") String modelName,
             @Value("${agentscope.dashscope.embedding-dimensions:1024}") int dimensions) {
+        if (apiKey == null || apiKey.isBlank()) {
+            log.warn("[config] 未配置 agentscope.dashscope.api-key，文本嵌入向量功能禁用（知识库入库/检索将不可用）");
+            return null;
+        }
         log.info("[config] DashScope apiKey={}, modelName={}, dimensions={}",
-                apiKey != null ? apiKey.substring(0, Math.min(8, apiKey.length())) + "..." : "null",
+                apiKey.substring(0, Math.min(8, apiKey.length())) + "...",
                 modelName, dimensions);
         return DashScopeTextEmbedding.builder()
                 .apiKey(apiKey)

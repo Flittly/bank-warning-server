@@ -7,6 +7,7 @@ import io.agentscope.core.rag.store.dto.SearchDocumentDto;
 import io.agentscope.core.message.TextBlock;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.stereotype.Service;
 import reactor.core.publisher.Mono;
 
@@ -24,9 +25,13 @@ public class KnowledgeService {
     private final EmbeddingModel embeddingModel;
     private final VDBStoreBase vectorStore;
 
-    public KnowledgeService(EmbeddingModel embeddingModel, VDBStoreBase vectorStore) {
-        this.embeddingModel = embeddingModel;
-        this.vectorStore = vectorStore;
+    public KnowledgeService(ObjectProvider<EmbeddingModel> embeddingModelProvider,
+                            ObjectProvider<VDBStoreBase> vectorStoreProvider) {
+        this.embeddingModel = embeddingModelProvider.getIfAvailable();
+        this.vectorStore = vectorStoreProvider.getIfAvailable();
+        if (this.embeddingModel == null || this.vectorStore == null) {
+            log.warn("知识库向量检索未启用（缺少 EmbeddingModel 或向量库），入库与检索将被跳过");
+        }
     }
 
     /**
@@ -34,6 +39,10 @@ public class KnowledgeService {
      */
     @SuppressWarnings("deprecation")
     public Mono<Void> addDocuments(List<Document> docs) {
+        if (embeddingModel == null || vectorStore == null) {
+            log.warn("向量检索未启用，跳过 {} 个文档的入库", docs == null ? 0 : docs.size());
+            return Mono.empty();
+        }
         return Mono.fromRunnable(() -> {
             for (Document doc : docs) {
                 try {
@@ -55,6 +64,10 @@ public class KnowledgeService {
      */
     @SuppressWarnings("deprecation")
     public Mono<List<Document>> retrieve(String query, int limit, double scoreThreshold) {
+        if (embeddingModel == null || vectorStore == null) {
+            log.warn("向量检索未启用，返回空结果: {}", query);
+            return Mono.just(List.of());
+        }
         return Mono.fromCallable(() -> {
             try {
                 var queryBlock = TextBlock.builder().text(query).build();
