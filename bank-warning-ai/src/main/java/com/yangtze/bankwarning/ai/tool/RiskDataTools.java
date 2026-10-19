@@ -56,16 +56,30 @@ public class RiskDataTools {
             else if (level >= 2) counts[1]++;
             else counts[2]++;
 
-            String sectionName = String.valueOf(row.getOrDefault("section_name", "未知"));
-            String riskValue = String.valueOf(row.getOrDefault("risk_value", "无"));
-            String bankName = String.valueOf(row.getOrDefault("bank_name", ""));
-            return String.format("  - 断面：%s（%s）| 风险等级：%d | 评估指标：%s | 坐标：%s",
-                    sectionName, bankName, level, riskValue, coordText(row));
+            return sectionLine(row, level);
         }).collect(Collectors.joining("\n"));
 
         return String.format(
                 "任务 %s 的风险评估结果（共 %d 个断面）：\n高风险：%d 个 | 中风险：%d 个 | 低风险：%d 个\n\n详细数据：\n%s",
                 taskId, rows.size(), counts[0], counts[1], counts[2], details);
+    }
+
+    /**
+     * 单条断面行的文本形式。
+     *
+     * <p>**这是订阅契约的生产端**：报告工作流 Step 1 让模型原样返回本输出，随后
+     * {@code ReportWorkflowService.parseRiskRows} 按正则把 名称 / ID / 等级 / 坐标
+     * 解析回来。段与段之间用 {@code |} 分隔，任何一段都不能含 {@code |} 或 {@code （}。
+     *
+     * <p>ID 段是 Step 5 取剖面的唯一依据（见 {@link #sectionIdText}），
+     * 删掉它会让报告里的断面图整批消失，且**不报错**。
+     */
+    public static String sectionLine(Map<String, Object> row, int level) {
+        String sectionName = String.valueOf(row.getOrDefault("section_name", "未知"));
+        String riskValue = String.valueOf(row.getOrDefault("risk_value", "无"));
+        String bankName = String.valueOf(row.getOrDefault("bank_name", ""));
+        return String.format("  - 断面：%s（%s）| ID：%s | 风险等级：%d | 评估指标：%s | 坐标：%s",
+                sectionName, bankName, sectionIdText(row), level, riskValue, coordText(row));
     }
 
     /**
@@ -82,5 +96,26 @@ public class RiskDataTools {
             return String.format("(%.6f, %.6f)", l.doubleValue(), a.doubleValue());
         }
         return "未知";
+    }
+
+    /**
+     * 断面 ID 的文本形式；缺失时返回「未知」。
+     *
+     * <p>这段同样是**订阅契约**：报告工作流 Step 5 要拿它去查 {@code section_profiles}
+     * 生成断面图（{@code queryProfiles} 按 {@code section_id} 过滤）。
+     *
+     * <p>以前这里刻意没输出 ID，Step 5 的提示词只好写「ID 暂用断面名」，
+     * 而库里 {@code section_name} 与 {@code section_id} 是两套值
+     * （如「断面6」vs {@code sec-task-1782124930426-5}，实测 867 行里零重合）
+     * ⇒ 查不到剖面 ⇒ 报告里两张断面图永远缺图。改格式要同步
+     * {@code ReportWorkflowService.SECTION_ID_PATTERN}。
+     */
+    static String sectionIdText(Map<String, Object> row) {
+        Object sectionId = row.get("section_id");
+        if (sectionId == null) {
+            return "未知";
+        }
+        String text = String.valueOf(sectionId).trim();
+        return text.isEmpty() ? "未知" : text;
     }
 }

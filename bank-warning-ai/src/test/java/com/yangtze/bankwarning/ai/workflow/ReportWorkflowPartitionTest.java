@@ -2,6 +2,7 @@ package com.yangtze.bankwarning.ai.workflow;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.yangtze.bankwarning.ai.service.VisualizationService;
+import com.yangtze.bankwarning.ai.tool.RiskDataTools;
 import com.yangtze.bankwarning.ai.tool.VisualizationTools;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
@@ -13,6 +14,7 @@ import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -175,6 +177,43 @@ class ReportWorkflowPartitionTest {
         assertEquals(1, rows.get(3).level());
         // 坐标缺失仍要保住这一行（它还要进高风险清单与断面图），只是归区时落到「未落入」
         assertEquals(null, rows.get(3).lng());
+    }
+
+    @Test
+    @DisplayName("生产端 sectionLine 与消费端 parseRiskRows 必须对得上：section_id 不能丢")
+    void sectionIdRoundTripsThroughText() {
+        Map<String, Object> row = new LinkedHashMap<>();
+        row.put("section_id", "sec-task-1782124930426-5");
+        row.put("section_name", "断面6");
+        row.put("bank_name", "长江南京河段");
+        row.put("risk_value", 0.31);
+        row.put("start_lng", 119.2);
+        row.put("start_lat", 32.35);
+
+        List<ReportWorkflowService.RiskRow> rows =
+                service.parseRiskRows("详细数据：\n" + RiskDataTools.sectionLine(row, 3));
+
+        assertEquals(1, rows.size());
+        assertEquals("断面6", rows.get(0).name());
+        assertEquals("sec-task-1782124930426-5", rows.get(0).sectionId(),
+                "section_id 解析丢了，Step 5 会拿断面名去查剖面 —— 报告里断面图会整批静默缺失");
+        assertEquals(3, rows.get(0).level());
+        assertEquals(119.2, rows.get(0).lng(), 1e-9);
+    }
+
+    @Test
+    @DisplayName("老文本没有 ID 段：sectionId 为 null（由 Step 5 按任务+断面名回查兜底）")
+    void legacyTextWithoutSectionIdYieldsNull() {
+        assertNull(service.parseRiskRows(RISK_TEXT).get(0).sectionId());
+    }
+
+    @Test
+    @DisplayName("ID 段为「未知」时按缺失处理，不能当成真 ID 去查库")
+    void unknownSectionIdIsTreatedAsMissing() {
+        assertNull(ReportWorkflowService.parseSectionId(
+                "  - 断面：A（B）| ID：未知 | 风险等级：4 | 坐标：(119.2, 32.3)"));
+        assertEquals("sec-1", ReportWorkflowService.parseSectionId(
+                "  - 断面：A（B）| ID：sec-1 | 风险等级：4 | 坐标：(119.2, 32.3)"));
     }
 
     // ------------------------------------------------------------------

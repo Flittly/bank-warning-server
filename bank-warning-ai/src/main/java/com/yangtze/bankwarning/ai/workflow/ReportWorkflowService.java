@@ -67,6 +67,14 @@ public class ReportWorkflowService {
     private static final Pattern LEVEL_PATTERN = Pattern.compile("风险等级：(\\d+)");
     private static final Pattern SECTION_NAME_PATTERN = Pattern.compile("断面：([^（|]+)");
 
+    /**
+     * {@code query_risk_data} 输出的断面 ID 段，格式见 {@code RiskDataTools.sectionIdText}。
+     *
+     * <p>必须是**真 ID**（{@code sec-task-...-5}）：Step 5 要拿它去 {@code section_profiles}
+     * 里按 {@code section_id} 取剖面。用断面名代替时一条也查不到（两者在库里零重合）。
+     */
+    private static final Pattern SECTION_ID_PATTERN = Pattern.compile("ID：([^|]+)");
+
     private static final StepInfo[] STEPS = {
             new StepInfo("query_data", "查询任务所有断面风险评估数据",
                     "返回所有 section 的 risk_level、指标、所属银行"),
@@ -358,7 +366,7 @@ public class ReportWorkflowService {
             case 1 -> step2GenDistribution(taskId, state);
             case 2 -> step3FilterHighRisk(state);
             case 3 -> step4QueryWeather(state);
-            case 4 -> step5GenSectionCharts(state);
+            case 4 -> step5GenSectionCharts(taskId, state);
             case 5 -> step6Synthesize(taskId, state);
             default -> throw new IllegalStateException("Unknown step index: " + idx);
         };
@@ -421,7 +429,7 @@ public class ReportWorkflowService {
             // 坐标一并带出：Step 4 的天气查询按 (lng, lat) 调外部接口，
             // 以及 Step 6 的经纬度分区归属，都需要它。
             if (row.level() >= 3) {
-                highRisk.add(new HighRiskSection(row.name(), row.lng(), row.lat(), row.level()));
+                highRisk.add(new HighRiskSection(row.name(), row.sectionId(), row.lng(), row.lat(), row.level()));
             }
         }
         // 序列化友好的 Map 形式落库（断点续跑时按 Map 读回）
@@ -476,7 +484,7 @@ public class ReportWorkflowService {
         return "已查询 " + highRisk.size() + " 个高风险断面的天气";
     }
 
-    private String step5GenSectionCharts(WorkflowState state) {
+    private String step5GenSectionCharts(String taskId, WorkflowState state) {
         List<Map<String, Object>> highRisk = readHighRiskSections(state);
         if (highRisk.isEmpty()) {
             state.context.put("sectionChartsText", "无高风险断面，跳过断面图生成");
@@ -488,8 +496,26 @@ public class ReportWorkflowService {
         toolkit.removeTool("generate_risk_distribution_map");
 
         StringBuilder sectionList = new StringBuilder();
+        int unresolved = 0;
+        int withChart = 0;
         for (Map<String, Object> s : highRisk) {
-            sectionList.append("断面：").append(s.get("name")).append("（ID 暂用断面名）\n");
+            String sectionId = resolveSectionId(taskId, s);
+            if (sectionId == null) {
+                unresolved++;
+                // 不明说「跳过」的话，模型会拿断面名去调工具，然后拿到「没有剖面数据」
+                // 还照样写进结论——这正是之前报告缺图的假象来源。
+                sectionList.append("- 断面：").append(s.get("name"))
+                        .append(" | section_id：未解析（本次跳过，不要调用出图工具）\n");
+                continue;
+            }
+            withChart++;
+            sectionList.append("- 断面：").append(s.get("name"))
+                    .append(" | section_id：").append(sectionId).append('\n');
+        }
+        if (unresolved > 0) {
+            log.warn("[workflow] {}/{} 个高风险断面解析不出 section_id（cross_sections 与 "
+                            + "section_profiles 均无匹配），Step 5 跳过这些断面",
+                    unresolved, highRisk.size());
         }
 
         ReActAgent agent = buildMiniAgent("step5_gen_charts", toolkit,
@@ -500,14 +526,38 @@ public class ReportWorkflowService {
                         严格规则：
                         1. 对每个断面依次调用 generate_scour_heatmap(section_id)
                         2. 然后调用 generate_section_comparison_chart(section_id)
-                        3. 不要调用 generate_risk_distribution_map（那是 Step 2 干的）
-                        4. 把所有图片路径整理成 JSON 返回
+                        3. section_id **必须原样使用上面给出的那一串**（形如 sec-task-...-5），
+                           绝对不要拿断面名（如「断面6」）代替——库里两者是两套值，用名字一条也查不到
+                        4. 标了「未解析」的断面直接跳过，不要编造 section_id
+                        5. 不要调用 generate_risk_distribution_map（那是 Step 2 干的）
+                        6. 把所有图片路径整理成 JSON 返回；失败的断面在 JSON 里如实标注失败原因
                         """.formatted(sectionList));
 
         Msg out = agent.call(List.of(new UserMessage("user", "开始生成断面图"))).block();
         String result = out.getTextContent();
         state.context.put("sectionChartsText", result);
-        return "已为 " + highRisk.size() + " 个高风险断面生成图表";
+        return "已为 " + withChart + " 个高风险断面发起出图（" + unresolved + " 个因解析不出 section_id 跳过）";
+    }
+
+    /**
+     * 取该断面真正的 {@code section_id}。
+     *
+     * <p>优先用 Step 1 文本里带回来的 ID（正常路径，零额外查询）；老文本 / 模型丢字段时
+     * 按 {@code (task_id, section_name)} 回查一次，避免整批断面图静默消失。
+     */
+    private String resolveSectionId(String taskId, Map<String, Object> section) {
+        Object id = section.get("section_id");
+        if (id != null) {
+            String text = String.valueOf(id).trim();
+            if (!text.isEmpty() && !"未知".equals(text)) {
+                return text;
+            }
+        }
+        Object name = section.get("name");
+        String sectionName = name == null ? null : String.valueOf(name).trim();
+        // 注意：这里的 section 是 readHighRiskSections 返回的副本，回填不会写回 state.context，
+        // 续跑重跑 Step 5 时会再查一次（单条一次索引查询，代价可接受）。
+        return visualizationService.resolveSectionId(taskId, sectionName);
     }
 
     private String step6Synthesize(String taskId, WorkflowState state) {
@@ -667,8 +717,13 @@ public class ReportWorkflowService {
         return PartitionBounds.key(partition);
     }
 
-    /** Step 1 文本里的一条断面记录；坐标可能缺失（cross_sections 缺行）。 */
-    record RiskRow(String name, int level, Double lng, Double lat) {}
+    /**
+     * Step 1 文本里的一条断面记录；坐标可能缺失（cross_sections 缺行）。
+     *
+     * <p>{@code sectionId} 是**真 ID**，用于 Step 5 取剖面。老文本（没有 ID 段）解析出来是
+     * {@code null}，此时 Step 5 会按 {@code (task_id, section_name)} 回查一次再决定。
+     */
+    record RiskRow(String name, String sectionId, int level, Double lng, Double lat) {}
 
     /**
      * 解析 Step 1 的断面行。坐标缺失**不**丢弃该行——它仍要进高风险清单与断面图，
@@ -707,9 +762,19 @@ public class ReportWorkflowService {
                     lat = null;
                 }
             }
-            rows.add(new RiskRow(name, level, lng, lat));
+            rows.add(new RiskRow(name, parseSectionId(line), level, lng, lat));
         }
         return rows;
+    }
+
+    /** 从断面行里取真正的 {@code section_id}；缺失或为「未知」时返回 null。 */
+    static String parseSectionId(String line) {
+        Matcher matcher = SECTION_ID_PATTERN.matcher(line);
+        if (!matcher.find()) {
+            return null;
+        }
+        String text = matcher.group(1).trim();
+        return text.isEmpty() || "未知".equals(text) ? null : text;
     }
 
     /** Step 4 的天气结果是 LLM 输出的 {@code {"断面名": "天气摘要"}}；解析失败就跳过归并。 */
@@ -1060,6 +1125,8 @@ public class ReportWorkflowService {
     private static Map<String, Object> toHighRiskMap(HighRiskSection section) {
         Map<String, Object> map = new LinkedHashMap<>();
         map.put("name", section.name());
+        // 真 ID 必须落进上下文：断点续跑时 Step 5 靠它取剖面，不能只剩断面名。
+        map.put("section_id", section.sectionId());
         map.put("lng", section.lng());
         map.put("lat", section.lat());
         map.put("level", section.level());
@@ -1137,5 +1204,5 @@ public class ReportWorkflowService {
 
     private record StepInfo(String name, String description, String expectedOutcome) {}
 
-    public record HighRiskSection(String name, Double lng, Double lat, int level) {}
+    public record HighRiskSection(String name, String sectionId, Double lng, Double lat, int level) {}
 }

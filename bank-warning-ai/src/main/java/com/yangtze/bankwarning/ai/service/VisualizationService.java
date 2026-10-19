@@ -726,70 +726,273 @@ public class VisualizationService {
         return Collections.emptyList();
     }
 
-    /**
-     * 构建网格数据
-     */
-    @SuppressWarnings("unchecked")
-    private List<List<Double>> buildGridData(List<Map<String, Object>> profiles) {
-        List<List<Double>> gridData = new ArrayList<>();
-        for (Map<String, Object> profile : profiles) {
-            String profileDataJson = profile.get("profile_data") != null ?
-                    profile.get("profile_data").toString() : "[]";
-            try {
-                Map<String, Object> profileData = objectMapper.readValue(profileDataJson, Map.class);
-                List<List<Double>> points = (List<List<Double>>) profileData.get("points");
-                if (points != null && !points.isEmpty()) {
-                    List<Double> elevation = new ArrayList<>();
-                    for (List<Double> point : points) {
-                        if (point.size() >= 3) {
-                            elevation.add(point.get(2));
-                        }
-                    }
-                    gridData.add(elevation);
-                }
-            } catch (JsonProcessingException e) {
-                log.warn("[viz] parse profile data failed", e);
-            }
-        }
-        return gridData;
+    // ------------------------------------------------------------------
+    // section_profiles.profile_data 的读取口径
+    //
+    // 写入端 SectionProfileService#buildProfileData 落盘的结构是
+    //   {"profile":[{"index":0,"distance":0.0,"x":..,"y":..,"elevation":..}, ...],
+    //    "interval":20.0,"deepest_index":42,"slope_foot_index":38,
+    //    "points_v":[...],"Sa_v":[...]}
+    // 而这里历史上读的是键 "points" + List<List<Double>>（模型原始 points 的形态），
+    // 键名与元素形态双双不匹配 ⇒ 取到 null ⇒ gridData / sections 恒为空 ⇒
+    // /viz/heatmap、/viz/section 永远回「无法构建网格数据 / 断面数据」，
+    // AI 报告的 generate_scour_heatmap、generate_section_comparison_chart 也拿不到图。
+    //
+    // 注意：前端结果页的「断面剖面折线」走的是**另一条通道**
+    // （GET /v0/bank/tasks/{taskId}/section-profiles 直接透传 profile_data.profile，
+    //   ResultPage 读 profile_data.profile），它一直是好的。别因为这条坏了就误判前端也坏。
+    // ------------------------------------------------------------------
+
+    /** 断面上的一个采样点：沿断面的累计距离（m）与高程（m）。 */
+    record ProfileSample(double distance, double elevation) {
     }
 
     /**
-     * 构建断面数据
+     * 取 {@code profile_data} 并解析成 Map。
+     *
+     * <p>兼容 jsonb 经 JdbcTemplate 取回时的 {@link PGobject} 形态（与岸段几何同一个坑：
+     * 直接 {@code toString()} 能拿到 JSON，但类型判断一旦写成 {@code instanceof String}
+     * 就会把所有行静默丢弃）。解析失败返回 {@code null}，由调用方跳过单条，不整体失败。
      */
-    @SuppressWarnings("unchecked")
-    private List<Map<String, Object>> buildSectionData(List<Map<String, Object>> profiles) {
-        List<Map<String, Object>> sections = new ArrayList<>();
-        for (Map<String, Object> profile : profiles) {
-            String profileDataJson = profile.get("profile_data") != null ?
-                    profile.get("profile_data").toString() : "[]";
-            try {
-                Map<String, Object> profileData = objectMapper.readValue(profileDataJson, Map.class);
-                List<List<Double>> points = (List<List<Double>>) profileData.get("points");
-                if (points != null && !points.isEmpty()) {
-                    List<Double> xCoords = new ArrayList<>();
-                    List<Double> elevation = new ArrayList<>();
-                    for (List<Double> point : points) {
-                        if (point.size() >= 3) {
-                            xCoords.add(point.get(0));
-                            elevation.add(point.get(2));
-                        }
-                    }
+    Map<String, Object> readProfileData(Object value) {
+        if (value == null) {
+            return null;
+        }
+        if (value instanceof Map<?, ?> map) {
+            return asObjectMap(map);
+        }
+        String json = value instanceof PGobject pg ? pg.getValue() : value.toString();
+        if (json == null || json.isBlank()) {
+            return null;
+        }
+        try {
+            return objectMapper.readValue(json, new TypeReference<Map<String, Object>>() {
+            });
+        } catch (JsonProcessingException e) {
+            // 单条脏数据只跳过这一条，不要把整批出图拖垮；不打完整栈，避免批量任务刷屏。
+            log.warn("[viz] parse profile data failed, section skipped: {}", e.getOriginalMessage());
+            return null;
+        }
+    }
 
-                    Map<String, Object> section = new LinkedHashMap<>();
-                    section.put("section_name", profile.get("section_name"));
-                    section.put("x_coords", xCoords);
-                    section.put("elevation", elevation);
-                    section.put("deepest_index", profile.get("deepest_index"));
-                    section.put("slope_foot_index", profile.get("slope_foot_index"));
-                    section.put("timepoint", profile.get("timepoint"));
-                    sections.add(section);
+    /**
+     * 从 {@code profile_data} 提取 (距离, 高程) 序列。
+     *
+     * <p>两种形态都认，避免老任务回放时再次失效：
+     * <ul>
+     *   <li>现行 {@code profile}：元素是 dict，{@code distance} 缺失时用
+     *       {@code interval × index} 回退；</li>
+     *   <li>早期 {@code points}：元素是 {@code [x, y, elevation]}，没有 distance，
+     *       只能按 {@code interval × 下标} 反推。</li>
+     * </ul>
+     * 高程缺失 / 非有限值的点直接丢弃（与模型侧挡住 nodata 的口径一致）。
+     */
+    static List<ProfileSample> extractProfileSamples(Map<String, Object> profileData) {
+        List<ProfileSample> samples = new ArrayList<>();
+        if (profileData == null) {
+            return samples;
+        }
+        double interval = numberOrZero(profileData.get("interval"));
+
+        if (profileData.get("profile") instanceof List<?> rows && !rows.isEmpty()) {
+            int position = 0;
+            for (Object rowValue : rows) {
+                if (rowValue instanceof Map<?, ?> row) {
+                    Double elevation = numberOrNull(row.get("elevation"));
+                    if (elevation != null) {
+                        Double distance = numberOrNull(row.get("distance"));
+                        if (distance == null) {
+                            Double index = numberOrNull(row.get("index"));
+                            distance = interval * (index == null ? position : index);
+                        }
+                        samples.add(new ProfileSample(distance, elevation));
+                    }
                 }
-            } catch (JsonProcessingException e) {
-                log.warn("[viz] parse profile data failed", e);
+                position++;
+            }
+            if (!samples.isEmpty()) {
+                return samples;
             }
         }
+
+        if (profileData.get("points") instanceof List<?> points) {
+            for (int index = 0; index < points.size(); index++) {
+                Object pointValue = points.get(index);
+                if (!(pointValue instanceof List<?> point) || point.size() < 3) {
+                    continue;
+                }
+                Double elevation = numberOrNull(point.get(2));
+                if (elevation != null) {
+                    samples.add(new ProfileSample(interval * index, elevation));
+                }
+            }
+        }
+        return samples;
+    }
+
+    /**
+     * 把各条断面的高程序列重采样到统一长度。
+     *
+     * <p>热力图脚本对入参直接做 {@code np.array(grid_data)}，numpy 2.x 遇到不等长会抛
+     * {@code ValueError: inhomogeneous shape}，且这一步在 {@code data.size == 0} 判断之前，
+     * 异常会直接落进脚本失败分支。断面经过「只保留最长连续有效段」的裁剪后点数不再恒为 100
+     * （实测 13~100 点），所以必须在这里拉齐。重采样按断面自身的归一化位置线性插值，
+     * 与 heatmap.py 的 {@code generate_scour_heatmap_from_profiles} 同一口径。
+     */
+    static List<List<Double>> resampleToUniformLength(List<List<Double>> series) {
+        int target = 0;
+        for (List<Double> row : series) {
+            target = Math.max(target, row.size());
+        }
+        if (target == 0) {
+            return series;
+        }
+        List<List<Double>> uniform = new ArrayList<>(series.size());
+        for (List<Double> row : series) {
+            if (row.size() == target) {
+                uniform.add(new ArrayList<>(row));
+                continue;
+            }
+            List<Double> resampled = new ArrayList<>(target);
+            int last = row.size() - 1;
+            for (int i = 0; i < target; i++) {
+                if (last <= 0) {
+                    resampled.add(row.get(0));
+                    continue;
+                }
+                double position = (double) i * last / (target - 1);
+                int low = (int) Math.floor(position);
+                int high = Math.min(low + 1, last);
+                double ratio = position - low;
+                resampled.add(row.get(low) + (row.get(high) - row.get(low)) * ratio);
+            }
+            uniform.add(resampled);
+        }
+        return uniform;
+    }
+
+    /**
+     * 把「断面 ID 或断面名」解析成真正的 {@code section_id}（限定在同一任务内）。
+     *
+     * <p>存在的理由：报告 Step 5 历史上把**断面名**当 ID 传给 {@link #generateHeatmap}，
+     * 而 {@link #queryProfiles} 过滤的是 {@code section_id} —— 两者在库里是两套值
+     * （「断面6」vs {@code sec-task-...-5}，实测 867 行零重合），于是每条断面都回
+     * 「没有剖面数据」，报告里两张断面图永远缺图。
+     *
+     * <p>解析顺序：先认 {@code section_id} 精确命中，再退化为 {@code section_name}。
+     * 断面名在任务内**可能重名**（实测有「新建断面1」一条任务里出现 4 次），
+     * 因此按「有没有剖面」优先、再按 {@code section_id} 排序取第一条，保证结果确定；
+     * 真正需要精确匹配的调用方应当直接传 ID（Step 1 的文本已带回）。
+     *
+     * @return 解析到的 {@code section_id}；任务或入参为空、或库里查不到时返回 {@code null}
+     */
+    public String resolveSectionId(String taskId, String sectionIdOrName) {
+        if (taskId == null || taskId.isBlank() || sectionIdOrName == null || sectionIdOrName.isBlank()) {
+            return null;
+        }
+        String key = sectionIdOrName.trim();
+        List<String> bySection = jdbcTemplate.queryForList(
+                "SELECT cs.section_id FROM cross_sections cs "
+                        + "WHERE cs.task_id = ? AND cs.deleted_at IS NULL "
+                        + "  AND (cs.section_id = ? OR cs.section_name = ?) "
+                        + "ORDER BY CASE WHEN cs.section_id = ? THEN 0 ELSE 1 END, "
+                        + "         CASE WHEN EXISTS (SELECT 1 FROM section_profiles p "
+                        + "              WHERE p.section_id = cs.section_id AND p.deleted_at IS NULL) "
+                        + "              THEN 0 ELSE 1 END, "
+                        + "         cs.section_id "
+                        + "LIMIT 1",
+                String.class, taskId, key, key, key);
+        if (!bySection.isEmpty()) {
+            return bySection.get(0);
+        }
+        // cross_sections 里没有（断面被改过/删过），退回断面档案表碰一下
+        List<String> byProfile = jdbcTemplate.queryForList(
+                "SELECT section_id FROM section_profiles "
+                        + "WHERE task_id = ? AND deleted_at IS NULL "
+                        + "  AND (section_id = ? OR section_name = ?) "
+                        + "ORDER BY CASE WHEN section_id = ? THEN 0 ELSE 1 END, section_id "
+                        + "LIMIT 1",
+                String.class, taskId, key, key, key);
+        return byProfile.isEmpty() ? null : byProfile.get(0);
+    }
+
+    /**
+     * 构建网格数据（每条断面一行高程，已拉齐到统一长度）
+     */
+    private List<List<Double>> buildGridData(List<Map<String, Object>> profiles) {
+        List<List<Double>> elevations = new ArrayList<>();
+        for (Map<String, Object> row : profiles) {
+            List<ProfileSample> samples = extractProfileSamples(readProfileData(row.get("profile_data")));
+            if (samples.isEmpty()) {
+                continue;
+            }
+            List<Double> elevation = new ArrayList<>(samples.size());
+            for (ProfileSample sample : samples) {
+                elevation.add(sample.elevation());
+            }
+            elevations.add(elevation);
+        }
+        return resampleToUniformLength(elevations);
+    }
+
+    /**
+     * 构建断面数据（横轴取沿断面的累计距离，纵轴取高程）
+     */
+    private List<Map<String, Object>> buildSectionData(List<Map<String, Object>> profiles) {
+        List<Map<String, Object>> sections = new ArrayList<>();
+        for (Map<String, Object> row : profiles) {
+            List<ProfileSample> samples = extractProfileSamples(readProfileData(row.get("profile_data")));
+            if (samples.isEmpty()) {
+                continue;
+            }
+            List<Double> xCoords = new ArrayList<>(samples.size());
+            List<Double> elevation = new ArrayList<>(samples.size());
+            for (ProfileSample sample : samples) {
+                xCoords.add(sample.distance());
+                elevation.add(sample.elevation());
+            }
+
+            Map<String, Object> section = new LinkedHashMap<>();
+            section.put("section_name", row.get("section_name"));
+            section.put("x_coords", xCoords);
+            section.put("elevation", elevation);
+            section.put("deepest_index", row.get("deepest_index"));
+            section.put("slope_foot_index", row.get("slope_foot_index"));
+            section.put("timepoint", row.get("timepoint"));
+            sections.add(section);
+        }
         return sections;
+    }
+
+    @SuppressWarnings("unchecked")
+    private static Map<String, Object> asObjectMap(Map<?, ?> map) {
+        return (Map<String, Object>) map;
+    }
+
+    /** 把任意 JSON 数值转成 double；非数值 / null / NaN / Infinity 一律返回 null。 */
+    static Double numberOrNull(Object value) {
+        if (value instanceof Number number) {
+            double parsed = number.doubleValue();
+            return Double.isFinite(parsed) ? parsed : null;
+        }
+        if (value instanceof String text) {
+            String trimmed = text.trim();
+            if (trimmed.isEmpty()) {
+                return null;
+            }
+            try {
+                double parsed = Double.parseDouble(trimmed);
+                return Double.isFinite(parsed) ? parsed : null;
+            } catch (NumberFormatException ignored) {
+                return null;
+            }
+        }
+        return null;
+    }
+
+    private static double numberOrZero(Object value) {
+        Double parsed = numberOrNull(value);
+        return parsed == null ? 0d : parsed;
     }
 
     /**
