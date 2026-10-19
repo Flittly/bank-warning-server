@@ -4,9 +4,11 @@ import com.yangtze.bankwarning.domain.dto.BankPayload;
 import com.yangtze.bankwarning.domain.dto.BanksCreateRequest;
 import com.yangtze.bankwarning.domain.dto.BasicParamPayload;
 import com.yangtze.bankwarning.domain.dto.BasicParamsCreateRequest;
+import com.yangtze.bankwarning.domain.dto.RiskResultOverrideRequest;
 import com.yangtze.bankwarning.domain.dto.SectionPayload;
 import com.yangtze.bankwarning.domain.dto.SectionsCreateRequest;
 import com.yangtze.bankwarning.domain.dto.SectionBatchUpdateRequest;
+import com.yangtze.bankwarning.domain.dto.TaskParamsUpdateRequest;
 import com.yangtze.bankwarning.domain.dto.TasksCreateRequest;
 import com.yangtze.bankwarning.domain.dto.TaskStatusUpdateRequest;
 import com.yangtze.bankwarning.mapper.HydroConditionMapper;
@@ -161,6 +163,35 @@ public class BusinessController {
         return Map.of("success", true, "param_id", paramId, "updated", true);
     }
 
+    /**
+     * 取「本任务自己的参数集」。没有就按来源物化一份（模板 → 断面快照 → 默认模板）。
+     *
+     * 任务的参数是**独立行**（basic_params.task_id 非空），不再是「引用模板库」：
+     * 改模板库不影响它，改它也不影响别的任务。
+     */
+    @GetMapping("/tasks/{task_id}/params")
+    public Map<String, Object> getTaskParams(
+            @PathVariable("task_id") String taskId,
+            @RequestParam(name = "template_param_id", required = false) String templateParamId) {
+        return businessStoreService.getTaskParams(taskId, templateParamId);
+    }
+
+    /** 保存本任务的参数集：只写本任务那一行，并同步本任务的断面快照。 */
+    @PutMapping("/tasks/{task_id}/params")
+    public Map<String, Object> updateTaskParams(
+            @PathVariable("task_id") String taskId,
+            @RequestBody TaskParamsUpdateRequest request) {
+        return businessStoreService.updateTaskParams(taskId, request);
+    }
+
+    /** 从模板库显式拷一份进本任务（复制后无关联，之后互不影响）。 */
+    @PostMapping("/tasks/{task_id}/params/from-template")
+    public Map<String, Object> importTaskParamsFromTemplate(
+            @PathVariable("task_id") String taskId,
+            @RequestParam("template_param_id") String templateParamId) {
+        return businessStoreService.importTaskParamsFromTemplate(taskId, templateParamId);
+    }
+
     @GetMapping("/hydro-conditions")
     public Map<String, Object> listHydroConditions() {
         return Map.of("success", true, "conditions", hydroConditionMapper.selectDistinctConditions());
@@ -207,6 +238,31 @@ public class BusinessController {
         return Map.of("success", true, "updated", request.sectionIds().size());
     }
 
+    /**
+     * 只读：该任务下有多少断面的参数快照与本任务的参数集不一致。
+     * 作用域是任务自己的参数集，与模板库无关。
+     */
+    @GetMapping("/tasks/{task_id}/params/diff")
+    public Map<String, Object> countParamDiffsForTask(@PathVariable("task_id") String taskId) {
+        return Map.of(
+                "success", true,
+                "task_id", taskId,
+                "pending", businessStoreService.countParamDiffsForTask(taskId)
+        );
+    }
+
+    /**
+     * 把本任务的断面参数快照同步为**本任务参数集**的当前值（幂等）。
+     *
+     * 路径名沿用历史命名（refresh-from-template），但语义已不再涉及模板库：
+     * 任务参数是独立的一行，这个动作等价于「保存任务参数」里的断面同步部分，
+     * 提供给需要单独补一次同步的脚本使用。已产出结果的任务同步后需要重跑。
+     */
+    @PutMapping("/tasks/{task_id}/params/refresh-from-template")
+    public Map<String, Object> refreshParamsForTask(@PathVariable("task_id") String taskId) {
+        return businessStoreService.refreshParamsForTask(taskId);
+    }
+
     @DeleteMapping("/sections/{section_id}")
     public Map<String, Object> deleteSection(@PathVariable("section_id") String sectionId) {
         businessStoreService.deleteSection(sectionId);
@@ -234,6 +290,26 @@ public class BusinessController {
                 "section_id", sectionId,
                 "matrix", result.indicators()
         );
+    }
+
+    /**
+     * 人工修改某断面的风险结果（不重跑模型）。
+     * patch 由前端按 riskLevel.py 的同一套规则重算后带上；服务端只校验不变量。
+     */
+    @PutMapping("/results/{section_id}/override")
+    public Map<String, Object> overrideRiskResult(@PathVariable("section_id") String sectionId,
+                                                  @RequestBody RiskResultOverrideRequest request) {
+        var result = businessStoreService.overrideRiskResult(sectionId, request);
+        return Map.of("success", true, "edited", true, "result", result);
+    }
+
+    /** 恢复模型原始结果（驳回人工修改）。 */
+    @DeleteMapping("/results/{section_id}/override")
+    public Map<String, Object> revertRiskResultOverride(
+            @PathVariable("section_id") String sectionId,
+            @RequestParam(name = "task_id", required = false) String taskId) {
+        var result = businessStoreService.revertRiskResultOverride(sectionId, taskId);
+        return Map.of("success", true, "edited", false, "result", result);
     }
 
     @GetMapping("/tasks/{task_id}/section-profiles")

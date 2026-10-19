@@ -24,7 +24,9 @@ public record BasicParamResponse(
     @JsonProperty("weights") Object weights,
     @JsonProperty("other_params") Object otherParams,
     @JsonProperty("created_at") LocalDateTime createdAt,
-    @JsonProperty("updated_at") LocalDateTime updatedAt
+    @JsonProperty("updated_at") LocalDateTime updatedAt,
+    /** null = 模板库；非 null = 该任务专属参数集。前端据此决定保存走哪个作用域。 */
+    @JsonProperty("task_id") String taskId
 ) {
     public static BasicParamResponse from(BasicParamPO po) {
         if (po == null) return null;
@@ -34,7 +36,7 @@ public record BasicParamResponse(
             po.getBenchId(), po.getRefId(), po.getHs(), po.getHc(),
             po.getProtectionLevel(), po.getControlLevel(), po.getComparisonTimepoint(),
             JsonUtil.parse(po.getRiskThresholds()), JsonUtil.parse(po.getWeights()), JsonUtil.parse(po.getOtherParams()),
-            po.getCreatedAt(), po.getUpdatedAt()
+            po.getCreatedAt(), po.getUpdatedAt(), po.getTaskId()
         );
     }
 }

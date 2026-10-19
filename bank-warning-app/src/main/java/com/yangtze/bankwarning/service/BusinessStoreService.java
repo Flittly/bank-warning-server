@@ -2,6 +2,7 @@ package com.yangtze.bankwarning.service;
 
 import com.yangtze.bankwarning.domain.po.*;
 import com.yangtze.bankwarning.domain.dto.*;
+import com.yangtze.bankwarning.domain.exception.ResultOverrideException;
 import com.yangtze.bankwarning.mapper.*;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.JsonNode;
@@ -174,6 +175,9 @@ public class BusinessStoreService {
         if (taskMapper.deleteByTaskId(taskId, userId) == 0) {
             throw new IllegalArgumentException("Task not found: " + taskId);
         }
+        // 任务是软删，FK 的 ON DELETE CASCADE 不会触发 ⇒ 任务参数集要显式一并软删，
+        // 否则会留下孤儿行，还会因为 uq_basic_params_task_id 挡住同 id 的重建。
+        basicParamMapper.softDeleteByTaskId(taskId, userId);
     }
 
     // ==================== BasicParam ====================
@@ -183,12 +187,16 @@ public class BusinessStoreService {
         if (overwrite) {
             BasicParamPO existing = basicParamMapper.selectByParamId(payload.paramId(), userId);
             if (existing != null) {
+                requireLibraryScope(existing);
                 BasicParamPO po = toBasicParamPO(payload);
                 basicParamMapper.update(po);
                 return BasicParamResponse.from(basicParamMapper.selectByParamId(payload.paramId(), userId));
             }
         }
         BasicParamPO po = toBasicParamPO(payload);
+        // 通过这个接口写入的一律是模板库主数据；任务参数只能由任务自己物化/更新，
+        // 否则前端一次误带 task_id 就能把一份「私有参数」塞进别人共用的模板列表。
+        po.setTaskId(null);
         po.setUserId(SecurityUtils.getCurrentUserId());
         basicParamMapper.insert(po);
         return BasicParamResponse.from(basicParamMapper.selectByParamId(payload.paramId(), userId));
@@ -209,11 +217,286 @@ public class BusinessStoreService {
     }
 
     public void updateBasicParam(String paramId, BasicParamPayload payload) {
-        Long userId = SecurityUtils.getCurrentUserIdForDataFilter();
-        getBasicParam(paramId);
+        BasicParamPO existing = getBasicParamPO(paramId);
+        // 模板库接口不允许写任务参数行：任务参数只能走 /tasks/{task_id}/params，
+        // 否则「改模板」又能顺着 param_id 改到某个任务的参数上，隔离就白做了。
+        requireLibraryScope(existing);
         BasicParamPO po = toBasicParamPO(payload);
         po.setParamId(paramId);
         basicParamMapper.update(po);
+    }
+
+    private BasicParamPO getBasicParamPO(String paramId) {
+        Long userId = SecurityUtils.getCurrentUserIdForDataFilter();
+        BasicParamPO po = basicParamMapper.selectByParamId(paramId, userId);
+        if (po == null) {
+            throw new IllegalArgumentException("Basic parameter not found: " + paramId);
+        }
+        return po;
+    }
+
+    private void requireLibraryScope(BasicParamPO po) {
+        if (po.getTaskId() != null) {
+            throw new IllegalArgumentException(
+                    "该参数集属于任务 " + po.getTaskId() + "，只能通过 /v0/bank/tasks/{task_id}/params 修改");
+        }
+    }
+
+
+    // ==================== TaskParams（任务自己的参数集） ====================
+
+    /**
+     * 取某个任务自己的参数集；没有就物化一份。
+     *
+     * 为什么要有这一层：`basic_params` 原来只有模板库一种作用域，编辑器里的「参数模板」
+     * 面板写的就是那份全库共享的数据 —— 一次保存能改到所有引用它的任务（实测模板 166
+     * 下 13822 条断面横跨 15 个任务被一次改写）。现在把「任务参数」做成独立行
+     * （`task_id` 非空），每个任务一份，改谁都只影响自己。
+     *
+     * 物化取值优先级：
+     *   ① 显式指定的模板（templateParamId）—— 新建任务时用户选的那份；
+     *   ② 该任务已有断面的第一条快照 —— 历史任务不做回填，直接沿用当年实际跑过的输入；
+     *   ③ 模板库里的默认模板 / 任一模板。
+     * 物化只读来源、只写「任务参数」这一行，且不会改写任何已有参数值。
+     */
+    public Map<String, Object> getTaskParams(String taskId, String templateParamId) {
+        Long userId = SecurityUtils.getCurrentUserIdForDataFilter();
+        getTask(taskId);
+
+        BasicParamPO existing = basicParamMapper.selectByTaskId(taskId, userId);
+        if (existing != null) {
+            return taskParamsView(taskId, existing, "existing");
+        }
+        Materialized materialized = materializeTaskParams(taskId, templateParamId, userId);
+        return taskParamsView(taskId, materialized.po(), materialized.source());
+    }
+
+    /**
+     * 只更新「本任务」的参数集，并把本任务的断面快照同步成它。
+     *
+     * 没有任何按模板 / 按岸段的全量下发分支 —— 这是刻意的：
+     * 跨任务批量改写输入会让历史结果不可复现，这类能力不该存在。
+     */
+    public Map<String, Object> updateTaskParams(String taskId, TaskParamsUpdateRequest request) {
+        Long userId = SecurityUtils.getCurrentUserIdForDataFilter();
+        getTask(taskId);
+
+        BasicParamPO po = basicParamMapper.selectByTaskId(taskId, userId);
+        if (po == null) {
+            po = materializeTaskParams(taskId, null, userId).po();
+        }
+
+        BasicParamPO patch = new BasicParamPO();
+        patch.setParamId(po.getParamId());
+        patch.setParamName(request.paramName());
+        patch.setBenchSegment(request.benchSegment());
+        patch.setCurrentTimepoint(request.currentTimepoint());
+        patch.setSetName(request.setName());
+        patch.setWaterQs(request.waterQs());
+        patch.setTidalLevel(request.tidalLevel());
+        patch.setBenchId(request.benchId());
+        patch.setRefId(request.refId());
+        patch.setHs(request.hs());
+        patch.setHc(request.hc());
+        patch.setProtectionLevel(request.protectionLevel());
+        patch.setControlLevel(request.controlLevel());
+        patch.setComparisonTimepoint(request.comparisonTimepoint());
+        patch.setRiskThresholds(writeJson(request.riskThresholds()));
+        patch.setWeights(writeJson(request.weights()));
+        patch.setOtherParams(writeJson(request.otherParams()));
+        basicParamMapper.update(patch);
+
+        int total = sectionMapper.countByTaskId(taskId, userId);
+        int updated = sectionMapper.refreshParamsForTask(taskId, userId);
+
+        Map<String, Object> result = new LinkedHashMap<>();
+        result.put("success", true);
+        result.put("task_id", taskId);
+        result.put("param", BasicParamResponse.from(basicParamMapper.selectByTaskId(taskId, userId)));
+        result.put("updated_sections", updated);
+        result.put("total_sections", total);
+        return result;
+    }
+
+    /**
+     * 显式把模板库里某份模板的内容拷进「本任务」的参数集（再同步本任务断面）。
+     * 这是一次性的、用户主动触发的复制 —— 复制后两者再无关联，改模板不会反过来影响它。
+     */
+    public Map<String, Object> importTaskParamsFromTemplate(String taskId, String templateParamId) {
+        Long userId = SecurityUtils.getCurrentUserIdForDataFilter();
+        getTask(taskId);
+
+        BasicParamPO template = basicParamMapper.selectByParamId(templateParamId, userId);
+        if (template == null) {
+            throw new IllegalArgumentException("模板不存在: " + templateParamId);
+        }
+        if (template.getTaskId() != null) {
+            throw new IllegalArgumentException("只能从模板库导入，不能从其它任务的参数集导入: " + templateParamId);
+        }
+
+        BasicParamPO po = basicParamMapper.selectByTaskId(taskId, userId);
+        if (po == null) {
+            po = materializeTaskParams(taskId, templateParamId, userId).po();
+        } else {
+            BasicParamPO patch = new BasicParamPO();
+            patch.setParamId(po.getParamId());
+            patch.setParamName(template.getParamName());
+            patch.setBenchSegment(template.getBenchSegment());
+            patch.setCurrentTimepoint(template.getCurrentTimepoint());
+            patch.setSetName(template.getSetName());
+            patch.setWaterQs(template.getWaterQs());
+            patch.setTidalLevel(template.getTidalLevel());
+            patch.setBenchId(template.getBenchId());
+            patch.setRefId(template.getRefId());
+            patch.setHs(template.getHs());
+            patch.setHc(template.getHc());
+            patch.setProtectionLevel(template.getProtectionLevel());
+            patch.setControlLevel(template.getControlLevel());
+            patch.setComparisonTimepoint(template.getComparisonTimepoint());
+            patch.setRiskThresholds(template.getRiskThresholds());
+            patch.setWeights(template.getWeights());
+            patch.setOtherParams(template.getOtherParams());
+            basicParamMapper.update(patch);
+        }
+
+        int total = sectionMapper.countByTaskId(taskId, userId);
+        int updated = sectionMapper.refreshParamsForTask(taskId, userId);
+
+        Map<String, Object> result = new LinkedHashMap<>();
+        result.put("success", true);
+        result.put("task_id", taskId);
+        result.put("template_param_id", templateParamId);
+        result.put("param", BasicParamResponse.from(basicParamMapper.selectByTaskId(taskId, userId)));
+        result.put("updated_sections", updated);
+        result.put("total_sections", total);
+        return result;
+    }
+
+    private record Materialized(BasicParamPO po, String source) {
+    }
+
+    private Map<String, Object> taskParamsView(String taskId, BasicParamPO po, String source) {
+        Map<String, Object> result = new LinkedHashMap<>();
+        result.put("success", true);
+        result.put("task_id", taskId);
+        result.put("param", BasicParamResponse.from(po));
+        result.put("source", source);
+        return result;
+    }
+
+    private Materialized materializeTaskParams(String taskId, String templateParamId, Long userId) {
+        BasicParamPO source = null;
+        String sourceLabel = null;
+
+        if (templateParamId != null && !templateParamId.isBlank()) {
+            source = basicParamMapper.selectByParamId(templateParamId, userId);
+            if (source == null) {
+                throw new IllegalArgumentException("模板不存在: " + templateParamId);
+            }
+            if (source.getTaskId() != null) {
+                throw new IllegalArgumentException("只能从模板库初始化任务参数: " + templateParamId);
+            }
+            sourceLabel = "template";
+        }
+
+        if (source == null) {
+            SectionPO first = sectionMapper.selectFirstByTaskId(taskId, userId);
+            if (first != null) {
+                source = fromSectionSnapshot(first);
+                sourceLabel = "section";
+            }
+        }
+
+        if (source == null) {
+            List<BasicParamPO> library = basicParamMapper.selectAll(userId);
+            source = library.stream()
+                    .filter(p -> isDefaultTemplate(p))
+                    .findFirst()
+                    .orElse(library.isEmpty() ? null : library.get(0));
+            if (source != null) {
+                sourceLabel = "default";
+            }
+        }
+
+        if (source == null) {
+            throw new IllegalStateException(
+                    "无法初始化任务参数：该任务没有断面，模板库里也没有可用模板。请先创建参数模板。");
+        }
+
+        BasicParamPO revived = basicParamMapper.selectByTaskIdIncludingDeleted(taskId, userId);
+        if (revived != null) {
+            // 曾经物化过、后来被软删（例如任务数据被清过）⇒ 复活并覆盖成本次来源的值
+            basicParamMapper.reviveByTaskId(taskId, userId);
+            BasicParamPO patch = copyParamValues(source, revived.getParamId());
+            basicParamMapper.update(patch);
+            BasicParamPO saved = basicParamMapper.selectByTaskId(taskId, userId);
+            sectionMapper.assignBasicParamForTask(taskId, saved.getId().intValue(), userId);
+            return new Materialized(saved, sourceLabel);
+        }
+
+        BasicParamPO po = copyParamValues(source, taskParamIdOf(taskId));
+        po.setTaskId(taskId);
+        po.setUserId(SecurityUtils.getCurrentUserId());
+        basicParamMapper.insert(po);
+        BasicParamPO saved = basicParamMapper.selectByTaskId(taskId, userId);
+        sectionMapper.assignBasicParamForTask(taskId, saved.getId().intValue(), userId);
+        return new Materialized(saved, sourceLabel);
+    }
+
+    private String taskParamIdOf(String taskId) {
+        // basic_params.param_id 是全库唯一（VARCHAR(100)）；task_id 形如 task-<uuid>（41 字符）
+        String raw = "tp-" + taskId;
+        return raw.length() <= 100 ? raw : raw.substring(0, 100);
+    }
+
+    private boolean isDefaultTemplate(BasicParamPO po) {
+        Object parsed = parseJson(po.getOtherParams());
+        return parsed instanceof Map<?, ?> map && Boolean.TRUE.equals(map.get("is_default"));
+    }
+
+    /** 用来源的值构造一份参数（param_id 由调用方决定，task_id 不带）。 */
+    private BasicParamPO copyParamValues(BasicParamPO source, String paramId) {
+        BasicParamPO po = new BasicParamPO();
+        po.setParamId(paramId);
+        po.setParamName(source.getParamName());
+        po.setBenchSegment(source.getBenchSegment());
+        po.setCurrentTimepoint(source.getCurrentTimepoint());
+        po.setSetName(source.getSetName());
+        po.setWaterQs(source.getWaterQs());
+        po.setTidalLevel(source.getTidalLevel());
+        po.setBenchId(source.getBenchId());
+        po.setRefId(source.getRefId());
+        po.setHs(source.getHs());
+        po.setHc(source.getHc());
+        po.setProtectionLevel(source.getProtectionLevel());
+        po.setControlLevel(source.getControlLevel());
+        po.setComparisonTimepoint(source.getComparisonTimepoint());
+        po.setRiskThresholds(source.getRiskThresholds());
+        po.setWeights(source.getWeights());
+        po.setOtherParams(source.getOtherParams());
+        return po;
+    }
+
+    /** 断面快照（cross_sections 的一行）转成一份参数。 */
+    private BasicParamPO fromSectionSnapshot(SectionPO section) {
+        BasicParamPO po = new BasicParamPO();
+        po.setParamName(section.getParamName() != null ? section.getParamName() : section.getSectionName());
+        po.setBenchSegment(section.getBenchSegment());
+        po.setCurrentTimepoint(section.getCurrentTimepoint());
+        po.setSetName(section.getSetName());
+        po.setWaterQs(section.getWaterQs());
+        po.setTidalLevel(section.getTidalLevel());
+        po.setBenchId(section.getBenchId());
+        po.setRefId(section.getRefId());
+        po.setHs(section.getHs());
+        po.setHc(section.getHc());
+        po.setProtectionLevel(section.getProtectionLevel());
+        po.setControlLevel(section.getControlLevel());
+        po.setComparisonTimepoint(section.getComparisonTimepoint());
+        po.setRiskThresholds(section.getRiskThresholds());
+        po.setWeights(section.getWeights());
+        po.setOtherParams(section.getOtherParams());
+        return po;
     }
 
     // ==================== Section ====================
@@ -225,7 +508,7 @@ public class BusinessStoreService {
             return getSection(payload.sectionId());
         }
 
-        Integer basicParamId = payload.basicParamId();
+        Integer basicParamId = resolveTaskParamId(taskId, payload.basicParamId(), userId);
         Map<String, Object> baseParams = inheritFromBasicParam && basicParamId != null
                 ? toMap(basicParamMapper.selectById(basicParamId, userId))
                 : new LinkedHashMap<>();
@@ -234,6 +517,32 @@ public class BusinessStoreService {
         po.setUserId(SecurityUtils.getCurrentUserId());
         sectionMapper.insert(po);
             return SectionResponse.from(sectionMapper.selectBySectionId(payload.sectionId(), userId));
+    }
+
+    /**
+     * 断面只能挂在本任务自己的参数集上，**绝不挂模板库主数据**。
+     *
+     * 旧实现是「断面 → 模板库某一行」的纯引用，于是改模板就等于改所有引用它的任务；
+     * 现在即使前端仍传了模板库的 id，也先物化成本任务的参数集再挂上去。
+     * 这样「引用」这条路径从数据层就不可能再出现。
+     */
+    private Integer resolveTaskParamId(String taskId, Integer requestedId, Long userId) {
+        BasicParamPO taskParams = basicParamMapper.selectByTaskId(taskId, userId);
+        if (taskParams != null) {
+            return taskParams.getId().intValue();
+        }
+
+        String templateParamId = null;
+        if (requestedId != null) {
+            BasicParamPO requested = basicParamMapper.selectById(requestedId, userId);
+            if (requested != null && requested.getTaskId() != null && !taskId.equals(requested.getTaskId())) {
+                // 指向了别的任务的私有参数集 ⇒ 不接受，按默认来源物化
+                templateParamId = null;
+            } else if (requested != null) {
+                templateParamId = requested.getParamId();
+            }
+        }
+        return materializeTaskParams(taskId, templateParamId, userId).po().getId().intValue();
     }
 
     public List<SectionResponse> listSections(String taskId, String bankId) {
@@ -343,6 +652,42 @@ public class BusinessStoreService {
         sectionMapper.batchUpdateParams(sectionIds, params, userId);
     }
 
+    /**
+     * 统计该参数模板下有多少断面的快照与模板不一致（只读，供界面提示「N 条断面未同步」）。
+     * 不一致的典型来源：断面先建、模板后改。
+     */
+    public int countParamDiffsForTask(String taskId) {
+        Long userId = SecurityUtils.getCurrentUserIdForDataFilter();
+        return sectionMapper.countParamDiffsForTask(taskId, userId);
+    }
+
+    /**
+     * 把本任务的断面参数快照刷新为该任务自己的参数集（不是模板库）。
+     *
+     * 作用域**只能是任务**：模板库是主数据，一个模板被多个历史任务共用（实测模板 166 下
+     * 13822 条断面横跨 15 个任务），按模板下发会一次性改写所有历史任务的输入。
+     * 也不挂在 updateBasicParam 上自动执行：保存模板是主数据操作，与任务无关。
+     */
+    public Map<String, Object> refreshParamsForTask(String taskId) {
+        Long userId = SecurityUtils.getCurrentUserIdForDataFilter();
+
+        // 先确保本任务有独立的参数集，再同步 —— 否则会把模板库当成任务参数来用，
+        // 等于把「引用」又写回去了。
+        if (basicParamMapper.selectByTaskId(taskId, userId) == null) {
+            materializeTaskParams(taskId, null, userId);
+        }
+
+        int pendingBefore = sectionMapper.countParamDiffsForTask(taskId, userId);
+        int updated = pendingBefore == 0 ? 0 : sectionMapper.refreshParamsForTask(taskId, userId);
+
+        Map<String, Object> result = new LinkedHashMap<>();
+        result.put("success", true);
+        result.put("task_id", taskId);
+        result.put("pending_before", pendingBefore);
+        result.put("updated", updated);
+        return result;
+    }
+
     // ==================== RiskResult ====================
 
     public List<RiskResultResponse> listRiskResults(String taskId, String bankId, String regionCode) {
@@ -404,6 +749,202 @@ public class BusinessStoreService {
         po.setRiskLevel(riskLevel);
         po.setIndicators(writeJson(indicators));
         riskResultMapper.insert(po);
+    }
+
+    // ==================== RiskResult 人工修改 ====================
+
+    /** 与 riskLevel.py 的 raw_values 键一致；顺序即前端表格的展示顺序。 */
+    private static final List<String> OVERRIDE_INDICATOR_KEYS =
+            List.of("Ky", "PQ", "Zd", "Sa", "Ln", "Zb", "Dsed", "PL", "LC");
+
+    /** PL/LC 是枚举，其余是连续量。两套枚举字符串不能混用（PL 用 systemic，LC 用 strict）。 */
+    private static final Map<String, List<String>> OVERRIDE_ENUM_VALUES = Map.of(
+            "PL", List.of("systemic", "normal", "low", "no"),
+            "LC", List.of("strict", "normal", "low", "no"));
+
+    /** 结果里没记录阈值时的兜底，与前端 DEFAULT_RISK_THRESHOLDS 同值。 */
+    private static final double[] DEFAULT_RISK_ALL = {0.25, 0.5, 0.75};
+
+    /**
+     * 人工修改一条风险结果。
+     *
+     * 只做三件事：校验不变量 → 把前端重算好的 indicators 写回同一行 → 留痕。
+     * **刻意不重算评分**：重算意味着在 Java 里再写一遍 9 个指标的分档方向与矩阵点乘，
+     * 与 riskLevel.py 形成第三份实现，迟早漂移。这里只校验最廉价、也最危险的那条不变量：
+     * 风险值与风险等级必须自洽（bucket(result) + 1 == risk_level）。
+     */
+    public RiskResultResponse overrideRiskResult(String sectionId, RiskResultOverrideRequest request) {
+        if (request == null || request.patch() == null || request.patch().isEmpty()) {
+            throw ResultOverrideException.invalid("缺少 patch 内容");
+        }
+        Long dataFilterUserId = SecurityUtils.getCurrentUserIdForDataFilter();
+        RiskResultPO current = riskResultMapper.selectLatestBySectionId(sectionId, dataFilterUserId);
+        if (current == null) {
+            throw new IllegalArgumentException("Risk result not found for section_id: " + sectionId);
+        }
+        if (request.taskId() != null && !request.taskId().isBlank()
+                && !request.taskId().equals(current.getTaskId())) {
+            throw ResultOverrideException.invalid("该断面不属于任务 " + request.taskId());
+        }
+        // 同一断面每跑一轮就会多插一行；客户端编辑的是它看到的那一行。
+        // 若库里最新行已经不是它，说明任务重跑过，此时保存会「改了但看不见」，必须让用户刷新。
+        if (request.resultId() != null && !request.resultId().equals(current.getId())) {
+            throw ResultOverrideException.stale("该断面结果已被新一轮运行覆盖，请刷新后重试");
+        }
+
+        Map<String, Object> patch = request.patch();
+        if (!(patch.get("raw_values") instanceof Map<?, ?> rawPatch)) {
+            throw ResultOverrideException.invalid("raw_values 缺失");
+        }
+
+        Map<String, Object> newRawValues = new LinkedHashMap<>();
+        for (String key : OVERRIDE_INDICATOR_KEYS) {
+            if (!rawPatch.containsKey(key)) {
+                throw ResultOverrideException.invalid("缺少指标 " + key);
+            }
+            Object value = rawPatch.get(key);
+            List<String> allowed = OVERRIDE_ENUM_VALUES.get(key);
+            if (allowed != null) {
+                String text = value == null ? null : String.valueOf(value).trim().toLowerCase();
+                if (text == null || !allowed.contains(text)) {
+                    throw ResultOverrideException.invalid(
+                            key + " 必须是 " + allowed + " 之一，实际为 " + value);
+                }
+                newRawValues.put(key, text);
+            } else {
+                if (!(value instanceof Number number) || !Double.isFinite(number.doubleValue())) {
+                    throw ResultOverrideException.invalid(key + " 必须是有限数值，实际为 " + value);
+                }
+                newRawValues.put(key, number.doubleValue());
+            }
+        }
+
+        if (!(patch.get("result") instanceof Number resultNumber)) {
+            throw ResultOverrideException.invalid("result 缺失");
+        }
+        double riskValue = resultNumber.doubleValue();
+        if (!Double.isFinite(riskValue) || riskValue < 0 || riskValue > 1) {
+            throw ResultOverrideException.invalid("风险值必须在 0~1 之间，实际为 " + riskValue);
+        }
+        if (!(patch.get("risk_level") instanceof Number levelNumber)) {
+            throw ResultOverrideException.invalid("risk_level 缺失");
+        }
+        int riskLevel = levelNumber.intValue();
+        if (riskLevel < 1 || riskLevel > 4) {
+            throw ResultOverrideException.invalid("风险等级必须在 1~4 之间，实际为 " + riskLevel);
+        }
+        double[] all = riskThresholdsOf(current.getIndicators());
+        int expectedLevel = bucketRiskLevel(riskValue, all) + 1;
+        if (expectedLevel != riskLevel) {
+            throw ResultOverrideException.invalid(
+                    "风险值 " + riskValue + " 与风险等级 " + riskLevel + " 不一致（按阈值应为 " + expectedLevel + "）");
+        }
+
+        String note = request.note() == null ? null : request.note().trim();
+        if (note != null && note.length() > 200) {
+            throw ResultOverrideException.invalid("备注不能超过 200 字");
+        }
+
+        Object parsedCurrent = parseJson(current.getIndicators());
+        Map<String, Object> nextIndicators = parsedCurrent instanceof Map<?, ?> currentMap
+                ? asStringKeyMap(currentMap)
+                : new LinkedHashMap<>();
+
+        nextIndicators.put("raw_values", newRawValues);
+        Map<String, Object> matrices = nextIndicators.get("matrices") instanceof Map<?, ?> matrixMap
+                ? asStringKeyMap(matrixMap)
+                : new LinkedHashMap<>();
+        if (patch.get("matrices") instanceof Map<?, ?> matrixPatch) {
+            matrices.putAll(asStringKeyMap(matrixPatch));
+        }
+        nextIndicators.put("matrices", matrices);
+        nextIndicators.put("result", riskValue);
+        nextIndicators.put("risk-level", oneHotRiskLevel(riskLevel));
+
+        String now = java.time.OffsetDateTime.now().toString();
+        Map<String, Object> overrideMeta = new LinkedHashMap<>();
+        overrideMeta.put("edited", true);
+        overrideMeta.put("edited_at", now);
+        overrideMeta.put("edited_by", SecurityUtils.getCurrentUserId());
+        overrideMeta.put("note", note);
+        nextIndicators.put("manual_override", overrideMeta);
+
+        // 原始快照只在**首次**修改时拍下；后续修改继续沿用，否则「恢复模型原值」会退回到上一次的人工值。
+        Object existingState = parseJson(current.getEditState());
+        Map<String, Object> editState = existingState instanceof Map<?, ?> stateMap
+                && stateMap.get("original_indicators") != null
+                ? asStringKeyMap(stateMap)
+                : new LinkedHashMap<>();
+        if (!editState.containsKey("original_indicators")) {
+            editState.put("original_indicators", parsedCurrent);
+            editState.put("original_risk_level", current.getRiskLevel());
+        }
+        editState.put("edited_at", now);
+        editState.put("edited_by", SecurityUtils.getCurrentUserId());
+        editState.put("note", note);
+
+        int updated = riskResultMapper.updateManualOverride(
+                current.getId(), writeJson(nextIndicators), riskLevel, writeJson(editState), dataFilterUserId);
+        if (updated == 0) {
+            throw ResultOverrideException.stale("保存失败：结果行已变化，请刷新后重试");
+        }
+        return RiskResultResponse.from(riskResultMapper.selectLatestBySectionId(sectionId, dataFilterUserId));
+    }
+
+    /** 恢复模型原值。返回恢复后的结果，供前端就地重绘。 */
+    public RiskResultResponse revertRiskResultOverride(String sectionId, String taskId) {
+        Long dataFilterUserId = SecurityUtils.getCurrentUserIdForDataFilter();
+        RiskResultPO current = riskResultMapper.selectLatestBySectionId(sectionId, dataFilterUserId);
+        if (current == null) {
+            throw new IllegalArgumentException("Risk result not found for section_id: " + sectionId);
+        }
+        if (taskId != null && !taskId.isBlank() && !taskId.equals(current.getTaskId())) {
+            throw ResultOverrideException.invalid("该断面不属于任务 " + taskId);
+        }
+        int updated = riskResultMapper.revertManualOverride(current.getId(), dataFilterUserId);
+        if (updated == 0) {
+            throw ResultOverrideException.invalid("该结果没有人工修改记录");
+        }
+        return RiskResultResponse.from(riskResultMapper.selectLatestBySectionId(sectionId, dataFilterUserId));
+    }
+
+    /** 取该结果自带的 all 阈值；缺失（老记录/自定义参数未回带）时回落默认。 */
+    private double[] riskThresholdsOf(String indicatorsJson) {
+        Object parsed = parseJson(indicatorsJson);
+        if (parsed instanceof Map<?, ?> map) {
+            Object thresholds = map.get("thresholds");
+            if (thresholds instanceof Map<?, ?> thresholdMap) {
+                Object all = thresholdMap.get("risk_threshold");
+                if (all instanceof List<?> list && list.size() >= 3
+                        && list.get(0) instanceof Number a && list.get(1) instanceof Number b
+                        && list.get(2) instanceof Number c) {
+                    return new double[]{a.doubleValue(), b.doubleValue(), c.doubleValue()};
+                }
+            }
+        }
+        return DEFAULT_RISK_ALL;
+    }
+
+    /** 与 riskLevel.py 的 `risk_value < risk_threshold[i]` 完全同语义。 */
+    private int bucketRiskLevel(double riskValue, double[] all) {
+        if (riskValue < all[0]) return 0;
+        if (riskValue < all[1]) return 1;
+        if (riskValue < all[2]) return 2;
+        return 3;
+    }
+
+    private List<Integer> oneHotRiskLevel(int riskLevel) {
+        List<Integer> oneHot = new java.util.ArrayList<>(4);
+        for (int tier = 1; tier <= 4; tier++) {
+            oneHot.add(tier == riskLevel ? 1 : 0);
+        }
+        return oneHot;
+    }
+
+    private Map<String, Object> asStringKeyMap(Map<?, ?> source) {
+        Map<String, Object> result = new LinkedHashMap<>();
+        source.forEach((key, value) -> result.put(String.valueOf(key), value));
+        return result;
     }
 
     // ==================== SectionProfile ====================

@@ -12,6 +12,7 @@
         <result property="bankId" column="bank_id"/>
         <result property="riskLevel" column="risk_level"/>
         <result property="indicators" column="indicators"/>
+        <result property="editState" column="edit_state"/>
         <result property="createdAt" column="created_at"/>
         <result property="updatedAt" column="updated_at"/>
         <result property="deletedAt" column="deleted_at"/>
@@ -61,5 +62,32 @@
         SELECT COUNT(*) > 0 FROM bank_risk_results
         WHERE run_id = #{runId} AND section_id = #{sectionId} AND deleted_at IS NULL AND (user_id = #{userId} OR #{userId, jdbcType=BIGINT} IS NULL)
     </select>
+
+    <!--
+      人工修改：只改这一行的 indicators / risk_level / edit_state。
+      刻意原地改写而不是另建覆盖表 —— 出图 SQL（indicators->>'result'）、
+      报告 CSV、AI 工具都直接读这张表，原地改写让它们零改造自动跟随。
+    -->
+    <update id="updateManualOverride">
+        UPDATE bank_risk_results
+        SET indicators = #{indicators}::jsonb,
+            risk_level = #{riskLevel},
+            edit_state = #{editState}::jsonb
+        WHERE id = #{id}
+          AND deleted_at IS NULL
+          AND (user_id = #{userId} OR #{userId, jdbcType=BIGINT} IS NULL)
+    </update>
+
+    <!-- 回滚到模型原值：快照存在 edit_state 里，取回后把 edit_state 置空 -->
+    <update id="revertManualOverride">
+        UPDATE bank_risk_results
+        SET indicators = (edit_state -> 'original_indicators')::jsonb,
+            risk_level = (edit_state ->> 'original_risk_level')::int,
+            edit_state = NULL
+        WHERE id = #{id}
+          AND edit_state IS NOT NULL
+          AND deleted_at IS NULL
+          AND (user_id = #{userId} OR #{userId, jdbcType=BIGINT} IS NULL)
+    </update>
 
 </mapper>

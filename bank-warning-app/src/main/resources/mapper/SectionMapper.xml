@@ -154,6 +154,28 @@
         SELECT COUNT(*) > 0 FROM cross_sections WHERE section_id = #{sectionId} AND deleted_at IS NULL AND (user_id = #{userId} OR #{userId, jdbcType=BIGINT} IS NULL)
     </select>
 
+    <!-- 任务参数物化时的取值来源：该任务第一条断面快照（= 实际跑过的输入），没有则返回 null。 -->
+    <select id="selectFirstByTaskId" resultMap="SectionResultMap">
+        SELECT cs.*
+        FROM cross_sections cs
+        JOIN tasks t ON cs.task_id = t.task_id
+        WHERE cs.task_id = #{taskId} AND cs.deleted_at IS NULL AND t.deleted_at IS NULL
+          AND (cs.user_id = #{userId} OR #{userId, jdbcType=BIGINT} IS NULL)
+        ORDER BY cs.id
+        LIMIT 1
+    </select>
+
+    <!-- 把本任务所有断面重新指向该任务的参数集（只改归属，不动参数值）。 -->
+    <update id="assignBasicParamForTask">
+        UPDATE cross_sections
+        SET basic_param_id = #{basicParamId},
+            updated_at = CURRENT_TIMESTAMP
+        WHERE task_id = #{taskId}
+          AND deleted_at IS NULL
+          AND basic_param_id IS DISTINCT FROM #{basicParamId}
+          AND (user_id = #{userId} OR #{userId, jdbcType=BIGINT} IS NULL)
+    </update>
+
     <update id="batchUpdateParams">
         UPDATE cross_sections
         <set>
@@ -181,5 +203,88 @@
         </foreach>
         AND deleted_at IS NULL AND (user_id = #{userId} OR #{userId, jdbcType=BIGINT} IS NULL)
     </update>
+
+    <!--
+      把本任务的断面参数快照刷新为**本任务参数集**的当前值。
+
+      作用域只到 task_id，绝不能按 param_id 全量下发：
+      basic_params 里 task_id IS NULL 的行是模板库主数据（一个模板可能被多个历史任务复用），
+      按模板下发等于一次性改写所有历史任务的输入，任务就不可复现了。
+      任务内刷新才是允许的批量语义。
+
+      同步列 = 模型入参实际读取的列（TaskExecutionService#buildRiskLevelPayload）。
+      other_params 刻意不同步：它装的是该断面自己的 leftPoint / rightPoint 等几何点位，
+      用任务级的值覆盖会把断面方向信息写坏。
+
+      IS DISTINCT FROM 保证重复执行为 0 行（幂等），不会制造无意义写入。
+    -->
+    <update id="refreshParamsForTask">
+        UPDATE cross_sections cs
+        SET basic_param_id      = bp.id,
+            param_name          = bp.param_name,
+            bench_segment       = bp.bench_segment,
+            current_timepoint   = bp.current_timepoint,
+            set_name            = bp.set_name,
+            water_qs            = bp.water_qs,
+            tidal_level         = bp.tidal_level,
+            bench_id            = bp.bench_id,
+            ref_id              = bp.ref_id,
+            hs                  = bp.hs,
+            hc                  = bp.hc,
+            protection_level    = bp.protection_level,
+            control_level       = bp.control_level,
+            comparison_timepoint = bp.comparison_timepoint,
+            risk_thresholds     = bp.risk_thresholds,
+            weights             = bp.weights,
+            updated_at          = CURRENT_TIMESTAMP
+        FROM basic_params bp
+        WHERE bp.id = cs.basic_param_id
+          AND cs.task_id = #{taskId}
+          AND bp.deleted_at IS NULL
+          AND cs.deleted_at IS NULL
+          AND (cs.user_id = #{userId} OR #{userId, jdbcType=BIGINT} IS NULL)
+          AND (cs.basic_param_id      IS DISTINCT FROM bp.id
+            OR cs.param_name          IS DISTINCT FROM bp.param_name
+            OR cs.bench_segment       IS DISTINCT FROM bp.bench_segment
+            OR cs.current_timepoint   IS DISTINCT FROM bp.current_timepoint
+            OR cs.set_name            IS DISTINCT FROM bp.set_name
+            OR cs.water_qs            IS DISTINCT FROM bp.water_qs
+            OR cs.tidal_level         IS DISTINCT FROM bp.tidal_level
+            OR cs.bench_id            IS DISTINCT FROM bp.bench_id
+            OR cs.ref_id              IS DISTINCT FROM bp.ref_id
+            OR cs.hs                  IS DISTINCT FROM bp.hs
+            OR cs.hc                  IS DISTINCT FROM bp.hc
+            OR cs.protection_level    IS DISTINCT FROM bp.protection_level
+            OR cs.control_level       IS DISTINCT FROM bp.control_level
+            OR cs.comparison_timepoint IS DISTINCT FROM bp.comparison_timepoint
+            OR cs.risk_thresholds     IS DISTINCT FROM bp.risk_thresholds
+            OR cs.weights             IS DISTINCT FROM bp.weights)
+    </update>
+
+    <select id="countParamDiffsForTask" resultType="int">
+        SELECT count(*)
+        FROM cross_sections cs
+        JOIN basic_params bp ON bp.id = cs.basic_param_id
+        WHERE cs.task_id = #{taskId}
+          AND bp.deleted_at IS NULL
+          AND cs.deleted_at IS NULL
+          AND (cs.user_id = #{userId} OR #{userId, jdbcType=BIGINT} IS NULL)
+          AND (cs.basic_param_id      IS DISTINCT FROM bp.id
+            OR cs.param_name          IS DISTINCT FROM bp.param_name
+            OR cs.bench_segment       IS DISTINCT FROM bp.bench_segment
+            OR cs.current_timepoint   IS DISTINCT FROM bp.current_timepoint
+            OR cs.set_name            IS DISTINCT FROM bp.set_name
+            OR cs.water_qs            IS DISTINCT FROM bp.water_qs
+            OR cs.tidal_level         IS DISTINCT FROM bp.tidal_level
+            OR cs.bench_id            IS DISTINCT FROM bp.bench_id
+            OR cs.ref_id              IS DISTINCT FROM bp.ref_id
+            OR cs.hs                  IS DISTINCT FROM bp.hs
+            OR cs.hc                  IS DISTINCT FROM bp.hc
+            OR cs.protection_level    IS DISTINCT FROM bp.protection_level
+            OR cs.control_level       IS DISTINCT FROM bp.control_level
+            OR cs.comparison_timepoint IS DISTINCT FROM bp.comparison_timepoint
+            OR cs.risk_thresholds     IS DISTINCT FROM bp.risk_thresholds
+            OR cs.weights             IS DISTINCT FROM bp.weights)
+    </select>
 
 </mapper>
