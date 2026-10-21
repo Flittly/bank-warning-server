@@ -58,8 +58,27 @@
         WHERE task_id = #{taskId} AND deleted_at IS NULL AND (user_id = #{userId} OR #{userId, jdbcType=BIGINT} IS NULL)
     </update>
 
-    <select id="existsByRunIdAndSectionId" resultType="boolean">
-        SELECT COUNT(*) > 0 FROM bank_risk_results
+    <!--
+      单断面重算前的「作废旧结果」。
+      不清就会留下两行有效结果（本表是 INSERT 追加，不是 upsert），而
+      selectByTaskIdAndBankIdAndRegionCode 是 ORDER BY id 全量返回 ⇒ 结果页会出现
+      同一个断面两行、且靠前那行是过期等级。软删而不是硬删：人工修改快照
+      （edit_state）与历史轮次都还留在库里，出问题能追溯。
+    -->
+    <update id="deleteBySectionId">
+        UPDATE bank_risk_results SET deleted_at = CURRENT_TIMESTAMP
+        WHERE section_id = #{sectionId} AND deleted_at IS NULL
+          AND (user_id = #{userId} OR #{userId, jdbcType=BIGINT} IS NULL)
+    </update>
+
+    <!-- 该断面当前是否还有有效结果（几何变更时用来判断「需不需要重算覆盖」）。 -->
+    <select id="countActiveBySectionId" resultType="int">
+        SELECT COUNT(*) FROM bank_risk_results
+        WHERE section_id = #{sectionId} AND deleted_at IS NULL
+          AND (user_id = #{userId} OR #{userId, jdbcType=BIGINT} IS NULL)
+    </select>
+
+    <select id="existsByRunIdAndSectionId" resultType="boolean">        SELECT COUNT(*) > 0 FROM bank_risk_results
         WHERE run_id = #{runId} AND section_id = #{sectionId} AND deleted_at IS NULL AND (user_id = #{userId} OR #{userId, jdbcType=BIGINT} IS NULL)
     </select>
 

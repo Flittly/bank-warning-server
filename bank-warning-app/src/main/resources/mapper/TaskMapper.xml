@@ -39,6 +39,15 @@
         WHERE task_id = #{taskId} AND deleted_at IS NULL AND (user_id = #{userId} OR #{userId, jdbcType=BIGINT} IS NULL)
     </update>
 
+    <!-- 只写 bank_ids：岸段增补走这条，不动 task_name / description。
+         空数组写成 '[]' 而不是 NULL —— `bank_ids::jsonb` 对 NULL 会写入 JSON null，
+         读回来是 "null" 字符串，treeModel 里 Array.isArray 判假也能兜住，但语义上应是空集合。 -->
+    <update id="updateBankIds">
+        UPDATE tasks
+        SET bank_ids = #{bankIds}::jsonb
+        WHERE task_id = #{taskId} AND deleted_at IS NULL AND (user_id = #{userId} OR #{userId, jdbcType=BIGINT} IS NULL)
+    </update>
+
     <update id="deleteByTaskId">
         UPDATE tasks SET deleted_at = CURRENT_TIMESTAMP
         WHERE task_id = #{taskId} AND deleted_at IS NULL AND (user_id = #{userId} OR #{userId, jdbcType=BIGINT} IS NULL)

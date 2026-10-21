@@ -1,6 +1,7 @@
 package com.yangtze.bankwarning.controller;
 
 import com.yangtze.bankwarning.domain.exception.ResultOverrideException;
+import com.yangtze.bankwarning.domain.exception.SectionRecomputeException;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.http.HttpStatus;
@@ -44,6 +45,20 @@ public class ApiExceptionHandler {
         log.warn("[api-error] result override rejected({}): {}", exception.getCode(), exception.getMessage());
         return ResponseEntity.status(exception.getStatus())
                 .body(error(exception.getCode(), exception.getMessage(), null));
+    }
+
+    /**
+     * 单断面重算的三种「此刻不能算」：整任务在跑、同一断面已在重算、任务下有断面在单算。
+     * 统一 409 —— 前端据此提示「稍后再试」而不是当成断面不存在。
+     */
+    @ExceptionHandler(SectionRecomputeException.class)
+    public ResponseEntity<Map<String, Object>> handleSectionRecompute(SectionRecomputeException exception) {
+        log.warn("[api-error] section recompute rejected({}): {}", exception.getCode(), exception.getMessage());
+        return ResponseEntity.status(exception.getStatus())
+                .body(error(
+                        exception.getCode(),
+                        exception.getMessage(),
+                        exception.getSectionId() == null ? null : Map.of("section_id", exception.getSectionId())));
     }
 
     @ExceptionHandler(Exception.class)

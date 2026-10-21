@@ -1,5 +1,7 @@
 package com.yangtze.bankwarning.controller;
 
+import com.yangtze.bankwarning.ai.service.ReportPackageService;
+import com.yangtze.bankwarning.ai.service.RiskSegmentSummaryService;
 import com.yangtze.bankwarning.domain.dto.BankPayload;
 import com.yangtze.bankwarning.domain.dto.BanksCreateRequest;
 import com.yangtze.bankwarning.domain.dto.BasicParamPayload;
@@ -8,6 +10,7 @@ import com.yangtze.bankwarning.domain.dto.RiskResultOverrideRequest;
 import com.yangtze.bankwarning.domain.dto.SectionPayload;
 import com.yangtze.bankwarning.domain.dto.SectionsCreateRequest;
 import com.yangtze.bankwarning.domain.dto.SectionBatchUpdateRequest;
+import com.yangtze.bankwarning.domain.dto.TaskBanksAppendRequest;
 import com.yangtze.bankwarning.domain.dto.TaskParamsUpdateRequest;
 import com.yangtze.bankwarning.domain.dto.TasksCreateRequest;
 import com.yangtze.bankwarning.domain.dto.TaskStatusUpdateRequest;
@@ -16,6 +19,9 @@ import com.yangtze.bankwarning.service.BusinessStoreService;
 import com.yangtze.bankwarning.service.SectionValidationService;
 import com.yangtze.bankwarning.service.TaskExecutionService;
 import jakarta.validation.Valid;
+import org.springframework.http.HttpHeaders;
+import org.springframework.http.MediaType;
+import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.DeleteMapping;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
@@ -26,8 +32,17 @@ import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
 
+import java.nio.charset.StandardCharsets;
+import java.time.LocalDate;
+import java.time.format.DateTimeFormatter;
 import java.util.HashMap;
+import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
+import java.util.List;
+import java.util.Locale;
 import java.util.Map;
+import java.util.Objects;
+import java.util.Set;
 
 @RestController
 @RequestMapping("/v0/bank")
@@ -37,15 +52,55 @@ public class BusinessController {
     private final TaskExecutionService taskExecutionService;
     private final SectionValidationService sectionValidationService;
     private final HydroConditionMapper hydroConditionMapper;
+    private final RiskSegmentSummaryService riskSegmentSummaryService;
 
     public BusinessController(BusinessStoreService businessStoreService,
                               TaskExecutionService taskExecutionService,
                               SectionValidationService sectionValidationService,
-                              HydroConditionMapper hydroConditionMapper) {
+                              HydroConditionMapper hydroConditionMapper,
+                              RiskSegmentSummaryService riskSegmentSummaryService) {
         this.businessStoreService = businessStoreService;
         this.taskExecutionService = taskExecutionService;
         this.sectionValidationService = sectionValidationService;
         this.hydroConditionMapper = hydroConditionMapper;
+        this.riskSegmentSummaryService = riskSegmentSummaryService;
+    }
+
+    /**
+     * 下拉里允许出现的水文条件白名单，元素格式 `water_qs|tidal_level`。
+     *
+     * <p>2026-10-20 收敛：只保留 84000 m³/s · 1998-2023 一项，其余历史组合
+     * （10000／13000／16500／…／104000，以及 84000 的 1998-2018 与 dc/xc/zc）不再出现在下拉里。
+     *
+     * <p><b>只过滤下拉，没有删库。</b>`hydrodynamic_points`（每个组合 ~8~12 万条流场点）与
+     * `basic_params` 的原始记录必须保留：已绑定的模板/断面要靠它回显「（当前）」，
+     * 流场回放也要按组合 id 找工况目录。删数据会连带弄丢这两样。
+     *
+     * <p>要放开某个组合，往集合里加一项即可；要恢复全部，把 {@link #isHydroConditionVisible} 直接返回 true。
+     */
+    private static final Set<String> VISIBLE_HYDRO_CONDITIONS = Set.of("84000|1998-2023");
+
+    /** 组合是否允许出现在下拉里。规范化为 `water_qs|tidal_level` 后比对，避免空格/大小写差异漏判。 */
+    private static boolean isHydroConditionVisible(Map<String, Object> condition) {
+        String key = column(condition, "water_qs") + "|" + column(condition, "tidal_level");
+        return VISIBLE_HYDRO_CONDITIONS.contains(key);
+    }
+
+    /**
+     * 取结果集里的列值。MyBatis 的 `resultType="map"` 不保证键名形态
+     * （PostgreSQL 给 `water_qs`，开了 mapUnderscoreToCamelCase 可能是 `waterQs`），
+     * 所以按「去掉下划线 + 忽略大小写」比对，取不到返回空串而不是 null。
+     */
+    private static String column(Map<String, Object> row, String name) {
+        String wanted = name.replace("_", "").toLowerCase(Locale.ROOT);
+        for (Map.Entry<String, Object> entry : row.entrySet()) {
+            String key = entry.getKey();
+            if (key == null || !key.replace("_", "").toLowerCase(Locale.ROOT).equals(wanted)) {
+                continue;
+            }
+            return entry.getValue() == null ? "" : String.valueOf(entry.getValue()).trim();
+        }
+        return "";
     }
 
     @PostMapping("/banks")
@@ -106,15 +161,67 @@ public class BusinessController {
         return Map.of("success", true, "message", "Task deleted successfully");
     }
 
+    /**
+     * 给已有任务补充（或整体替换）岸段关联。
+     *
+     * <p>这是「往现有任务里补岸段」的唯一后端入口。不新建任务、不动断面、不清结果 ——
+     * 断面由前端随后按 {@code POST /v0/bank/sections} 单独落库，两步分开：
+     * 关联这一步幂等，重试不会产生重复断面。
+     *
+     * <p>请求体 {@code {"bank_ids": ["b1","b2"], "mode": "merge"}}；{@code mode} 缺省为 merge。
+     * 返回体里 {@code added} 是本次真正新增的（已存在的不重复计），
+     * {@code missing} 非空表示有岸段在库里查不到，此时**未做任何修改**。
+     */
+    @PostMapping("/tasks/{task_id}/banks")
+    public Map<String, Object> appendTaskBanks(
+            @PathVariable("task_id") String taskId,
+            @RequestBody TaskBanksAppendRequest request) {
+        return businessStoreService.appendTaskBanks(taskId, request.bankIds(), request.mode());
+    }
+
+    /**
+     * 用「该任务断面里实际用到的真实岸段」补全 {@code tasks.bank_ids}（幂等、只增不减）。
+     *
+     * <p>给历史数据兜底：早年的「补充岸段」在写关联前就失败过，断面已落库、bank_ids 没写，
+     * 于是资源树（只读 bank_ids）与地图（读并集）会给出两个不同的岸段数。
+     * 前端在加载任务时发现"有断面但没登记"的岸段就调它修一次，之后两边自然一致。
+     */
+    @PostMapping("/tasks/{task_id}/banks/sync")
+    public Map<String, Object> syncTaskBanks(@PathVariable("task_id") String taskId) {
+        return businessStoreService.syncTaskBanksFromSections(taskId);
+    }
+
     @PutMapping("/tasks/{task_id}/status")
     public Map<String, Object> updateTaskStatus(@PathVariable("task_id") String taskId, @RequestBody TaskStatusUpdateRequest request) {
         businessStoreService.updateTaskStatus(taskId, request.status(), request.runStartedAt(), request.runCompletedAt(), request.errorMessage());
         return Map.of("success", true, "task_id", taskId, "updated", true);
     }
 
+    /**
+     * 执行任务下的断面。
+     *
+     * <p>{@code only_pending=true} 只算「还没有有效结果」的断面，已有结果不动 ——
+     * 给任务补充岸段之后只想算新增的那几条时用它。缺省（不传）保持历史行为：
+     * 先作废本任务全部结果再全量重算。
+     *
+     * <p>请求体可选 {@code {"section_ids": [...]}}：把增量范围再收窄到这一批断面
+     * （补岸段只算本次新增，不把任务里其他"还没算过"的老断面一起拉进来）。
+     */
     @PostMapping("/tasks/{task_id}/run")
-    public Map<String, Object> runTask(@PathVariable("task_id") String taskId) {
-        return taskExecutionService.runTask(taskId);
+    public Map<String, Object> runTask(
+            @PathVariable("task_id") String taskId,
+            @RequestParam(name = "only_pending", required = false) Boolean onlyPending,
+            @RequestBody(required = false) Map<String, Object> body) {
+        List<String> sectionIds = null;
+        Object raw = body == null ? null : body.get("section_ids");
+        if (raw instanceof List<?> list) {
+            sectionIds = list.stream()
+                    .filter(Objects::nonNull)
+                    .map(v -> String.valueOf(v).trim())
+                    .filter(v -> !v.isEmpty())
+                    .toList();
+        }
+        return taskExecutionService.runTask(taskId, Boolean.TRUE.equals(onlyPending), sectionIds);
     }
 
     /**
@@ -194,7 +301,12 @@ public class BusinessController {
 
     @GetMapping("/hydro-conditions")
     public Map<String, Object> listHydroConditions() {
-        return Map.of("success", true, "conditions", hydroConditionMapper.selectDistinctConditions());
+        // 库里取全部组合，再按白名单收口：模板库与「断面参数」两个弹窗共用这个接口，
+        // 收口放在这里才能保证两处口径一致（前端各写一份过滤必然漂移）。
+        var conditions = hydroConditionMapper.selectDistinctConditions().stream()
+                .filter(BusinessController::isHydroConditionVisible)
+                .toList();
+        return Map.of("success", true, "conditions", conditions);
     }
 
     @PostMapping("/sections")
@@ -222,8 +334,29 @@ public class BusinessController {
 
     @PutMapping("/sections/{section_id}")
     public Map<String, Object> updateSection(@PathVariable("section_id") String sectionId, @RequestBody SectionPayload payload) {
-        businessStoreService.updateSection(sectionId, payload);
-        return Map.of("success", true, "section_id", sectionId, "updated", true);
+        BusinessStoreService.SectionGeometryUpdate update = businessStoreService.updateSection(sectionId, payload);
+        Map<String, Object> response = new LinkedHashMap<>();
+        response.put("success", true);
+        response.put("section_id", sectionId);
+        response.put("updated", true);
+        // 几何变了 ⇒ 这条断面的旧结论已经被作废（见 BusinessStoreService#updateSection）。
+        // had_result 是给前端的信号：true = 刚才作废过一份真结果，应当立刻
+        // POST /sections/{id}/recompute 把它补回来；false = 本来就没算过，等任务整体运行即可。
+        response.put("geometry_changed", update.geometryChanged());
+        response.put("had_result", update.hadResult());
+        return response;
+    }
+
+    /**
+     * 单断面重算：只算这一条并覆盖它的结论（旧行已在保存几何时作废）。
+     *
+     * <p>失败以 {@code status:"failed" + error_code} 返回（HTTP 200）：几何已经存下来了，
+     * 「这条算不出来」是数据问题，不该让前端当成请求异常。
+     * 409 = 此刻不能算（任务在跑 / 该断面已在算），见 SectionRecomputeException。
+     */
+    @PostMapping("/sections/{section_id}/recompute")
+    public Map<String, Object> recomputeSection(@PathVariable("section_id") String sectionId) {
+        return taskExecutionService.recomputeSection(sectionId);
     }
 
     @PutMapping("/sections/{section_id}/reverse")
@@ -277,9 +410,36 @@ public class BusinessController {
         return Map.of("success", true, "results", businessStoreService.listRiskResults(taskId, bankId, regionCode));
     }
 
+    /**
+     * 导出「风险段汇总」CSV：连续同类风险段的位置、长度（km）与占比。
+     *
+     * <p>与结果页「导出断面详情（整表 CSV）」配套使用 —— 明细回答「每条断面几级」，
+     * 汇总回答「哪一段高风险、有多长、占多少」。计算口径完全在后端
+     * {@link RiskSegmentSummaryService} 里，前端不再重算，避免两套口径漂移。
+     *
+     * @param taskId 任务 ID
+     * @return UTF-8 CSV（带 BOM，Excel 直接双击不乱码）
+     */
+    @GetMapping("/risk-segments/export")
+    public ResponseEntity<byte[]> exportRiskSegments(@RequestParam("task_id") String taskId) {
+        String csv = riskSegmentSummaryService.renderCsv(taskId);
+        byte[] body = csv.getBytes(StandardCharsets.UTF_8);
+        String fileName = "风险段汇总_" + taskId + "_"
+                + LocalDate.now().format(DateTimeFormatter.BASIC_ISO_DATE) + ".csv";
+        return ResponseEntity.ok()
+                .header(HttpHeaders.CONTENT_DISPOSITION, ReportPackageService.contentDisposition(fileName))
+                .contentType(new MediaType("text", "csv", StandardCharsets.UTF_8))
+                .body(body);
+    }
+
     @GetMapping("/results/{section_id}")
     public Map<String, Object> getResult(@PathVariable("section_id") String sectionId) {
-        return Map.of("success", true, "result", businessStoreService.getRiskResultBySectionId(sectionId));
+        // 断面在、结果没有 ⇒ 200 + status=not_computed，而不是 404：
+        // 「还没算」是正常状态，用 404 表达会被前端渲染成一条 HTTP 错误。
+        Map<String, Object> body = new LinkedHashMap<>();
+        body.put("success", true);
+        body.putAll(businessStoreService.getRiskResultPayload(sectionId));
+        return body;
     }
 
     @GetMapping("/results/{section_id}/matrix")
@@ -327,14 +487,25 @@ public class BusinessController {
         return taskExecutionService.submitTaskRun(taskId);
     }
 
+    /**
+     * 校验单个断面。
+     *
+     * <p>请求体可选：`{"disabled_rules": ["R-SPACE-01"]}`。不传 = 全部规则启用，
+     * 与改造前的行为完全一致（老前端/脚本继续可用）。
+     *
+     * <p>被停用的规则由 {@link SectionValidationService} 跳过并记入 `skipped_rules`；
+     * 跳过不是"放行错误数据"——问题会在模型执行阶段以更具体的原因暴露。
+     */
     @PostMapping("/sections/{section_id}/validate")
-    public Map<String, Object> validateSection(@PathVariable("section_id") String sectionId) {
+    public Map<String, Object> validateSection(
+            @PathVariable("section_id") String sectionId,
+            @RequestBody(required = false) Map<String, Object> body) {
         var section = businessStoreService.getSection(sectionId);
         Map<String, Object> sectionGeometry = (Map<String, Object>) section.sectionGeometry();
         String benchId = section.benchId();
 
         SectionValidationService.ValidationResponse response =
-                sectionValidationService.validateSection(sectionId, sectionGeometry, benchId);
+                sectionValidationService.validateSection(sectionId, sectionGeometry, benchId, readDisabledRules(body));
 
         Map<String, Object> result = new HashMap<>();
         result.put("success", response.isValid() == null || response.isValid());
@@ -342,7 +513,37 @@ public class BusinessController {
         result.put("is_valid", response.isValid());
         result.put("validation_status", response.status());
         result.put("validation_message", response.message());
+        result.put("skipped_rules", response.skippedRules());
         return result;
+    }
+
+    /**
+     * 当前后端实现的校验规则清单。
+     *
+     * <p>前端 `rules/catalog.ts` 启动时可以用它做一次对账：前端有、后端没有 ⇒ 该规则行标"未实现"；
+     * 后端有、前端没登记 ⇒ 控制台 warn。这是防"加了开关但后端不认"的最低成本手段。
+     */
+    @GetMapping("/validation-rules")
+    public Map<String, Object> listValidationRules() {
+        return Map.of("success", true, "rules", sectionValidationService.describeRules());
+    }
+
+    /**
+     * 从请求体读 `disabled_rules`。
+     *
+     * <p>任何形状不合法（不是数组、元素不是字符串…）都当作"没有停用规则"，
+     * 绝不让它把校验打成 400 —— 一个过期的客户端不该让整批断面校验全部失败。
+     */
+    private Set<String> readDisabledRules(Map<String, Object> body) {
+        if (body == null) return Set.of();
+        Object raw = body.get("disabled_rules");
+        if (raw == null) raw = body.get("disabledRules");
+        if (!(raw instanceof Iterable<?> items)) return Set.of();
+        Set<String> out = new LinkedHashSet<>();
+        for (Object item : items) {
+            if (item != null) out.add(String.valueOf(item));
+        }
+        return out;
     }
 
     @GetMapping("/sections/{section_id}/validation")

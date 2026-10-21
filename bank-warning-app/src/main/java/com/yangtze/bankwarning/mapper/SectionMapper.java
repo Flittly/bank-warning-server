@@ -46,5 +46,17 @@ public interface SectionMapper {
     /** 统计该任务下有多少断面的参数快照与本任务参数集不一致（只读）。 */
     int countParamDiffsForTask(@Param("taskId") String taskId, @Param("userId") Long userId);
 
+    /**
+     * 该任务的断面里出现过、且**确实存在于岸段库**的 bank_id。
+     *
+     * <p>用于修复 `tasks.bank_ids` 漏登记：早年的「补充岸段」在写关联之前就失败了
+     * （接口不存在 / 请求被中断），断面已落库、bank_ids 却没写进去 ——
+     * 表现为「树里 17 条、地图上 19 条」，以及整任务重建时那几条岸段被静默丢掉。
+     *
+     * <p>为什么 JOIN banks：自由断面（手工画线）的 bank_id 是 `line-N` 占位符，
+     * 岸段库里根本没有，写进 bank_ids 只会让前端每次加载都去请求一个 404。
+     */
+    List<String> selectDistinctRealBankIdsByTask(@Param("taskId") String taskId, @Param("userId") Long userId);
+
     int reverseSectionGeometry(@Param("sectionId") String sectionId, @Param("sectionGeometry") String sectionGeometry, @Param("otherParams") String otherParams, @Param("userId") Long userId);
 }

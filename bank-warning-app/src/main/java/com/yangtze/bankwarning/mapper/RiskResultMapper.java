@@ -24,6 +24,12 @@ public interface RiskResultMapper {
 
     boolean existsByRunIdAndSectionId(@Param("runId") String runId, @Param("sectionId") String sectionId, @Param("userId") Long userId);
 
+    /** 作废该断面的全部有效结果（软删）。单断面重算前调用，避免同一断面出现两行有效结论。 */
+    int deleteBySectionId(@Param("sectionId") String sectionId, @Param("userId") Long userId);
+
+    /** 该断面当前有效结果的行数。几何变更时用来判断要不要自动重算。 */
+    int countActiveBySectionId(@Param("sectionId") String sectionId, @Param("userId") Long userId);
+
     /** 人工修改：原地改写 indicators / risk_level，并把模型原始快照写进 edit_state。 */
     int updateManualOverride(@Param("id") Long id,
                              @Param("indicators") String indicators,

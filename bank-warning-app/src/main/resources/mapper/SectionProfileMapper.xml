@@ -78,4 +78,10 @@
         WHERE task_id = #{taskId} AND deleted_at IS NULL AND (user_id = #{userId} OR #{userId, jdbcType=BIGINT} IS NULL)
     </update>
 
+    <!-- 几何变更时作废该断面的剖面；重算时 insertOrUpdate 会命中唯一键并把 deleted_at 复活。 -->
+    <update id="deleteBySectionId">
+        UPDATE section_profiles SET deleted_at = CURRENT_TIMESTAMP
+        WHERE section_id = #{sectionId} AND deleted_at IS NULL AND (user_id = #{userId} OR #{userId, jdbcType=BIGINT} IS NULL)
+    </update>
+
 </mapper>

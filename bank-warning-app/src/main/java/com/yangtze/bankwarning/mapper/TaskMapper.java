@@ -17,6 +17,16 @@ public interface TaskMapper {
 
     int update(TaskPO task);
 
+    /**
+     * 只改 bank_ids 一列（岸段与任务的关联关系）。
+     *
+     * <p>刻意不复用 {@link #update(TaskPO)}：那条语句会连任务名、描述一起写回，
+     * 而「给任务补一条岸段」不该顺带把用户可能在别处改过的名称覆盖成前端缓存的旧值。
+     */
+    int updateBankIds(@Param("taskId") String taskId,
+                      @Param("bankIds") String bankIds,
+                      @Param("userId") Long userId);
+
     int deleteByTaskId(@Param("taskId") String taskId, @Param("userId") Long userId);
 
     int updateStatus(@Param("taskId") String taskId,

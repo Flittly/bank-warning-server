@@ -9,15 +9,26 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.yangtze.bankwarning.security.security.SecurityUtils;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
 
+import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.stream.Collectors;
 
 @Service
 public class BusinessStoreService {
+
+    private static final Logger log = LoggerFactory.getLogger(BusinessStoreService.class);
+
+    /** 只用于几何比较（纯 JSON 结构比大小），与业务用的 objectMapper 配置无关。 */
+    private static final ObjectMapper GEOMETRY_COMPARATOR = new ObjectMapper();
 
     private final BankMapper bankMapper;
     private final TaskMapper taskMapper;
@@ -178,6 +189,169 @@ public class BusinessStoreService {
         // 任务是软删，FK 的 ON DELETE CASCADE 不会触发 ⇒ 任务参数集要显式一并软删，
         // 否则会留下孤儿行，还会因为 uq_basic_params_task_id 挡住同 id 的重建。
         basicParamMapper.softDeleteByTaskId(taskId, userId);
+    }
+
+    /**
+     * 把一个任务已有关联的岸段重置为给定集合。
+     *
+     * <p>为什么需要一条专门的写入口：前端「补充岸段」是「把选中的几条并进已有任务」，
+     * 用 {@code POST /tasks} 的 overwrite 语义去做就得先 GET 再整体 POST 回去 ——
+     * 既是读改写竞态，又会把 task_name / description 一起覆盖。这里只动 bank_ids 一列。
+     *
+     * @param mode {@code merge}（默认，取并集）或 {@code replace}（整体替换）
+     * @return 合并后的 bank_ids、本次真正新增的、以及库里查不到的
+     */
+    public Map<String, Object> appendTaskBanks(String taskId, List<String> bankIds, String mode) {
+        Long userId = SecurityUtils.getCurrentUserIdForDataFilter();
+        TaskPO existing = taskMapper.selectByTaskId(taskId, userId);
+        if (existing == null) {
+            throw new IllegalArgumentException("Task not found: " + taskId);
+        }
+
+        // 入参先去空、去重；保持用户勾选顺序（LinkedHashSet），不用 HashSet 打乱
+        Set<String> incoming = new LinkedHashSet<>();
+        if (bankIds != null) {
+            for (String id : bankIds) {
+                if (id != null && !id.isBlank()) incoming.add(id.trim());
+            }
+        }
+
+        // 校验岸段存在：不存在的直接报回去，而不是静默写进 bank_ids ——
+        // 写进关联却画不出几何，结果就是"任务里多了一条空岸段"，比报错更难排查。
+        List<String> missing = new ArrayList<>();
+        for (String id : incoming) {
+            if (bankMapper.selectByBankId(id, userId) == null) missing.add(id);
+        }
+        if (!missing.isEmpty()) {
+            return Map.of(
+                    "success", false,
+                    "task_id", taskId,
+                    "missing", missing,
+                    "message", "以下岸段在库中不存在，未做任何修改：" + String.join(", ", missing));
+        }
+
+        boolean replace = "replace".equalsIgnoreCase(String.valueOf(mode).trim());
+        BankIdMerge merged = mergeBankIds(readBankIdList(existing.getBankIds()), new ArrayList<>(incoming), replace);
+
+        // 空集合也要写 '[]'：让库里是空数组而不是 keep 旧值/JSON null
+        taskMapper.updateBankIds(taskId, writeJson(merged.bankIds()), userId);
+
+        Map<String, Object> result = new LinkedHashMap<>();
+        result.put("success", true);
+        result.put("task_id", taskId);
+        result.put("mode", replace ? "replace" : "merge");
+        result.put("added", merged.added());
+        result.put("removed", merged.removed());
+        result.put("bank_ids", merged.bankIds());
+        result.put("total", merged.bankIds().size());
+        return result;
+    }
+
+    /**
+     * 用「该任务断面里实际用到的真实岸段」补全 {@code tasks.bank_ids}（幂等、只增不减）。
+     *
+     * <p>存在的意义：早年「补充岸段」在写关联之前就失败过（接口不存在 / 请求被中断），
+     * 断面落了库、bank_ids 没写。这类任务的症状是：
+     * <ul>
+     *   <li>资源树（只读 bank_ids）比地图（读并集）少几条 —— 同一份数据两个数字；</li>
+     *   <li>「生成计算断面…」走整任务重建，以地图上的岸段为准还好，但任何以
+     *       bank_ids 为准的路径都会把那几条岸段静默丢掉。</li>
+     * </ul>
+     *
+     * <p>只写"断面已存在 + 岸段库里有"的 id：自由断面的 {@code line-N} 不算岸段，
+     * 写进去只会让前端每次加载都请求一个 404。不动任何断面与结果。
+     */
+    public Map<String, Object> syncTaskBanksFromSections(String taskId) {
+        Long userId = SecurityUtils.getCurrentUserIdForDataFilter();
+        TaskPO existing = taskMapper.selectByTaskId(taskId, userId);
+        if (existing == null) {
+            throw new IllegalArgumentException("Task not found: " + taskId);
+        }
+
+        List<String> fromSections = sectionMapper.selectDistinctRealBankIdsByTask(taskId, userId);
+        BankIdMerge merged = mergeBankIds(
+                readBankIdList(existing.getBankIds()),
+                fromSections == null ? new ArrayList<>() : new ArrayList<>(fromSections),
+                false);
+
+        Map<String, Object> result = new LinkedHashMap<>();
+        result.put("success", true);
+        result.put("task_id", taskId);
+        // 只增不减：从断面反推的清单天然是"任务真实用过"的子集，
+        // 但 bank_ids 里可能还有"关联了、还没生成断面"的岸段，那些不能在同步时被抹掉。
+        if (!merged.added().isEmpty()) {
+            taskMapper.updateBankIds(taskId, writeJson(merged.bankIds()), userId);
+        }
+        result.put("added", merged.added());
+        result.put("bank_ids", merged.bankIds());
+        result.put("total", merged.bankIds().size());
+        return result;
+    }
+
+    /**
+     * 岸段 id 集合的合并规则（纯函数，便于单测）。
+     *
+     * <p>三条不变量：
+     * <ol>
+     *   <li>结果里没有重复、没有空串；</li>
+     *   <li>merge = 老的在前、新的按传入顺序追加（老岸段的顺序不该因为补了一条就变）；</li>
+     *   <li>replace = 只用传入的，老的里没被保留的进 {@code removed}。</li>
+     * </ol>
+     */
+    record BankIdMerge(List<String> bankIds, List<String> added, List<String> removed) {
+    }
+
+    static BankIdMerge mergeBankIds(List<String> existing, List<String> incoming, boolean replace) {
+        // 先归一化现存集合：「本次新增」的语义是"不在原集合里"，
+        // 与 merge/replace 无关 —— replace 时把原本就在的 b2 也算成 added 会误导前端提示。
+        Set<String> existingSet = new LinkedHashSet<>();
+        for (String id : existing == null ? List.<String>of() : existing) {
+            if (id != null && !id.isBlank()) existingSet.add(id.trim());
+        }
+
+        Set<String> next = new LinkedHashSet<>();
+        if (!replace) next.addAll(existingSet);
+
+        List<String> added = new ArrayList<>();
+        for (String id : incoming == null ? List.<String>of() : incoming) {
+            if (id == null || id.isBlank()) continue;
+            String v = id.trim();
+            if (!existingSet.contains(v) && !added.contains(v)) added.add(v);
+            next.add(v);
+        }
+
+        List<String> removed = new ArrayList<>();
+        if (replace) {
+            Set<String> incomingSet = new LinkedHashSet<>();
+            for (String id : incoming == null ? List.<String>of() : incoming) {
+                if (id != null && !id.isBlank()) incomingSet.add(id.trim());
+            }
+            for (String id : existingSet) {
+                if (!incomingSet.contains(id)) removed.add(id);
+            }
+        }
+        return new BankIdMerge(new ArrayList<>(next), added, removed);
+    }
+
+
+    /** 读 tasks.bank_ids(jsonb) 里的字符串数组；脏数据/非数组一律当空集合，不让它炸掉整个请求。 */
+    private List<String> readBankIdList(String json) {
+        List<String> list = new ArrayList<>();
+        if (json == null || json.isBlank()) return list;
+        try {
+            JsonNode node = objectMapper.readTree(json);
+            if (node != null && node.isArray()) {
+                node.forEach(item -> {
+                    if (item != null && !item.isNull()) {
+                        String v = item.asText("").trim();
+                        if (!v.isEmpty()) list.add(v);
+                    }
+                });
+            }
+        } catch (Exception e) {
+            log.warn("[task-banks] 解析 bank_ids 失败，按空集合处理: {}", e.getMessage());
+        }
+        return list;
     }
 
     // ==================== BasicParam ====================
@@ -559,12 +733,78 @@ public class BusinessStoreService {
         return SectionResponse.from(po);
     }
 
-    public void updateSection(String sectionId, SectionPayload payload) {
+    /**
+     * {@link #updateSection} 的结果。
+     *
+     * @param geometryChanged 本次保存是否真的改了几何（端点坐标有变化）
+     * @param hadResult       变更**之前**该断面有没有有效结果（写在这里是因为作废后查不到了）
+     */
+    public record SectionGeometryUpdate(boolean geometryChanged, boolean hadResult) {
+
+        public static final SectionGeometryUpdate UNCHANGED = new SectionGeometryUpdate(false, false);
+    }
+
+    /**
+     * 更新断面；几何变了就把该断面的派生数据（风险结果、剖面）一并作废。
+     *
+     * <p>为什么作废要放在这里，而不是只在「重算」接口里清：
+     * 重算可能被拒绝（整任务在跑 / 同一断面在算）或前端根本没调成功。只要旧结果还活着，
+     * 结果页就会拿过期结论给新位置着色 —— 那正是「断面挪走了、原地还在变色」。
+     * 所以顺序是：先让旧结论失效（这里），再尝试算新的（recompute）。
+     *
+     * <p>作废是软删：{@code bank_risk_results} 保留历史行（含人工修改快照 edit_state），
+     * {@code section_profiles} 下次 insertOrUpdate 会命中唯一键并复活 deleted_at。
+     */
+    public SectionGeometryUpdate updateSection(String sectionId, SectionPayload payload) {
         Long userId = SecurityUtils.getCurrentUserIdForDataFilter();
-        getSection(sectionId);
+        SectionPO existing = sectionMapper.selectBySectionId(sectionId, userId);
+        if (existing == null) {
+            throw new IllegalArgumentException("Section not found: " + sectionId);
+        }
+
         SectionPO po = toSectionPO(null, null, null, payload);
         po.setSectionId(sectionId);
         sectionMapper.update(po);
+
+        if (!geometryChanged(existing.getSectionGeometry(), payload.sectionGeometry())) {
+            return SectionGeometryUpdate.UNCHANGED;
+        }
+
+        int activeResults = riskResultMapper.countActiveBySectionId(sectionId, userId);
+        riskResultMapper.deleteBySectionId(sectionId, userId);
+        sectionProfileMapper.deleteBySectionId(sectionId, userId);
+        log.info("[section] geometry changed, derived data invalidated, sectionId={}, droppedResults={}",
+                sectionId, activeResults);
+        return new SectionGeometryUpdate(true, activeResults > 0);
+    }
+
+    /**
+     * 几何是否真的变了。
+     *
+     * <p>按 JsonNode 结构比较而不是字符串比较：jsonb 读回来是规范化文本（键序、空白都不同），
+     * 逐字比会把「没动过」判成变了，于是每次改个名字都白扔一次重算。
+     * 已知边界：{@code 120} 与 {@code 120.0} 是不同节点类型，会判成变了 —— 方向是安全的一侧
+     * （多算一次，而不是留着过期结论）。
+     *
+     * <p>{@code incoming == null} 表示这次请求没带几何（只改了名字/参数），一律视为未变。
+     *
+     * <p>包级可见 + static 是为了能被单测直接钉住：这段判断错了，要么每次保存都白烧一次
+     * 模型调用，要么旧结论永远不作废。
+     */
+    static boolean geometryChanged(String storedJson, Map<String, Object> incoming) {
+        if (incoming == null) {
+            return false;
+        }
+        if (storedJson == null || storedJson.isBlank()) {
+            return true;
+        }
+        try {
+            return !GEOMETRY_COMPARATOR.readTree(storedJson).equals(GEOMETRY_COMPARATOR.valueToTree(incoming));
+        } catch (Exception exception) {
+            // 解析不了就别乱作废：宁可留一次可能过期的结论，也不要因为一个脏字段把结果删光。
+            log.warn("[section] geometry compare failed, treat as unchanged: {}", exception.getMessage());
+            return false;
+        }
     }
 
     public void reverseSection(String sectionId) {
@@ -646,6 +886,23 @@ public class BusinessStoreService {
         sectionProfileMapper.deleteByTaskId(taskId, userId);
     }
 
+    /**
+     * 该任务下已有有效结果的断面 id 集合。供「只算未计算断面」判断哪些要跳过。
+     *
+     * <p>用 {@code selectByTaskIdAndBankIdAndRegionCode} 一次捞全（而非逐断面 count）：
+     * 大任务有 2000+ 断面，逐条查会把"判断要不要算"变成比"算"还慢的事。
+     */
+    public Set<String> getSectionIdsWithResult(String taskId) {
+        Long userId = SecurityUtils.getCurrentUserIdForDataFilter();
+        Set<String> ids = new HashSet<>();
+        for (RiskResultPO po : riskResultMapper.selectByTaskIdAndBankIdAndRegionCode(taskId, null, null, userId)) {
+            if (po != null && po.getSectionId() != null && !po.getSectionId().isBlank()) {
+                ids.add(po.getSectionId());
+            }
+        }
+        return ids;
+    }
+
     public void batchUpdateSectionParams(List<String> sectionIds, Map<String, Object> params) {
         Long userId = SecurityUtils.getCurrentUserIdForDataFilter();
         if (sectionIds == null || sectionIds.isEmpty()) return;
@@ -703,6 +960,35 @@ public class BusinessStoreService {
             throw new IllegalArgumentException("Risk result not found for section_id: " + sectionId);
         }
         return RiskResultResponse.from(po);
+    }
+
+    /**
+     * 单条结果的三态查询：{@code computed} / {@code not_computed} / 断面不存在。
+     *
+     * <p>为什么不能一律用 404：断面存在但没算出结果（模型因 DEM 无数据失败、或该断面
+     * 是分析之后才新建的）是**正常状态**，用 404 表达会强迫前端把「还没算」渲染成
+     * 一条 HTTP 错误，用户看到的是 {@code HTTP 404: Risk result not found...}，
+     * 与「这条断面被删了」分不开。所以这里把「断面没了」和「断面在、结果没有」拆开：
+     * 只有前者抛 {@link IllegalArgumentException}（沿用全局 404 映射）。
+     */
+    public Map<String, Object> getRiskResultPayload(String sectionId) {
+        Long userId = SecurityUtils.getCurrentUserIdForDataFilter();
+        Map<String, Object> payload = new LinkedHashMap<>();
+        RiskResultPO po = riskResultMapper.selectLatestBySectionId(sectionId, userId);
+        if (po != null) {
+            payload.put("status", "computed");
+            payload.put("result", RiskResultResponse.from(po));
+            return payload;
+        }
+
+        if (!sectionMapper.existsBySectionId(sectionId, userId)) {
+            throw new IllegalArgumentException("Section not found for section_id: " + sectionId);
+        }
+
+        payload.put("status", "not_computed");
+        payload.put("result", null);
+        payload.put("reason", "该断面尚无计算结果：可能是分析之后新建的断面，或上次计算因数据问题失败，请重新执行风险分析");
+        return payload;
     }
 
     public void saveRiskResult(

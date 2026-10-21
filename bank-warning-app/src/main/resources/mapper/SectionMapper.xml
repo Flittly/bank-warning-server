@@ -165,6 +165,21 @@
         LIMIT 1
     </select>
 
+    <!-- 该任务断面里出现过的**真实**岸段（JOIN banks 过滤掉自由断面的 line-N 占位 id）。 -->
+    <select id="selectDistinctRealBankIdsByTask" resultType="java.lang.String">
+        SELECT DISTINCT cs.bank_id
+        FROM cross_sections cs
+        JOIN tasks t ON cs.task_id = t.task_id
+        JOIN banks b ON b.bank_id = cs.bank_id AND b.deleted_at IS NULL
+        WHERE cs.task_id = #{taskId}
+          AND cs.deleted_at IS NULL
+          AND t.deleted_at IS NULL
+          AND cs.bank_id IS NOT NULL
+          AND cs.bank_id &lt;&gt; ''
+          AND (cs.user_id = #{userId} OR #{userId, jdbcType=BIGINT} IS NULL)
+        ORDER BY cs.bank_id
+    </select>
+
     <!-- 把本任务所有断面重新指向该任务的参数集（只改归属，不动参数值）。 -->
     <update id="assignBasicParamForTask">
         UPDATE cross_sections

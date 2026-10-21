@@ -1,6 +1,7 @@
 package com.yangtze.bankwarning.service;
 
 import com.yangtze.bankwarning.config.TerrainMappingProperties;
+import com.yangtze.bankwarning.domain.exception.SectionRecomputeException;
 import com.yangtze.bankwarning.service.async.TaskDispatchPort;
 import com.yangtze.bankwarning.service.async.TaskRunStatePort;
 import org.slf4j.Logger;
@@ -12,9 +13,11 @@ import org.springframework.beans.factory.annotation.Value;
 import java.time.Instant;
 import java.util.UUID;
 import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.stream.Collectors;
 
 @Service
@@ -29,6 +32,7 @@ public class TaskExecutionService {
     private final TerrainMappingProperties terrainMappingProperties;
     private final SectionProfileService sectionProfileService;
     private final TaskCancelRegistry taskCancelRegistry;
+    private final SectionRecomputeGuard sectionRecomputeGuard;
 
     @Value("${app.kafka.enabled:false}")
     private boolean kafkaEnabled;
@@ -40,7 +44,8 @@ public class TaskExecutionService {
             TaskRunStatePort taskRunStatePort,
             TerrainMappingProperties terrainMappingProperties,
             SectionProfileService sectionProfileService,
-            TaskCancelRegistry taskCancelRegistry) {
+            TaskCancelRegistry taskCancelRegistry,
+            SectionRecomputeGuard sectionRecomputeGuard) {
         this.businessStoreService = businessStoreService;
         this.modelGatewayService = modelGatewayService;
         this.taskDispatchPort = taskDispatchPort;
@@ -48,21 +53,100 @@ public class TaskExecutionService {
         this.terrainMappingProperties = terrainMappingProperties;
         this.sectionProfileService = sectionProfileService;
         this.taskCancelRegistry = taskCancelRegistry;
+        this.sectionRecomputeGuard = sectionRecomputeGuard;
     }
 
     public Map<String, Object> runTask(String taskId) {
-        log.info("[task-run] starting task run, taskId={}", taskId);
+        return runTask(taskId, false);
+    }
+
+    /**
+     * 执行任务下的断面。
+     *
+     * @param onlyPending false（默认）= 历史行为：先软删本任务全部结果，再全量重算。
+     *                    true = **只算还没有有效结果的断面**，已有结果原样保留。
+     *                    用于「给任务补充了岸段，只想算新增的那几条」——否则补 2 条岸段
+     *                    要把上百条老断面一起重跑，代价完全不成比例。
+     */
+    public Map<String, Object> runTask(String taskId, boolean onlyPending) {
+        return runTask(taskId, onlyPending, null);
+    }
+
+    /**
+     * 同上，但可以用 {@code sectionIds} 把范围收窄到「这一批断面」。
+     *
+     * <p>为什么需要它：{@code only_pending=true} 的语义是"整个任务里所有还没有结果的断面"。
+     * 给一个跑了 300 条、只出了 40 条结果的任务补 13 条断面，它会连带把 275 条老断面
+     * 一起重算 —— 与界面上「只算本次新增」的承诺不符，用户会以为卡死而中途取消，
+     * 然后看到"补了岸段却没有结果"。传了 section_ids 就只算这一批（仍尊重已有结果跳过）。
+     */
+    public Map<String, Object> runTask(String taskId, boolean onlyPending, List<String> sectionIds) {
+        log.info("[task-run] starting task run, taskId={}, onlyPending={}, scope={}",
+                taskId, onlyPending, sectionIds == null ? "all" : sectionIds.size());
         businessStoreService.getTask(taskId);
-        log.info("[task-run] task exists, clearing old results, taskId={}", taskId);
-        businessStoreService.clearTaskResults(taskId);
-        log.info("[task-run] old results cleared, marking running, taskId={}", taskId);
+        // 必须在 clearTaskResults **之前**问：这一步会把该任务全部结果软删，
+        // 若此刻有条断面正在单独重算，它刚落的新结果会被顺手抹掉。
+        if (sectionRecomputeGuard.hasInFlightForTask(taskId)) {
+            throw SectionRecomputeException.taskHasRunningSection(taskId);
+        }
+
+        List<Map<String, Object>> sections = businessStoreService.getSectionsByTask(taskId);
+        int totalSections = sections.size();
+        int skippedExisting = 0;
+        if (onlyPending) {
+            // 增量模式**不清结果**：清了就不是增量了。只把"已有结论"的断面筛掉。
+            // sectionIds 非空时再叠加一层"只算这一批"的限制（补岸段后只跑新增断面）。
+            Set<String> scope = (sectionIds == null || sectionIds.isEmpty())
+                    ? null
+                    : new HashSet<>(sectionIds);
+            Set<String> alreadyDone = businessStoreService.getSectionIdsWithResult(taskId);
+            List<Map<String, Object>> pending = new ArrayList<>();
+            int skippedOutOfScope = 0;
+            for (Map<String, Object> section : sections) {
+                String sid = String.valueOf(section.get("section_id"));
+                if (scope != null && !scope.contains(sid)) {
+                    skippedOutOfScope++;
+                    continue;
+                }
+                if (alreadyDone.contains(sid)) {
+                    skippedExisting++;
+                } else {
+                    pending.add(section);
+                }
+            }
+            sections = pending;
+            log.info("[task-run] incremental run, taskId={}, total={}, pending={}, skippedExisting={}, skippedOutOfScope={}",
+                    taskId, totalSections, sections.size(), skippedExisting, skippedOutOfScope);
+
+            if (sections.isEmpty()) {
+                // 没有待算断面就别把任务打成 running：那会让结果页的进度条一直转，
+                // 也会让「终止」按钮出现在一个根本没在跑的任务上。
+                return Map.of(
+                        "success", true,
+                        "task_id", taskId,
+                        "status", "nothing_pending",
+                        "results", List.of(),
+                        "failures", List.of(),
+                        "summary", Map.of(
+                                "total", totalSections,
+                                "success", 0,
+                                "failed", 0,
+                                "skipped", 0,
+                                "skipped_existing", skippedExisting,
+                                "skipped_out_of_scope", skippedOutOfScope));
+            }
+        } else {
+            log.info("[task-run] clearing old results, taskId={}", taskId);
+            businessStoreService.clearTaskResults(taskId);
+        }
+
+        log.info("[task-run] marking running, taskId={}", taskId);
         businessStoreService.markTaskRunning(taskId);
         // 登记进中断表：从这里开始到 finally 注销为止，本进程"确实在跑"这个任务。
         // 取消接口靠这张表区分「真在跑（可协作式停）」与「进程已死的僵尸（直接改库收尾）」。
         taskCancelRegistry.register(taskId);
 
         try {
-            List<Map<String, Object>> sections = businessStoreService.getSectionsByTask(taskId);
             log.info("[task-run] loaded sections, taskId={}, sectionCount={}", taskId, sections.size());
             List<Map<String, Object>> results = new ArrayList<>();
             List<Map<String, Object>> failures = new ArrayList<>();
@@ -79,41 +163,7 @@ public class TaskExecutionService {
                 }
                 String sectionId = String.valueOf(section.get("section_id"));
                 try {
-                    validateSectionGeometry(taskId, sectionId, section.get("section_geometry"));
-                    log.info("[task-run] processing section, taskId={}, sectionId={}, sectionName={}",
-                            taskId, sectionId, section.get("section_name"));
-                    Map<String, Object> payload = buildRiskLevelPayload(section);
-                    log.info("[task-run] built model payload, taskId={}, sectionId={}, payloadKeys={}", taskId, sectionId, payload.keySet());
-                    Map<String, Object> rawResult = modelGatewayService.runLegacyModelAndWait(
-                            "/v0/mi/risk-level",
-                            payload,
-                            null);
-
-                    log.info("[task-run] model returned, taskId={}, sectionId={}, resultKeys={}", taskId, sectionId, rawResult.keySet());
-                    rawResult.put("water_qs", section.get("water_qs"));
-                    rawResult.put("tidal_level", section.get("tidal_level"));
-                    Integer riskLevel = toRiskLevel(rawResult.get("risk-level"));
-                    log.info("[task-run] parsed risk level, taskId={}, sectionId={}, riskLevel={}", taskId, sectionId, riskLevel);
-
-                    sectionProfileService.saveForSection(taskId, section);
-
-                    businessStoreService.saveRiskResult(
-                            taskId,
-                            sectionId,
-                            String.valueOf(section.get("section_name")),
-                            String.valueOf(section.get("region_code")),
-                            String.valueOf(section.get("bank_id")),
-                            riskLevel,
-                            rawResult,
-                            castMap(section.get("geometry")));
-                    log.info("[task-run] saved risk result, taskId={}, sectionId={}", taskId, sectionId);
-
-                    Map<String, Object> result = new LinkedHashMap<>();
-                    result.put("section_id", section.get("section_id"));
-                    result.put("status", 200);
-                    result.put("response", rawResult);
-                    result.put("executed_at", Instant.now().toString());
-                    results.add(result);
+                    results.add(computeAndSaveSection(taskId, section));
                 } catch (Exception sectionException) {
                     log.error("[task-run] section failed, taskId={}, sectionId={}, message={}",
                             taskId,
@@ -153,7 +203,8 @@ public class TaskExecutionService {
                                 "total", sections.size(),
                                 "success", results.size(),
                                 "failed", failures.size(),
-                                "skipped", Math.max(0, sections.size() - handled)
+                                "skipped", Math.max(0, sections.size() - handled),
+                                "skipped_existing", skippedExisting
                         ));
             }
 
@@ -183,7 +234,8 @@ public class TaskExecutionService {
                     "summary", Map.of(
                             "total", sections.size(),
                             "success", results.size(),
-                            "failed", failures.size()
+                            "failed", failures.size(),
+                            "skipped_existing", skippedExisting
                     ));
         } catch (Exception exception) {
             log.error("[task-run] task failed, taskId={}, message={}", taskId, exception.getMessage(), exception);
@@ -249,6 +301,126 @@ public class TaskExecutionService {
                 "message", staleMessage);
     }
 
+    /**
+     * 算一条断面并把结论落库。
+     *
+     * <p>{@link #runTask} 的循环体与 {@link #recomputeSection} 都走这里，这是本项目
+     * 「只有一份计算链路」的落点：模型参数组装、模型调用、剖面落库、结果写入全在这一段，
+     * 将来改公式口径、加参数、换模型接口都只需要改一次 —— 单断面重算不会算出一套
+     * 与整任务运行不同的结果。
+     *
+     * @return 与任务返回体里单条 result 同形状的 Map（含 risk_level，供单条重算直接回给前端）
+     */
+    private Map<String, Object> computeAndSaveSection(String taskId, Map<String, Object> section) {
+        String sectionId = String.valueOf(section.get("section_id"));
+        validateSectionGeometry(taskId, sectionId, section.get("section_geometry"));
+        log.info("[section-compute] processing section, taskId={}, sectionId={}, sectionName={}",
+                taskId, sectionId, section.get("section_name"));
+
+        Map<String, Object> payload = buildRiskLevelPayload(section);
+        log.info("[section-compute] built model payload, taskId={}, sectionId={}, payloadKeys={}",
+                taskId, sectionId, payload.keySet());
+        Map<String, Object> rawResult = modelGatewayService.runLegacyModelAndWait(
+                "/v0/mi/risk-level",
+                payload,
+                null);
+        log.info("[section-compute] model returned, taskId={}, sectionId={}, resultKeys={}",
+                taskId, sectionId, rawResult.keySet());
+
+        rawResult.put("water_qs", section.get("water_qs"));
+        rawResult.put("tidal_level", section.get("tidal_level"));
+        Integer riskLevel = toRiskLevel(rawResult.get("risk-level"));
+        log.info("[section-compute] parsed risk level, taskId={}, sectionId={}, riskLevel={}",
+                taskId, sectionId, riskLevel);
+
+        sectionProfileService.saveForSection(taskId, section);
+
+        businessStoreService.saveRiskResult(
+                taskId,
+                sectionId,
+                String.valueOf(section.get("section_name")),
+                String.valueOf(section.get("region_code")),
+                String.valueOf(section.get("bank_id")),
+                riskLevel,
+                rawResult,
+                castMap(section.get("geometry")));
+        log.info("[section-compute] saved risk result, taskId={}, sectionId={}", taskId, sectionId);
+
+        Map<String, Object> result = new LinkedHashMap<>();
+        result.put("section_id", sectionId);
+        result.put("section_name", section.get("section_name"));
+        result.put("status", 200);
+        result.put("risk_level", riskLevel);
+        result.put("response", rawResult);
+        result.put("executed_at", Instant.now().toString());
+        return result;
+    }
+
+    /**
+     * 单断面重算：只算这一条并覆盖它的结论。
+     *
+     * <p>与整任务运行的关系：
+     * <ul>
+     *   <li><b>不复用</b> {@link TaskCancelRegistry} —— 那张表按 taskId 登记，兼职当
+     *       「本进程真在跑这个任务」的心跳探针。单算若借 taskId 注册，收尾时的
+     *       {@code unregister} 会把整任务的登记一并删掉，取消接口随即把它判成僵尸
+     *       （stale）并直接写 cancelled。</li>
+     *   <li><b>不可取消</b>：单条只算一次（模型侧有超时兜底），强行给它加取消语义
+     *       要么污染上面那张表，要么引入第二套运行态；代价大于收益。整任务取消
+     *       只作用于 {@link #runTask} 的断面循环，这是刻意的边界。</li>
+     *   <li><b>与整任务互斥</b>（双向）：整任务跑着时拒绝单算；有单算在途时拒绝整任务起跑。
+     *       两个方向都会互相覆盖对方的行，快速失败比排队更诚实。</li>
+     * </ul>
+     *
+     * <p>失败不抛异常而是回 {@code status:"failed"} + 错误码：几何已经保存成功了，
+     * 「这条算不出来」是数据问题（DEM 无数据等），不该让前端把它当成请求失败。
+     */
+    public Map<String, Object> recomputeSection(String sectionId) {
+        Map<String, Object> section = businessStoreService.getSectionForResult(sectionId);
+        if (section == null) {
+            throw new IllegalArgumentException("Section not found: " + sectionId);
+        }
+        String taskId = String.valueOf(section.get("task_id"));
+
+        if (taskCancelRegistry.isRunning(taskId)) {
+            throw SectionRecomputeException.taskRunning(taskId, sectionId);
+        }
+        if (!sectionRecomputeGuard.tryAcquire(sectionId, taskId)) {
+            throw SectionRecomputeException.sectionBusy(sectionId);
+        }
+
+        log.info("[section-recompute] start, taskId={}, sectionId={}", taskId, sectionId);
+        try {
+            Map<String, Object> result = computeAndSaveSection(taskId, section);
+            Map<String, Object> payload = new LinkedHashMap<>();
+            payload.put("success", true);
+            payload.put("status", "computed");
+            payload.put("task_id", taskId);
+            payload.put("section_id", sectionId);
+            payload.put("risk_level", result.get("risk_level"));
+            payload.put("response", result.get("response"));
+            payload.put("executed_at", result.get("executed_at"));
+            log.info("[section-recompute] done, taskId={}, sectionId={}, riskLevel={}",
+                    taskId, sectionId, result.get("risk_level"));
+            return payload;
+        } catch (Exception exception) {
+            Map<String, Object> errorInfo = classifyError(exception);
+            log.error("[section-recompute] failed, taskId={}, sectionId={}, message={}",
+                    taskId, sectionId, exception.getMessage(), exception);
+            Map<String, Object> failed = new LinkedHashMap<>();
+            failed.put("success", false);
+            failed.put("status", "failed");
+            failed.put("task_id", taskId);
+            failed.put("section_id", sectionId);
+            failed.put("error_code", errorInfo.get("error_code"));
+            failed.put("error_message", errorInfo.get("error_message"));
+            failed.put("error_detail", exception.getMessage() == null ? "" : exception.getMessage());
+            return failed;
+        } finally {
+            sectionRecomputeGuard.release(sectionId);
+        }
+    }
+
     private Map<String, Object> buildRiskLevelPayload(Map<String, Object> section) {
         Map<String, Object> payload = new LinkedHashMap<>();
         payload.put("segment", section.get("bench_segment"));
@@ -303,6 +475,10 @@ public class TaskExecutionService {
 
         // 1. 校验任务存在
         businessStoreService.getTask(taskId);
+        // 与 runTask 同理：下一步的清空会抹掉在途单算刚落的结果。
+        if (sectionRecomputeGuard.hasInFlightForTask(taskId)) {
+            throw SectionRecomputeException.taskHasRunningSection(taskId);
+        }
         log.info("[task-submit-kafka] 任务存在，清理旧结果 taskId={}", taskId);
 
         // 2. 清理本次运行旧结果
@@ -473,10 +649,38 @@ public class TaskExecutionService {
                 .collect(Collectors.joining(" | "));
     }
 
-    private Map<String, Object> classifyError(Exception exception) {
+    /**
+     * 把断面级异常翻成 {@code error_code + error_message}。
+     *
+     * <p>包级可见 + static 是为了能被单测直接调用：这套映射决定了「用户看到的是
+     * DEM 无数据还是未知错误」，而它过去把模型侧给得明明白白的
+     * DEM_COVERAGE_INSUFFICIENT 统一吞成 UNKNOWN_ERROR，是最值得钉住的一段逻辑。
+     * 无实例状态，做成静态不会引入隐式耦合。
+     */
+    static Map<String, Object> classifyError(Exception exception) {
         String message = exception.getMessage();
         if (message == null) {
             message = "";
+        }
+
+        // 先按模型侧给的稳定错误码匹配，再退化到文本特征。顺序不能反：
+        // 「DEM 无数据」的消息里也含 "scatter points are insufficient" 一类字样，
+        // 让文本规则先命中会把它错判成「几何数据无效」，把数据问题说成输入问题。
+        if (message.contains("DEM_COVERAGE_INSUFFICIENT")) {
+            return Map.of("error_code", "DEM_COVERAGE_INSUFFICIENT",
+                    "error_message", "断面落在 DEM 无数据（nodata）区域内，可采样的有效剖面长度不足；请检查该位置的 DEM 覆盖，或改选有效区域内的断面");
+        }
+        if (message.contains("SECTION_PROFILE_DEGENERATE")) {
+            return Map.of("error_code", "SECTION_PROFILE_DEGENERATE",
+                    "error_message", "该断面剖面退化（最深点位于首个采样点，左岸坡段为空），无法提取垂线剖面；请调整断面走向或位置");
+        }
+        if (message.contains("SECTION_VERTICAL_PROFILE_EMPTY")) {
+            return Map.of("error_code", "SECTION_VERTICAL_PROFILE_EMPTY",
+                    "error_message", "该断面的垂线剖面为空，无法计算风险；请检查断面与 DEM 的对应关系");
+        }
+        if (message.contains("DEM_COVERAGE") || message.contains("nodata")) {
+            return Map.of("error_code", "DEM_COVERAGE_INSUFFICIENT",
+                    "error_message", "断面与 DEM 有效区域不匹配，剖面采样失败；请检查 DEM 覆盖范围");
         }
 
         if (message.contains("LineString Is Invalid") || message.contains("scatter points are insufficient")) {

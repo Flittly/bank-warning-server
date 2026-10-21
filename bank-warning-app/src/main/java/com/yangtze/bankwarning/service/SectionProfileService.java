@@ -41,7 +41,14 @@ public class SectionProfileService {
                 null);
         String caseId = String.valueOf(sectionViewResult.get("caseId"));
         Map<String, Object> result = castMap(sectionViewResult.get("result"));
-        String rawJsonName = String.valueOf(result.get("raw-json"));
+        String rawJsonName = Objects.toString(result.get("raw-json"), "").trim();
+        // RESPONSING 在模型跑完前先落盘一份占位响应（raw-json = "NONE"）。模型失败时
+        // 这份占位不会被覆盖，于是 "NONE" 会以「文件名」的身份一路走到 fetchModelCaseFile，
+        // 换回来的是一个取不到文件的二次异常，真正的失败原因（DEM 无数据等）就此丢失。
+        // 在这里就把它当失败处理，并把模型侧写的 error-code / error-message 带出去。
+        if (rawJsonName.isEmpty() || isPlaceholder(rawJsonName)) {
+            throw new IllegalStateException(buildSectionViewFailureMessage(sectionId, result));
+        }
         String rawJsonText = modelGatewayService.fetchModelCaseFile(caseId, rawJsonName);
         Map<String, Object> sectionJson = readJsonMap(rawJsonText);
         Map<String, Object> profileData = buildProfileData(sectionJson, result.get("interval"));
@@ -61,6 +68,29 @@ public class SectionProfileService {
                 profileData,
                 castMap(section.get("geometry")));
         log.info("[section-profile] saved, taskId={}, sectionId={}, caseId={}", taskId, sectionId, caseId);
+    }
+
+    /** 模型未真正产出结果时 RESPONSING 写下的占位值：它是标记，不是文件名。 */
+    private static boolean isPlaceholder(String value) {
+        return "NONE".equalsIgnoreCase(value) || "TEMPLATE".equalsIgnoreCase(value);
+    }
+
+    /**
+     * 失败消息刻意把 error_code 放在前面（形如 {@code error_code=DEM_COVERAGE_INSUFFICIENT}）：
+     * TaskExecutionService.classifyError 是按码匹配的，先匹配到码就不会退化成 UNKNOWN_ERROR，
+     * 前端也才能给出「DEM 无数据」这种可操作的提示，而不是一句「未知错误」。
+     */
+    private static String buildSectionViewFailureMessage(String sectionId, Map<String, Object> result) {
+        String code = Objects.toString(result.get("error-code"), "").trim();
+        if (code.isEmpty()) {
+            code = "SECTION_VIEW_FAILED";
+        }
+        String detail = Objects.toString(result.get("error-message"), "").trim();
+        return String.format(
+                "Section View failed, section_id=%s, error_code=%s%s",
+                sectionId,
+                code,
+                detail.isEmpty() ? "" : ", error_message=" + detail);
     }
 
     private Map<String, Object> buildSectionViewPayload(Map<String, Object> section) {
