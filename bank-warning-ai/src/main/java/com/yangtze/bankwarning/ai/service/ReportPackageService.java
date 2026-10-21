@@ -24,9 +24,12 @@ import java.util.zip.ZipOutputStream;
  * 报告导出打包。
  *
  * <p>一次报告生成会落一个同名输出目录 {@code report_<taskId>_<ts>/}，里面同时有
- * 子图（png）与**分区断面详情 CSV**。导出时把两者打进一个 zip：
- * {@code 报告.docx + 分区1_断面详情.csv + … + 分区N_断面详情.csv}，
- * 这样「报告」与「各分区断面详情」是同一次导出的产物，不会各下载一次而对不上。
+ * 子图（png）与**若干 CSV**（分区断面详情 + 全任务风险段汇总）。导出时把它们打进一个 zip：
+ * {@code 报告.docx + 分区1_断面详情.csv + … + 风险段汇总.csv}，
+ * 这样「报告」与「数据文件」是同一次导出的产物，不会各下载一次而对不上。
+ *
+ * <p>打包触发条件从「有分区 CSV」放宽为「有任一 CSV」：不分幅的报告现在也会带
+ * {@code 风险段汇总.csv}，若仍按分区数判定，那份汇总就永远出不来。
  */
 @Service
 public class ReportPackageService {

@@ -52,10 +52,13 @@ public class PartitionSectionCsvService {
     };
 
     private final JdbcTemplate jdbcTemplate;
+    private final RiskSegmentSummaryService riskSegmentSummaryService;
     private final ObjectMapper json = new ObjectMapper();
 
-    public PartitionSectionCsvService(JdbcTemplate jdbcTemplate) {
+    public PartitionSectionCsvService(JdbcTemplate jdbcTemplate,
+                                      RiskSegmentSummaryService riskSegmentSummaryService) {
         this.jdbcTemplate = jdbcTemplate;
+        this.riskSegmentSummaryService = riskSegmentSummaryService;
     }
 
     /** 一个分区的 CSV 产出：序号、位置标签（与报告正文同文案）、文件名、断面数。 */
@@ -67,19 +70,44 @@ public class PartitionSectionCsvService {
      * @param partitions       各分区 CSV（按分区顺序）
      * @param unassignedFile   未落入任何分区的断面文件名；无此类断面时为 null
      * @param unassignedCount  未落入任何分区的断面数
+     * @param riskSummaryFile  全任务风险段汇总文件名；无汇总时为 null
+     * @param riskSegmentCount 风险段条数
+     * @param riskSectionCount 参与风险段统计的断面数
      */
-    public record CsvExport(List<PartitionCsv> partitions, String unassignedFile, int unassignedCount) {
+    public record CsvExport(List<PartitionCsv> partitions, String unassignedFile, int unassignedCount,
+                            String riskSummaryFile, int riskSegmentCount, int riskSectionCount) {
+
+        /** 兼容旧调用：只有分区明细、没有风险段汇总。 */
+        public CsvExport(List<PartitionCsv> partitions, String unassignedFile, int unassignedCount) {
+            this(partitions, unassignedFile, unassignedCount, null, 0, 0);
+        }
 
         public static CsvExport empty() {
-            return new CsvExport(List.of(), null, 0);
+            return new CsvExport(List.of(), null, 0, null, 0, 0);
         }
 
+        /**
+         * 是否没有任何 CSV 产出。
+         *
+         * <p>风险段汇总是**独立于分幅**的产出：不分幅的报告也可能有汇总，
+         * 此时导出同样要打包成 zip，所以它必须计入 {@code isEmpty} 判定。
+         */
         public boolean isEmpty() {
-            return partitions.isEmpty() && unassignedCount == 0;
+            return partitions.isEmpty() && unassignedCount == 0 && riskSummaryFile == null;
         }
 
+        /** 压缩包内的 CSV 总数（分区 + 未落入分区 + 风险段汇总）。 */
         public int fileCount() {
-            return partitions.size() + (unassignedCount > 0 ? 1 : 0);
+            return partitions.size() + (unassignedCount > 0 ? 1 : 0) + (riskSummaryFile != null ? 1 : 0);
+        }
+
+        /** 挂上风险段汇总（在分区 CSV 写完之后由调用方补挂，避免两条链路互相依赖）。 */
+        public CsvExport withRiskSummary(RiskSegmentSummaryService.Summary summary) {
+            if (summary == null || summary.isEmpty()) {
+                return this;
+            }
+            return new CsvExport(partitions, unassignedFile, unassignedCount,
+                    summary.fileName(), summary.segmentCount(), summary.sectionCount());
         }
     }
 
@@ -95,19 +123,23 @@ public class PartitionSectionCsvService {
      */
     public CsvExport writePartitionCsvs(String taskId, File outDir,
                                         List<Map<String, Object>> partitions) {
+        // 风险段汇总与分幅无关：不分幅的报告也要有它。先写、再挂到结果上，
+        // 这样调用方只需看 CsvExport 一个对象就知道本次到底产出了哪些 CSV。
+        RiskSegmentSummaryService.Summary riskSummary = riskSegmentSummaryService.write(taskId, outDir);
+
         if (partitions == null || partitions.isEmpty()) {
-            return CsvExport.empty();
+            return CsvExport.empty().withRiskSummary(riskSummary);
         }
         List<Map<String, Object>> rows;
         try {
             rows = querySectionDetails(taskId);
         } catch (Exception e) {
             log.warn("[csv] 查询断面详情失败，跳过分区 CSV 导出: {}", e.getMessage(), e);
-            return CsvExport.empty();
+            return CsvExport.empty().withRiskSummary(riskSummary);
         }
         if (rows.isEmpty()) {
             log.info("[csv] 任务 {} 无断面风险数据，跳过分区 CSV 导出", taskId);
-            return CsvExport.empty();
+            return CsvExport.empty().withRiskSummary(riskSummary);
         }
 
         List<String> indicatorKeys = collectIndicatorKeys(rows);
@@ -153,7 +185,18 @@ public class PartitionSectionCsvService {
 
         log.info("[csv] 分区断面详情已导出：{} 个 CSV（断面 {} 条，其中未落入分区 {} 条）→ {}",
                 written.size() + (unassignedFile == null ? 0 : 1), rows.size(), unassigned.size(), outDir);
-        return new CsvExport(written, unassignedFile, unassigned.size());
+        return new CsvExport(written, unassignedFile, unassigned.size()).withRiskSummary(riskSummary);
+    }
+
+    /**
+     * 只写风险段汇总（不分幅的报告走这条路）。
+     *
+     * <p>单独开一个方法而不是让调用方直接依赖 {@link RiskSegmentSummaryService}，
+     * 是为了让「本次导出到底产出了哪些文件」只有 {@link CsvExport} 一个出口。
+     */
+    public CsvExport writeRiskSummaryOnly(String taskId, File outDir) {
+        RiskSegmentSummaryService.Summary summary = riskSegmentSummaryService.write(taskId, outDir);
+        return CsvExport.empty().withRiskSummary(summary);
     }
 
     /**

@@ -82,6 +82,41 @@ class ReportPackageServiceTest {
         assertTrue(service.listPartitionCsvs(dir.toFile()).isEmpty());
     }
 
+    @Test
+    @DisplayName("风险段汇总没有分区前缀，排在各分区之后但不会被漏掉")
+    void riskSummarySortsLast(@TempDir Path dir) throws Exception {
+        Files.writeString(dir.resolve("风险段汇总.csv"), "x");
+        Files.writeString(dir.resolve("分区2_断面详情.csv"), "x");
+        Files.writeString(dir.resolve("分区1_断面详情.csv"), "x");
+
+        List<String> names = service.listPartitionCsvs(dir.toFile()).stream()
+                .map(File::getName).toList();
+
+        assertEquals(List.of("分区1_断面详情.csv", "分区2_断面详情.csv", "风险段汇总.csv"), names);
+    }
+
+    @Test
+    @DisplayName("不分幅（只有风险段汇总）也会打包成 zip，否则汇总永远导不出去")
+    void riskSummaryAloneStillZips(@TempDir Path dir) throws Exception {
+        Files.writeString(dir.resolve("风险段汇总.csv"), "序号,岸段ID\n1,A\n",
+                StandardCharsets.UTF_8);
+
+        List<File> csvs = service.listPartitionCsvs(dir.toFile());
+        assertEquals(1, csvs.size());
+
+        byte[] zip = service.zipWithCsvs("报告.docx", new byte[] {1, 2, 3}, csvs);
+        assertNotNull(zip, "只有汇总 CSV 时同样要打包");
+        try (ZipInputStream zis = new ZipInputStream(new ByteArrayInputStream(zip),
+                StandardCharsets.UTF_8)) {
+            List<String> entries = new java.util.ArrayList<>();
+            ZipEntry entry;
+            while ((entry = zis.getNextEntry()) != null) {
+                entries.add(entry.getName());
+            }
+            assertEquals(List.of("报告.docx", "风险段汇总.csv"), entries);
+        }
+    }
+
     // ------------------------------------------------------------------
     // 3. 打包
     // ------------------------------------------------------------------

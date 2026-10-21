@@ -87,21 +87,30 @@ public class MarkdownReportService {
     }
 
     /**
-     * 分区断面详情 CSV 清单。
+     * 导出数据文件清单（分区断面详情 + 全任务风险段汇总）。
      *
      * <p>导出报告时这些 CSV 会与 docx 打进同一个压缩包，这里把它们列进报告正文的附录，
      * 让读者知道「每个分区对应哪个 CSV 文件」。
+     *
+     * <p>表格固定 4 列（范围 / 说明 / 断面数 / CSV 文件），因为前端
+     * {@code partitionCsvInfoFromReport} 按「行首 | + 末列反引号文件名」识别，
+     * 列数一变就解析不到，点导出前的「含 N 个 CSV」提示会退回 0。
      */
     private void appendSectionCsvAppendix(StringBuilder md,
                                           PartitionSectionCsvService.CsvExport sectionCsvs) {
         if (sectionCsvs == null || sectionCsvs.isEmpty()) {
             return;
         }
+        boolean hasPartitions = !sectionCsvs.partitions().isEmpty();
         md.append("---\n\n");
-        md.append("## 附录：分区断面详情（CSV）\n\n");
-        md.append("本次报告按经纬度划分为 ").append(sectionCsvs.partitions().size())
-                .append(" 个分区，各分区的断面详情在导出报告时随报告一并输出为独立的 CSV 文件：\n\n");
-        md.append("| 分区 | 分区位置 | 断面数 | CSV 文件 |\n");
+        md.append("## 附录：导出数据文件（CSV）\n\n");
+        if (hasPartitions) {
+            md.append("本次报告按经纬度划分为 ").append(sectionCsvs.partitions().size())
+                    .append(" 个分区。导出报告时，以下数据文件随报告一并输出：\n\n");
+        } else {
+            md.append("导出报告时，以下数据文件随报告一并输出：\n\n");
+        }
+        md.append("| 范围 | 说明 | 断面数 | CSV 文件 |\n");
         md.append("| --- | --- | --- | --- |\n");
         for (PartitionSectionCsvService.PartitionCsv csv : sectionCsvs.partitions()) {
             md.append("| 分区 ").append(csv.index())
@@ -114,10 +123,25 @@ public class MarkdownReportService {
                     .append(sectionCsvs.unassignedCount())
                     .append(" | `").append(sectionCsvs.unassignedFile()).append("` |\n");
         }
+        if (sectionCsvs.riskSummaryFile() != null) {
+            md.append("| 全任务 | 连续同类风险段汇总（起止/中心经纬度、长度 km、占比） | ")
+                    .append(sectionCsvs.riskSectionCount())
+                    .append(" | `").append(sectionCsvs.riskSummaryFile()).append("` |\n");
+        }
         md.append('\n');
-        md.append("> 分区边界与「风险分布图」的分幅边界完全相同（同一组经纬度范围），"
-                + "断面按**起点坐标**归属，边界含边；自定义分幅出现重叠时，"
-                + "同一条断面会同时出现在多个分区的 CSV 中。\n\n");
+        if (hasPartitions) {
+            md.append("> 分区边界与「风险分布图」的分幅边界完全相同（同一组经纬度范围），"
+                    + "断面按**起点坐标**归属，边界含边；自定义分幅出现重叠时，"
+                    + "同一条断面会同时出现在多个分区的 CSV 中。\n");
+        }
+        if (sectionCsvs.riskSummaryFile() != null) {
+            md.append("> `").append(sectionCsvs.riskSummaryFile())
+                    .append("` 全任务共 ").append(sectionCsvs.riskSegmentCount())
+                    .append(" 段，**不按分区切分** —— 一段风险跨分区时切开会让长度与占比失真。"
+                            + "占比分母是该范围内「已算出风险等级的断面」所覆盖的长度，"
+                            + "未计算 / 计算失败的断面不计入。\n");
+        }
+        md.append('\n');
     }
 
     /**

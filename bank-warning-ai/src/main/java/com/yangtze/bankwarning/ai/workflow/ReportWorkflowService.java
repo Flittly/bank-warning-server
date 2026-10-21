@@ -914,19 +914,28 @@ public class ReportWorkflowService {
     }
 
     /**
-     * 按分区写出断面详情 CSV（本次报告若分幅）。
+     * 按分区写出断面详情 CSV，并**总是**附上全任务风险段汇总。
      *
      * <p>分区边界与正文/附录**同源**（{@code state.context["partitions"]}，即出图工具回传的
      * tiles[].bbox），归区判定复用 {@code PartitionBounds.contains} 的含边规则 ——
      * 于是「CSV 里某分区的断面数」与报告正文该分区的数字必然一致。
      *
-     * <p>不分幅（无 partitions）时不产出任何 CSV，导出行为与历史版本一致。
+     * <p>不分幅（无 partitions）时：不产分区明细，但**仍然产出 {@code 风险段汇总.csv}**。
+     * 风险段的位置/长度/占比与是否分幅无关，这是本次新增的导出内容，不能因为不分幅就消失。
+     * 注意因此不分幅的报告现在也会打包成 zip（zip 的触发条件从「有分区 CSV」变成
+     * 「有任一 CSV」），前端按报告附录里的 CSV 清单预判文件名，已同步更新。
      */
     private PartitionSectionCsvService.CsvExport writeSectionCsvs(
             String taskId, String taskDir, WorkflowState state) {
         List<Map<String, Object>> partitions = readPartitions(state);
         if (partitions.isEmpty()) {
-            return PartitionSectionCsvService.CsvExport.empty();
+            try {
+                return partitionSectionCsvService
+                        .writeRiskSummaryOnly(taskId, new java.io.File(taskDir));
+            } catch (Exception e) {
+                log.warn("[workflow] 风险段汇总导出失败（不影响报告）: {}", e.getMessage(), e);
+                return PartitionSectionCsvService.CsvExport.empty();
+            }
         }
         try {
             return partitionSectionCsvService

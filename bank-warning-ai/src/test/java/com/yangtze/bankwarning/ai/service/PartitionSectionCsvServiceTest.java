@@ -31,12 +31,27 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 @DisplayName("分区断面详情 CSV")
 class PartitionSectionCsvServiceTest {
 
+    /**
+     * 不产风险段汇总的桩：本测试只验证分区明细，摘要由
+     * {@code RiskSegmentSummaryServiceTest} 单独覆盖，避免 fileCount 被 +1 干扰。
+     */
+    private static class NoRiskSummary extends RiskSegmentSummaryService {
+        NoRiskSummary() {
+            super(null);
+        }
+
+        @Override
+        public Summary write(String taskId, java.io.File outDir) {
+            return new Summary(FILE_NAME, 0, 0);
+        }
+    }
+
     /** 只替换取数一步，其余（分桶、写文件）走真实实现。 */
     private static class StubService extends PartitionSectionCsvService {
         private final List<Map<String, Object>> rows;
 
         StubService(List<Map<String, Object>> rows) {
-            super(null);
+            super(null, new NoRiskSummary());
             this.rows = rows;
         }
 

@@ -55,7 +55,7 @@ class MarkdownReportServiceTest {
         String md = service.buildMarkdownContent("t1", "报告正文", List.of(), export);
 
         assertTrue(md.contains("报告正文"), md);
-        assertTrue(md.contains("## 附录：分区断面详情（CSV）"), md);
+        assertTrue(md.contains("## 附录：导出数据文件（CSV）"), md);
         assertTrue(md.contains("划分为 2 个分区"), md);
         assertTrue(md.contains("| 分区 1 | 第 1 行第 1 列"), md);
         assertTrue(md.contains("`分区1_断面详情.csv`"), md);
@@ -63,6 +63,38 @@ class MarkdownReportServiceTest {
         assertTrue(md.contains("未落入分区"), md);
         assertTrue(md.contains("`未落入分区_断面详情.csv`"), md);
         assertTrue(md.contains("边界含边"), md);
+    }
+
+    @Test
+    @DisplayName("风险段汇总：不分幅也要出现在附录里，且不谎称「划分为 N 个分区」")
+    void riskSummaryAppendixWithoutPartitions() {
+        PartitionSectionCsvService.CsvExport export = PartitionSectionCsvService.CsvExport.empty()
+                .withRiskSummary(new RiskSegmentSummaryService.Summary("风险段汇总.csv", 12, 302));
+
+        String md = service.buildMarkdownContent("t1", "报告正文", List.of(), export);
+
+        assertTrue(md.contains("`风险段汇总.csv`"), md);
+        assertTrue(md.contains("| 全任务 |"), md);
+        assertTrue(md.contains("12 段"), md);
+        assertTrue(md.contains("不按分区切分"), md);
+        assertFalse(md.contains("划分为"), "不分幅时不能说「划分为 N 个分区」: " + md);
+    }
+
+    @Test
+    @DisplayName("风险段汇总与分区明细并存：附录里两类文件都在（顺序：分区 → 未落入 → 全任务）")
+    void riskSummaryCoexistsWithPartitions() {
+        PartitionSectionCsvService.CsvExport export = new PartitionSectionCsvService.CsvExport(
+                List.of(new PartitionSectionCsvService.PartitionCsv(1, "第 1 行第 1 列",
+                        "分区1_断面详情.csv", 5)),
+                null, 0)
+                .withRiskSummary(new RiskSegmentSummaryService.Summary("风险段汇总.csv", 3, 5));
+
+        String md = service.buildMarkdownContent("t1", "报告正文", List.of(), export);
+
+        int partitionRow = md.indexOf("`分区1_断面详情.csv`");
+        int summaryRow = md.indexOf("`风险段汇总.csv`");
+        assertTrue(partitionRow > 0 && summaryRow > partitionRow, "汇总应排在分区明细之后: " + md);
+        assertTrue(md.contains("划分为 1 个分区"), md);
     }
 
     @Test
