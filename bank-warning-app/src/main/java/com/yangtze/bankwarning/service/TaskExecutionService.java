@@ -4,6 +4,7 @@ import com.yangtze.bankwarning.config.TerrainMappingProperties;
 import com.yangtze.bankwarning.domain.exception.SectionRecomputeException;
 import com.yangtze.bankwarning.service.async.TaskDispatchPort;
 import com.yangtze.bankwarning.service.async.TaskRunStatePort;
+import com.yangtze.bankwarning.service.cluster.ClusterLockManager;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
@@ -81,14 +82,33 @@ public class TaskExecutionService {
      * 然后看到"补了岸段却没有结果"。传了 section_ids 就只算这一批（仍尊重已有结果跳过）。
      */
     public Map<String, Object> runTask(String taskId, boolean onlyPending, List<String> sectionIds) {
+        // 起跑守卫：独占整把任务锁。
+        //
+        // 为什么是「一把锁」而不是「先查状态再跑」：原先是两步（查 sectionRecomputeGuard
+        // 有没有在途单算 → 开跑），两步之间没有任何互斥，两个并发请求可以同时通过检查，
+        // 然后各自 clearTaskResults 再各自写结果 —— 单实例下就已经会发生，只是概率低。
+        // 现在把「判定」和「占用」合成一次原子的 tryLockExclusive，跨实例也成立。
+        ClusterLockManager.LockHandle taskLock = sectionRecomputeGuard.tryLockTaskExclusive(taskId);
+        if (taskLock == null) {
+            log.warn("[task-run] rejected, task is locked, taskId={}, onlyPending={}", taskId, onlyPending);
+            throw SectionRecomputeException.taskRunBusy(taskId);
+        }
+        try {
+            return doRunTask(taskId, onlyPending, sectionIds);
+        } finally {
+            // 必须放锁，否则该任务在锁 TTL 到期（集群模式靠 watchdog，单实例永远不过期）之前
+            // 再也跑不了 —— 表现为「任务一直很忙」，重启才恢复。
+            taskLock.close();
+        }
+    }
+
+    private Map<String, Object> doRunTask(String taskId, boolean onlyPending, List<String> sectionIds) {
         log.info("[task-run] starting task run, taskId={}, onlyPending={}, scope={}",
                 taskId, onlyPending, sectionIds == null ? "all" : sectionIds.size());
         businessStoreService.getTask(taskId);
-        // 必须在 clearTaskResults **之前**问：这一步会把该任务全部结果软删，
-        // 若此刻有条断面正在单独重算，它刚落的新结果会被顺手抹掉。
-        if (sectionRecomputeGuard.hasInFlightForTask(taskId)) {
-            throw SectionRecomputeException.taskHasRunningSection(taskId);
-        }
+        // 这里原先有一道 hasInFlightForTask 检查（「该任务下有断面正在单算」）。
+        // 现在它被上面那把独占锁替代了：单断面重算持的是同一把任务的**共享**锁，
+        // 所以「已拿到独占锁」本身就等于「此刻没有任何单算在途」，且这个判据跨实例成立。
 
         List<Map<String, Object>> sections = businessStoreService.getSectionsByTask(taskId);
         int totalSections = sections.size();
@@ -421,9 +441,9 @@ public class TaskExecutionService {
         if (taskCancelRegistry.isRunning(taskId)) {
             throw SectionRecomputeException.taskRunning(taskId, sectionId);
         }
-        if (!sectionRecomputeGuard.tryAcquire(sectionId, taskId)) {
-            throw SectionRecomputeException.sectionBusy(sectionId);
-        }
+        // 一次拿到两把锁：任务级共享锁（挡住整任务）+ 断面级独占锁（挡住重复提交）。
+        // 失败会直接抛 409，所以下面不需要再判「能不能算」。
+        ClusterLockManager.LockHandle scope = sectionRecomputeGuard.acquire(sectionId, taskId);
 
         log.info("[section-recompute] start, taskId={}, sectionId={}", taskId, sectionId);
         try {
@@ -453,7 +473,8 @@ public class TaskExecutionService {
             failed.put("error_detail", exception.getMessage() == null ? "" : exception.getMessage());
             return failed;
         } finally {
-            sectionRecomputeGuard.release(sectionId);
+            // 逆序释放由 Scope 内部保证（断面 → 任务）。
+            scope.close();
         }
     }
 
@@ -512,7 +533,10 @@ public class TaskExecutionService {
         // 1. 校验任务存在
         businessStoreService.getTask(taskId);
         // 与 runTask 同理：下一步的清空会抹掉在途单算刚落的结果。
-        if (sectionRecomputeGuard.hasInFlightForTask(taskId)) {
+        // 这里只做「探测」而不持锁：Kafka 路径在把断面全发出去后就返回了，真正的执行发生在
+        // worker 侧，锁若只覆盖提交阶段，等它一释放就失去意义。所以任务运行期间的互斥
+        // 交给任务状态（running）+ worker 侧的 runId 管理，这里只需要挡住「清空时有人正在单算」。
+        if (sectionRecomputeGuard.isTaskLocked(taskId)) {
             throw SectionRecomputeException.taskHasRunningSection(taskId);
         }
         log.info("[task-submit-kafka] 任务存在，清理旧结果 taskId={}", taskId);

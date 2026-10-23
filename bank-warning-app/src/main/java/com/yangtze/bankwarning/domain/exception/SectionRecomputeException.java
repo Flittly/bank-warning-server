@@ -48,6 +48,21 @@ public class SectionRecomputeException extends RuntimeException {
                 null);
     }
 
+    /**
+     * 整任务起跑时抢不到任务级独占锁：要么同一任务已经在跑（另一实例或同一实例的重复提交），
+     * 要么该任务下还有断面在单算。
+     *
+     * <p>两种情况合成一个 409 是刻意的 —— 从调用方视角它们都是「此刻不能起跑」，
+     * 且都不该排队（排队意味着一个 900 秒的 HTTP 请求在后面干等）。
+     * 想区分就只能看日志里 {@code [cluster-lock] busy} 的 {@code exclusive} 字段。
+     */
+    public static SectionRecomputeException taskRunBusy(String taskId) {
+        return new SectionRecomputeException(
+                "TASK_RUNNING",
+                "该任务正在运行，或该任务下有断面正在单独重算；请等当前操作结束后再运行",
+                null);
+    }
+
     public String getCode() {
         return code;
     }

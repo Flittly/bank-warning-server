@@ -55,6 +55,17 @@
             <groupId>org.springframework.boot</groupId>
             <artifactId>spring-boot-starter-data-redis</artifactId>
         </dependency>
+        <!--
+            集群模式的分布式锁（bw.cluster.enabled=true 时才真正用到）。
+            只引核心包、**不引 redisson-spring-boot-starter**：starter 的自动配置是针对
+            Boot 3 写的，在 Boot 4 上会注册重复的 RedissonConnectionFactory 并与
+            spring-boot-starter-data-redis 打架；核心包自己 new 一个 RedissonClient Bean 更稳。
+        -->
+        <dependency>
+            <groupId>org.redisson</groupId>
+            <artifactId>redisson</artifactId>
+            <version>3.52.0</version>
+        </dependency>
         <dependency>
             <groupId>com.fasterxml.jackson.core</groupId>
             <artifactId>jackson-databind</artifactId>
