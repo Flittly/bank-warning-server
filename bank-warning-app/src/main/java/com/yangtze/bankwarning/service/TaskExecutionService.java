@@ -152,10 +152,24 @@ public class TaskExecutionService {
             List<Map<String, Object>> failures = new ArrayList<>();
 
             boolean cancelRequested = false;
+            boolean lostOwnership = false;
             for (Map<String, Object> section : sections) {
                 // 协作式取消的唯一检查点：断面之间。刻意不打断正在进行的模型调用 ——
                 // 既保证"已算完的断面结果不丢"，也让停止时机可解释（最迟当前这条算完就停）。
-                if (taskCancelRegistry.isCancelRequested(taskId)) {
+                //
+                // 这一次调用同时办三件事：续期租约（声明"我还活着"）、查取消标志、确认自己仍是
+                // 这个任务的所有者。合并成一次是因为三者必须同时成立才有意义 —— 分开查会有缝隙，
+                // 而且断面本身要算几秒，多一次往返不划算。
+                TaskCancelRegistry.CancelSignal signal = taskCancelRegistry.heartbeatAndCheck(taskId);
+                if (signal == TaskCancelRegistry.CancelSignal.LOST_OWNERSHIP) {
+                    // 租约已被别的实例接管（同一任务被再启动一次），或本实例续不上期。
+                    // 此时必须停手：继续算下去会和对方同时往同一批断面写结果。
+                    lostOwnership = true;
+                    log.warn("[task-run] lost ownership, stop without writing final status, taskId={}, done={}",
+                            taskId, results.size() + failures.size());
+                    break;
+                }
+                if (signal == TaskCancelRegistry.CancelSignal.CANCEL_REQUESTED) {
                     cancelRequested = true;
                     log.info("[task-run] cancel requested, stop before next section, taskId={}, done={}",
                             taskId, results.size() + failures.size());
@@ -180,6 +194,26 @@ public class TaskExecutionService {
                     failed.put("executed_at", Instant.now().toString());
                     failures.add(failed);
                 }
+            }
+
+            // 失去所有权 ⇒ 直接返回，**不写任何终态**。
+            // 终态归接管者写；这里若顺手写个 cancelled / completed，就会与对方互相覆盖，
+            // 那正是「两个写入者打架」的老问题换了个入口。
+            // 返回 status=superseded 只是为了让人看得懂发生了什么（前端不识别这个值时会走未知分支，
+            // 不会崩；且这个分支在单写者部署下不会触发）。
+            if (lostOwnership) {
+                return Map.of(
+                        "success", false,
+                        "task_id", taskId,
+                        "status", "superseded",
+                        "results", results,
+                        "failures", failures,
+                        "summary", Map.of(
+                                "total", sections.size(),
+                                "success", results.size(),
+                                "failed", failures.size(),
+                                "skipped", Math.max(0, sections.size() - results.size() - failures.size())
+                        ));
             }
 
             // 终止优先于任何终态。用「或」而不是只看循环里那个布尔量：取消请求可能刚好落在
@@ -253,12 +287,14 @@ public class TaskExecutionService {
      *
      * <p>两条路径分开处理，这是这个接口唯一需要小心的地方：
      * <ol>
-     *   <li><b>cooperative</b> —— 中断登记表里有它，说明本进程确实有线程在跑：
+     *   <li><b>cooperative</b> —— 登记表里还有这个任务的租约，说明确实有实例在跑它
+     *       （单实例时是本进程的内存表，集群模式下是 Redis 里的租约键，见 {@link TaskCancelRegistry}）：
      *       只置标志并立即返回，**由那个循环自己写终态**。刻意不在这里写库，
      *       是为了保住"终态只有一个写入者"这条不变量（否则两个写入者会互相盖）。</li>
-     *   <li><b>stale</b> —— 登记表里没有它，说明跑它的进程已经不在了（后端重启 / 请求被中断），
+     *   <li><b>stale</b> —— 登记表里没有任何实例持有它，说明跑它的进程已经不在了（后端重启 / 请求被中断），
      *       也就是面板上那种挂了几个月的僵尸。此时**必须由本接口收尾**，
-     *       否则它永远停在 running，而且前端还会因为它一直"运行中"而永远轮询。</li>
+     *       否则它永远停在 running，而且前端还会因为它一直"运行中"而永远轮询。
+     *       注意这条分支的正确性完全依赖"登记表是全局的" —— 内存表在多实例下会让它误伤正在跑的任务。</li>
      * </ol>
      */
     public Map<String, Object> cancelTask(String taskId) {

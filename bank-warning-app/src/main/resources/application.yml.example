@@ -18,6 +18,12 @@ spring:
     username: ${BANK_DB_USERNAME:postgres}
     password: ${BANK_DB_PASSWORD:123456}
     driver-class-name: org.postgresql.Driver
+  # Redis：只给集群模式的「取消标志」用，默认关闭时不会建立连接
+  data:
+    redis:
+      host: ${REDIS_HOST:127.0.0.1}
+      port: ${REDIS_PORT:6379}
+      timeout: 2s
 
   servlet:
     multipart:
@@ -198,3 +204,14 @@ security:
 app:
   cors:
     allowed-origins: ${CORS_ALLOWED_ORIGINS:http://localhost:5173}
+
+# 集群模式（多实例部署）开关。
+# false = 内存中断表，单实例语义，零外部依赖（默认）；
+# true  = Redis 中断表，取消请求落到任何实例都能正确判断「谁在跑」。
+# 两个实例的 instance-id 不能相同，否则所有权判断会互相覆盖。
+bw:
+  cluster:
+    enabled: ${BW_CLUSTER_ENABLED:false}
+    instance-id: ${BW_INSTANCE_ID:}
+    lease-ttl: ${BW_CLUSTER_LEASE_TTL:60s}
+    cancel-ttl: ${BW_CLUSTER_CANCEL_TTL:12h}
