@@ -26,6 +26,12 @@ public class ReportsController {
 
     private static final Logger log = LoggerFactory.getLogger(ReportsController.class);
     private static final Pattern FILENAME_PTN = Pattern.compile("^report_(.+?)_(\\d{8}_\\d{6})\\.md$");
+    /** AI 出图结果：与报告共用一个目录、同一套查看/删除/导出能力，只是前缀区分来源。 */
+    private static final Pattern VIZ_FILENAME_PTN = Pattern.compile("^viz_(.+?)_(\\d{8}_\\d{6})\\.md$");
+    /** 出图 md 里引用的图片目录：/v0/bank/ai/viz-output/&lt;dir&gt;/&lt;file&gt; */
+    private static final Pattern VIZ_IMG_DIR_PTN = Pattern.compile("/v0/bank/ai/viz-output/([A-Za-z0-9_.-]+)/");
+    /** 只允许删除形如 viz_xxx 的目录，绝不放任何别的路径进删除逻辑 */
+    private static final Pattern SAFE_VIZ_DIR_PTN = Pattern.compile("^viz_[A-Za-z0-9_.-]+$");
 
     /** md2docx 导出的墙钟上限：脚本卡死时不再永久占用一个请求线程 */
     private static final long EXPORT_TIMEOUT_SECONDS = 60L;
@@ -119,6 +125,13 @@ public class ReportsController {
         }
     }
 
+    /**
+     * 列出「报告查看」里的全部条目。
+     *
+     * <p>目录里有两类 md：AI 报告的 report_&lt;taskId&gt;_&lt;ts&gt;.md，和 AI 出图结果的
+     * viz_&lt;taskId&gt;_&lt;ts&gt;.md。两者同目录、同寿命、同查看器，靠 {@code kind} 区分
+     * （viz = 出图结果）。排序统一按文件修改时间倒序，最新生成的在最上面。
+     */
     @GetMapping("/reports")
     public Map<String, Object> listReports() {
         File dir = new File(outputDir, "reports");
@@ -128,14 +141,23 @@ public class ReportsController {
             Arrays.sort(files, (a, b) -> Long.compare(b.lastModified(), a.lastModified()));
             for (File f : files) {
                 Map<String, Object> item = new LinkedHashMap<>();
-                item.put("filename", f.getName());
+                String name = f.getName();
+                item.put("filename", name);
                 item.put("size", f.length());
                 item.put("time", new java.text.SimpleDateFormat("yyyy-MM-dd HH:mm:ss")
                         .format(new java.util.Date(f.lastModified())));
-                Matcher m = FILENAME_PTN.matcher(f.getName());
-                if (m.matches()) {
-                    item.put("taskId", m.group(1));
-                    item.put("timestamp", m.group(2));
+                Matcher vizMatcher = VIZ_FILENAME_PTN.matcher(name);
+                Matcher reportMatcher = FILENAME_PTN.matcher(name);
+                if (vizMatcher.matches()) {
+                    item.put("kind", "viz");
+                    item.put("taskId", vizMatcher.group(1));
+                    item.put("timestamp", vizMatcher.group(2));
+                } else {
+                    item.put("kind", "report");
+                    if (reportMatcher.matches()) {
+                        item.put("taskId", reportMatcher.group(1));
+                        item.put("timestamp", reportMatcher.group(2));
+                    }
                 }
                 list.add(item);
             }
@@ -180,6 +202,16 @@ public class ReportsController {
         }
 
         // 1. 删除 .md 报告文件
+        // 出图结果要先留一份正文：图片目录是从正文里的 URL 反查出来的，删完就读不到了。
+        boolean isViz = file.getName().startsWith("viz_");
+        String vizContent = null;
+        if (isViz) {
+            try {
+                vizContent = Files.readString(file.toPath(), StandardCharsets.UTF_8);
+            } catch (IOException e) {
+                log.warn("[reports] 读取出图记录失败，将只删 md 不动图片目录: {} ({})", file.getName(), e.getMessage());
+            }
+        }
         boolean deleted = file.delete();
         log.info("[reports] 报告文件删除: {} -> {}", file.getName(), deleted);
 
@@ -191,7 +223,33 @@ public class ReportsController {
                     reportDir.getAbsolutePath(), dirDeleted);
         }
 
+        // 3. 出图记录：连它引用的 viz_ 图片目录一起清掉，避免留下一堆没人引用的 PNG
+        if (isViz && vizContent != null) {
+            for (String dirName : referencedVizDirs(vizContent)) {
+                if (!SAFE_VIZ_DIR_PTN.matcher(dirName).matches()) continue;
+                try {
+                    File vizDir = SkillPathGuard.safeResolve(
+                            new File(outputDir).toPath().toAbsolutePath().normalize(), dirName).toFile();
+                    boolean ok = deleteDirectory(vizDir);
+                    log.info("[reports] 出图图片目录删除: {} -> {}", dirName, ok);
+                } catch (IllegalArgumentException e) {
+                    log.warn("[reports] 跳过非法出图目录: {} ({})", dirName, e.getMessage());
+                }
+            }
+        }
+
         return Map.of("success", deleted, "filename", file.getName(), "deleted", deleted);
+    }
+
+    /** 从出图记录的正文里反查它引用了哪些 viz_ 目录（去重，保持出现顺序） */
+    private Set<String> referencedVizDirs(String content) {
+        Set<String> dirs = new LinkedHashSet<>();
+        if (content == null || content.isBlank()) return dirs;
+        Matcher m = VIZ_IMG_DIR_PTN.matcher(content);
+        while (m.find()) {
+            dirs.add(m.group(1));
+        }
+        return dirs;
     }
 
     // 递归删除目录
@@ -277,12 +335,19 @@ public class ReportsController {
         }
     }
 
+    /**
+     * 保存一份 md 到「报告查看」目录。
+     *
+     * <p>{@code kind} 决定前缀：缺省 / "report" = AI 报告（report_…），"viz" = AI 出图结果（viz_…）。
+     * 两者共用同一目录、同一份查看/删除能力，列表里靠 kind 区分。
+     */
     @PostMapping("/reports/save")
     public Map<String, Object> saveReport(@RequestBody Map<String, String> body) {
         String content = body.get("content");
         if (content == null || content.isBlank()) {
             return Map.of("success", false, "error", "content 不能为空");
         }
+        boolean viz = "viz".equalsIgnoreCase(body.getOrDefault("kind", "report"));
         String taskId = body.getOrDefault("taskId", "chat");
         if (taskId == null || taskId.isBlank()) taskId = "chat";
         taskId = taskId.strip();
@@ -293,7 +358,7 @@ public class ReportsController {
         }
         String ts = java.time.LocalDateTime.now()
                 .format(java.time.format.DateTimeFormatter.ofPattern("yyyyMMdd_HHmmss"));
-        String filename = "report_" + taskId + "_" + ts + ".md";
+        String filename = (viz ? "viz_" : "report_") + taskId + "_" + ts + ".md";
         File dir = new File(outputDir, "reports");
         File file;
         try {

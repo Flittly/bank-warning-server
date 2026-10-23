@@ -83,5 +83,31 @@
         UPDATE section_profiles SET deleted_at = CURRENT_TIMESTAMP
         WHERE section_id = #{sectionId} AND deleted_at IS NULL AND (user_id = #{userId} OR #{userId, jdbcType=BIGINT} IS NULL)
     </update>
+    <!-- 复制任务的断面剖面；映射规则与 SectionMapper.copySectionsFromTask / RiskResultMapper.copyFromTask 一致。
+         UNIQUE(task_id, section_id) 在新任务下天然不冲突（task_id 是新的）。 -->
+    <insert id="copyFromTask">
+        INSERT INTO section_profiles (
+            task_id, section_id, section_name, region_code, bank_id, dem_id, source_case_id,
+            interval, deepest_index, slope_foot_index, point_count, profile_data, geom, user_id)
+        SELECT
+            #{newTaskId}, ns.section_id, p.section_name, p.region_code, p.bank_id,
+            p.dem_id, p.source_case_id, p.interval, p.deepest_index, p.slope_foot_index,
+            p.point_count, p.profile_data, p.geom,
+            #{targetUserId, jdbcType=BIGINT}
+        FROM section_profiles p
+        JOIN cross_sections os ON os.section_id = p.section_id AND os.task_id = #{srcTaskId}
+        JOIN cross_sections ns ON ns.task_id = #{newTaskId}
+             AND ns.section_id = 'sec-' || #{newTaskId} || CASE
+                 WHEN os.section_id LIKE #{srcPrefix} || '%'
+                     THEN substring(os.section_id FROM char_length(#{srcPrefix}) + 1)
+                 ELSE '-copy-' || os.id END
+        WHERE p.task_id = #{srcTaskId} AND p.deleted_at IS NULL
+        ORDER BY p.id
+    </insert>
+
+    <select id="countByTaskId" resultType="int">
+        SELECT count(*) FROM section_profiles
+        WHERE task_id = #{taskId} AND deleted_at IS NULL AND (user_id = #{userId} OR #{userId, jdbcType=BIGINT} IS NULL)
+    </select>
 
 </mapper>

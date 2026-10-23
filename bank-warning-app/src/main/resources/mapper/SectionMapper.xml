@@ -301,5 +301,55 @@
             OR cs.risk_thresholds     IS DISTINCT FROM bp.risk_thresholds
             OR cs.weights             IS DISTINCT FROM bp.weights)
     </select>
+    <!--
+        复制任务：把源任务的全部断面整体搬到新任务。
+
+        【为什么是 INSERT…SELECT 而不是「查出来再逐条 insert」】
+        1. 每条断面带 section_geometry / other_params 两个 jsonb，读进 Java 再写回要过一遍
+           Jackson，`120` 与 `120.0` 这类节点类型差异会被放大 —— 而 updateSection 判「几何变了」
+           正是靠结构比较，这类漂移有前科；
+        2. geom / start_point / end_point 本来就不在 SectionMapper.insert 的入参里（它们由
+           ST_GeomFromGeoJSON(section_geometry) 派生），只有 SELECT 才能原样搬；
+        3. 2000+ 断面的大任务，Java 往返 + 分批 insert 是秒级，一条 SQL 是百毫秒级。
+
+        【两个容易漏的列】
+        · is_valid / validation_status / validation_message —— 不在单条 insert 的列清单里
+          （由 SectionValidationService 单独 UPDATE）。这里必须显式带上，否则复制完
+          全部断面都会变回「未校验」，而几何与参数其实一字未改。
+        · basic_param_id 指向**新任务**的参数行，绝不沿用源任务的 param 行 id。
+
+        【section_id 重生成】`sec-<新 taskId><原后缀>`，后缀沿用源 id 的前缀切片，
+        保留 `-0` / `-add3-7` / `-new-<ts>` 这些语义；源 id 不以 `sec-<源 taskId>` 开头
+        （历史遗留格式）时退化为 `-copy-<原行 id>`，保证任务内唯一。
+    -->
+    <insert id="copySectionsFromTask">
+        INSERT INTO cross_sections (
+            task_id, section_id, section_name, bank_id, region_code, segment_index,
+            start_point, end_point, geom, section_geometry, vertical_foot_point, distance,
+            basic_param_id, param_name, bench_segment, current_timepoint, set_name, water_qs,
+            tidal_level, bench_id, ref_id, hs, hc, protection_level, control_level,
+            comparison_timepoint, risk_thresholds, weights, other_params,
+            is_valid, validation_status, validation_message, user_id, created_at, updated_at)
+        SELECT
+            #{newTaskId},
+            'sec-' || #{newTaskId} || CASE
+                WHEN section_id LIKE #{srcPrefix} || '%'
+                    THEN substring(section_id FROM char_length(#{srcPrefix}) + 1)
+                ELSE '-copy-' || id END,
+            section_name, bank_id, region_code, segment_index,
+            start_point, end_point, geom, section_geometry, vertical_foot_point, distance,
+            #{newParamId, jdbcType=INTEGER},
+            param_name, bench_segment, current_timepoint, set_name, water_qs, tidal_level,
+            bench_id, ref_id, hs, hc, protection_level, control_level,
+            comparison_timepoint, risk_thresholds, weights, other_params,
+            CASE WHEN #{resetValidation} THEN NULL          ELSE is_valid           END,
+            CASE WHEN #{resetValidation} THEN 'pending'     ELSE validation_status  END,
+            CASE WHEN #{resetValidation} THEN NULL          ELSE validation_message END,
+            #{targetUserId, jdbcType=BIGINT},
+            CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
+        FROM cross_sections
+        WHERE task_id = #{srcTaskId} AND deleted_at IS NULL
+        ORDER BY segment_index, id
+    </insert>
 
 </mapper>

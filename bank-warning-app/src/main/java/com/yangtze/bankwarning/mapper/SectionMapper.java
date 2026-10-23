@@ -59,4 +59,20 @@ public interface SectionMapper {
     List<String> selectDistinctRealBankIdsByTask(@Param("taskId") String taskId, @Param("userId") Long userId);
 
     int reverseSectionGeometry(@Param("sectionId") String sectionId, @Param("sectionGeometry") String sectionGeometry, @Param("otherParams") String otherParams, @Param("userId") Long userId);
+
+    /**
+     * 复制任务的断面：把 {@code srcTaskId} 下所有未删断面整体搬到 {@code newTaskId}。
+     *
+     * <p>{@code srcPrefix = "sec-" + srcTaskId}，用于切片出原 section_id 的后缀；
+     * {@code newParamId} 是新任务的参数行 id（可为 null，表示不复制参数集）；
+     * {@code resetValidation=true} 时把校验结论打回 pending。
+     *
+     * @return 实际插入的行数
+     */
+    int copySectionsFromTask(@Param("srcTaskId") String srcTaskId,
+                             @Param("newTaskId") String newTaskId,
+                             @Param("srcPrefix") String srcPrefix,
+                             @Param("newParamId") Integer newParamId,
+                             @Param("targetUserId") Long targetUserId,
+                             @Param("resetValidation") boolean resetValidation);
 }

@@ -28,6 +28,17 @@
         SELECT * FROM banks WHERE bank_id = #{bankId} AND deleted_at IS NULL AND (user_id = #{userId} OR #{userId, jdbcType=BIGINT} IS NULL)
     </select>
 
+    <!-- 只回 bank_id，用于复制任务时清洗 bank_ids（剔除 line-N 占位与已删岸段）。 -->
+    <select id="selectExistingBankIds" resultType="java.lang.String">
+        SELECT bank_id FROM banks
+        WHERE deleted_at IS NULL
+          AND (user_id = #{userId} OR #{userId, jdbcType=BIGINT} IS NULL)
+          AND bank_id IN
+          <foreach collection="bankIds" item="bankId" open="(" separator="," close=")">
+              #{bankId}
+          </foreach>
+    </select>
+
     <insert id="insert" parameterType="com.yangtze.bankwarning.domain.po.BankPO" useGeneratedKeys="true" keyProperty="id">
         INSERT INTO banks (bank_id, bank_name, reach_group, bank_geometry, description, reversed, user_id)
         VALUES (#{bankId}, #{bankName}, #{reachGroup}, #{bankGeometry}::jsonb, #{description}, #{reversed}, #{userId})

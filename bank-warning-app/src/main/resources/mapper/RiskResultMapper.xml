@@ -53,6 +53,16 @@
         SELECT COUNT(*) FROM bank_risk_results WHERE task_id = #{taskId} AND deleted_at IS NULL AND (user_id = #{userId} OR #{userId, jdbcType=BIGINT} IS NULL)
     </select>
 
+    <!-- 任务列表批量计数：结果表本身带 task_id（复制任务时就是按它改写），
+         不必 join cross_sections，一次分组就能拿到全部任务的条数。
+         软删行不计；admin（userId 为 null）看全量，与其它查询同一套过滤口径。 -->
+    <select id="countGroupedByTask" resultType="java.util.LinkedHashMap">
+        SELECT task_id AS "task_id", COUNT(*) AS "cnt"
+        FROM bank_risk_results
+        WHERE deleted_at IS NULL AND (user_id = #{userId} OR #{userId, jdbcType=BIGINT} IS NULL)
+        GROUP BY task_id
+    </select>
+
     <update id="deleteByTaskId">
         UPDATE bank_risk_results SET deleted_at = CURRENT_TIMESTAMP
         WHERE task_id = #{taskId} AND deleted_at IS NULL AND (user_id = #{userId} OR #{userId, jdbcType=BIGINT} IS NULL)
@@ -108,5 +118,34 @@
           AND deleted_at IS NULL
           AND (user_id = #{userId} OR #{userId, jdbcType=BIGINT} IS NULL)
     </update>
+    <!--
+        复制任务的既有结果。section_id 必须按「源 id → 新 id」的映射重写，
+        映射规则与 SectionMapper.copySectionsFromTask 完全一致（同一段 CASE），否则搬过来的
+        结果会挂不上任何断面。
+
+        ORDER BY r.id 不是排版偏好：selectLatestBySectionId 用 `ORDER BY id DESC LIMIT 1`
+        取最新，同一断面存在多行时（单断面重算只 INSERT 不删旧行），插入顺序决定了
+        副本里「最新一行」还是不是原件里的那一行。
+
+        source_task_id 落来源，让「这批结论不是本任务算的」可追溯（不写就只能靠猜）。
+    -->
+    <insert id="copyFromTask">
+        INSERT INTO bank_risk_results (
+            task_id, section_id, section_name, region_code, bank_id,
+            run_time, risk_level, indicators, geom, run_id, user_id, edit_state, source_task_id)
+        SELECT
+            #{newTaskId}, ns.section_id, r.section_name, r.region_code, r.bank_id,
+            r.run_time, r.risk_level, r.indicators, r.geom, r.run_id,
+            #{targetUserId, jdbcType=BIGINT}, r.edit_state, r.task_id
+        FROM bank_risk_results r
+        JOIN cross_sections os ON os.section_id = r.section_id AND os.task_id = #{srcTaskId}
+        JOIN cross_sections ns ON ns.task_id = #{newTaskId}
+             AND ns.section_id = 'sec-' || #{newTaskId} || CASE
+                 WHEN os.section_id LIKE #{srcPrefix} || '%'
+                     THEN substring(os.section_id FROM char_length(#{srcPrefix}) + 1)
+                 ELSE '-copy-' || os.id END
+        WHERE r.task_id = #{srcTaskId} AND r.deleted_at IS NULL
+        ORDER BY r.id
+    </insert>
 
 </mapper>

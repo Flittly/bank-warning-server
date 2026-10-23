@@ -13,6 +13,15 @@ public interface TaskMapper {
 
     TaskPO selectByTaskId(@Param("taskId") String taskId, @Param("userId") Long userId);
 
+    /**
+     * 取任务行，**包含已软删的**。
+     *
+     * <p>复制任务时用来判断「客户端指定的 target_task_id 是否已被占用」：
+     * {@code tasks.task_id} 的 UNIQUE 约束不带 {@code deleted_at IS NULL} 条件，
+     * 软删的行照样占着 id，盲插会直接撞唯一键。
+     */
+    TaskPO selectByTaskIdIncludingDeleted(@Param("taskId") String taskId, @Param("userId") Long userId);
+
     int insert(TaskPO task);
 
     int update(TaskPO task);

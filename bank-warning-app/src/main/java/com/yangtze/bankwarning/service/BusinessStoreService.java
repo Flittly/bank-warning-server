@@ -137,8 +137,26 @@ public class BusinessStoreService {
         return taskMapper.selectAll(userId).stream().map(TaskResponse::from).collect(Collectors.toList());
     }
 
-    public TaskResponse getTask(String taskId) {
+    /**
+     * 每个任务的有效结果条数：{@code task_id -> count}。
+     *
+     * <p>任务列表右键「分析」靠它判断该任务有没有结果可框选统计 —— 前端不必为每条任务
+     * 各打一次 `/results`（那会把几百 KB 的 indicators 全拉回来，只为看个条数）。
+     * 没有任何结果的任务不会出现在返回 map 里（而不是给 0），前端按"缺失即 0"处理。
+     */
+    public Map<String, Integer> countResultsByTask() {
         Long userId = SecurityUtils.getCurrentUserIdForDataFilter();
+        Map<String, Integer> counts = new LinkedHashMap<>();
+        for (Map<String, Object> row : riskResultMapper.countGroupedByTask(userId)) {
+            Object taskId = row.get("task_id");
+            if (taskId == null) continue;
+            Object cnt = row.get("cnt");
+            counts.put(String.valueOf(taskId), cnt instanceof Number ? ((Number) cnt).intValue() : 0);
+        }
+        return counts;
+    }
+
+    public TaskResponse getTask(String taskId) {        Long userId = SecurityUtils.getCurrentUserIdForDataFilter();
         TaskPO po = taskMapper.selectByTaskId(taskId, userId);
         if (po == null) {
             throw new IllegalArgumentException("Task not found: " + taskId);
@@ -622,6 +640,84 @@ public class BusinessStoreService {
         String raw = "tp-" + taskId;
         return raw.length() <= 100 ? raw : raw.substring(0, 100);
     }
+
+    /**
+     * 确保任务有自己的一份参数集，并返回它。
+     *
+     * <p>用途是「复制任务」：历史任务可能从没打开过参数面板，`basic_params` 里没有它的行。
+     * 直接读会拿到 null，此时**不能**去读默认模板 —— 那等于把「默认模板的值」当成
+     * 「这个任务实际用的值」，副本的输入就静默换了一份。正确做法是先按物化的既有优先级
+     * （显式模板 → 该任务第一条断面快照 → 默认模板 → 任一模板）补一份，再复制。
+     *
+     * <p>物化只写该任务自己的参数行，不改任何既有值、不碰模板库。
+     */
+    public BasicParamPO ensureTaskParams(String taskId) {
+        return ensureTaskParams(taskId, SecurityUtils.getCurrentUserIdForDataFilter()).po();
+    }
+
+    private Materialized ensureTaskParams(String taskId, Long userId) {
+        BasicParamPO existing = basicParamMapper.selectByTaskId(taskId, userId);
+        if (existing != null) {
+            return new Materialized(existing, "task");
+        }
+        return materializeTaskParams(taskId, null, userId);
+    }
+
+    /**
+     * 任务参数集的复制结果。
+     *
+     * @param param  新任务自己的参数行（`param_id = tp-<newTaskId>`）
+     * @param source 值从哪来：`task` 源任务本来就有 / `section` 按其第一条断面快照物化 /
+     *               `default` 按默认模板物化 —— 后两种要作为 warning 回给用户
+     */
+    public record TaskParamsCopy(BasicParamPO param, String source) {
+    }
+
+    /**
+     * 把源任务的参数集复制成新任务的一份**独立**参数行。
+     *
+     * <p>三点必须守住：
+     * <ol>
+     *   <li>`param_id` / `task_id` 全部换成新任务的 —— 复用源 id 会直接覆盖原件的参数；</li>
+     *   <li>剔除 `other_params.is_default`：该键是「模板库默认模板」的标记，带过去会凭空多出
+     *       一个默认模板竞争者，将来挑默认来源时行为漂移；</li>
+     *   <li>`user_id` 写目标用户（当前 P0 恒为操作者本人）。</li>
+     * </ol>
+     */
+    public TaskParamsCopy copyTaskParamsInto(String sourceTaskId, String newTaskId, Long targetUserId) {
+        Long userId = SecurityUtils.getCurrentUserIdForDataFilter();
+        Materialized source = ensureTaskParams(sourceTaskId, userId);
+        BasicParamPO copied = copyParamValues(source.po(), taskParamIdOf(newTaskId));
+        copied.setTaskId(newTaskId);
+        copied.setUserId(targetUserId != null ? targetUserId : SecurityUtils.getCurrentUserId());
+        copied.setOtherParams(stripDefaultTemplateFlag(copied.getOtherParams()));
+        basicParamMapper.insert(copied);
+        return new TaskParamsCopy(basicParamMapper.selectByTaskId(newTaskId, userId), source.source());
+    }
+
+    /**
+     * 去掉 `other_params.is_default`（模板库「默认模板」标记）。
+     *
+     * <p>只认结构不认字符串：能解析成对象且确实带这个键才重写，其余情况原样返回，
+     * 避免为了删一个键把非法 JSON 或非对象结构「顺手修好」。
+     *
+     * <p>包内可见 + 不依赖任何字段，便于单测直接喂 JSON 断言（复制任务时这个键带过去会
+     * 凭空多出一个默认模板竞争者）。
+     */
+    String stripDefaultTemplateFlag(String otherParamsJson) {
+        if (otherParamsJson == null || otherParamsJson.isBlank()) {
+            return otherParamsJson;
+        }
+        Object parsed = parseJson(otherParamsJson);
+        if (!(parsed instanceof Map<?, ?> map) || !map.containsKey("is_default")) {
+            return otherParamsJson;
+        }
+        Map<String, Object> sanitized = new LinkedHashMap<>();
+        map.forEach((key, value) -> sanitized.put(String.valueOf(key), value));
+        sanitized.remove("is_default");
+        return writeJson(sanitized);
+    }
+
 
     private boolean isDefaultTemplate(BasicParamPO po) {
         Object parsed = parseJson(po.getOtherParams());

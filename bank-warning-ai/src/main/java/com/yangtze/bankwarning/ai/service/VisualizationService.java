@@ -115,7 +115,9 @@ public class VisualizationService {
     public Map<String, Object> generateRiskMap(String taskId, String bankId,
                                                Integer splitRows, Integer splitCols,
                                                String splitTiles) {
-        String title = bankId != null ? "岸段风险分布图" : "任务风险分布图";
+        // 图名统一为「岸段风险分布图」：任务级与岸段级画的是同一套岸段色带，
+        // 岸段级再在标题后追加「 · 岸段名」以区分（见 generateRiskMapBatch）。
+        String title = "岸段风险分布图";
         return generateRiskMapTo(taskId, bankId, resolveOutputDir(), null, title,
                 splitRows, splitCols, splitTiles);
     }
@@ -168,7 +170,7 @@ public class VisualizationService {
         if (!perBank) {
             String fileName = "risk_distribution_map.png";
             images.add(imageEntry(null, null, dirName, fileName,
-                    generateRiskMapTo(taskId, null, dir, fileName, "任务风险分布图",
+                    generateRiskMapTo(taskId, null, dir, fileName, "岸段风险分布图",
                             splitRows, splitCols, splitTiles)));
         } else {
             List<Map<String, Object>> banks = resolveTaskBanks(taskId, bankIds);

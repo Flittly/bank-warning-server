@@ -16,6 +16,8 @@
         <result property="updatedAt" column="updated_at"/>
         <result property="deletedAt" column="deleted_at"/>
         <result property="userId" column="user_id"/>
+        <result property="sourceTaskId" column="source_task_id"/>
+        <result property="copiedAt" column="copied_at"/>
     </resultMap>
 
     <select id="selectAll" resultMap="TaskResultMap">
@@ -26,9 +28,17 @@
         SELECT * FROM tasks WHERE task_id = #{taskId} AND deleted_at IS NULL AND (user_id = #{userId} OR #{userId, jdbcType=BIGINT} IS NULL)
     </select>
 
+    <!-- 含软删：复制任务时判 target_task_id 是否被占。UNIQUE 约束不管 deleted_at，
+         软删行仍占 id，所以「查得到就算被占」，不能只用 selectByTaskId。 -->
+    <select id="selectByTaskIdIncludingDeleted" resultMap="TaskResultMap">
+        SELECT * FROM tasks WHERE task_id = #{taskId} AND (user_id = #{userId} OR #{userId, jdbcType=BIGINT} IS NULL)
+    </select>
+
+    <!-- status / 时间戳刻意不进列清单：新建与复制都必须落到 DB 默认值（pending / now），
+         「复制出一个 running 任务」是绝对要避免的（结果页会无限轮询）。 -->
     <insert id="insert" parameterType="com.yangtze.bankwarning.domain.po.TaskPO" useGeneratedKeys="true" keyProperty="id">
-        INSERT INTO tasks (task_id, task_name, bank_ids, description, user_id)
-        VALUES (#{taskId}, #{taskName}, #{bankIds}::jsonb, #{description}, #{userId})
+        INSERT INTO tasks (task_id, task_name, bank_ids, description, user_id, source_task_id, copied_at)
+        VALUES (#{taskId}, #{taskName}, #{bankIds}::jsonb, #{description}, #{userId}, #{sourceTaskId}, #{copiedAt})
     </insert>
 
     <update id="update" parameterType="com.yangtze.bankwarning.domain.po.TaskPO">

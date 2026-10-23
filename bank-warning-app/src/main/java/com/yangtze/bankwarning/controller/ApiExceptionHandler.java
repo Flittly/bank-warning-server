@@ -2,6 +2,7 @@ package com.yangtze.bankwarning.controller;
 
 import com.yangtze.bankwarning.domain.exception.ResultOverrideException;
 import com.yangtze.bankwarning.domain.exception.SectionRecomputeException;
+import com.yangtze.bankwarning.domain.exception.TaskCopyException;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.http.HttpStatus;
@@ -59,6 +60,18 @@ public class ApiExceptionHandler {
                         exception.getCode(),
                         exception.getMessage(),
                         exception.getSectionId() == null ? null : Map.of("section_id", exception.getSectionId())));
+    }
+
+    /**
+     * 复制任务的三种「可预期的不能做」：目标 id 撞车 / 源任务在跑（结果不完整）= 409，
+     * 入参不合法 = 400，跨用户未开放 = 403。不能拿 IllegalArgumentException 兜成 404，
+     * 否则前端分不清「任务没了」和「换个名字再试」。
+     */
+    @ExceptionHandler(TaskCopyException.class)
+    public ResponseEntity<Map<String, Object>> handleTaskCopy(TaskCopyException exception) {
+        log.warn("[api-error] task copy rejected({}): {}", exception.getCode(), exception.getMessage());
+        return ResponseEntity.status(exception.getStatus())
+                .body(error(exception.getCode(), exception.getMessage(), null));
     }
 
     @ExceptionHandler(Exception.class)

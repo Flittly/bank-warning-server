@@ -11,12 +11,15 @@ import com.yangtze.bankwarning.domain.dto.SectionPayload;
 import com.yangtze.bankwarning.domain.dto.SectionsCreateRequest;
 import com.yangtze.bankwarning.domain.dto.SectionBatchUpdateRequest;
 import com.yangtze.bankwarning.domain.dto.TaskBanksAppendRequest;
+import com.yangtze.bankwarning.domain.dto.TaskCopyRequest;
+import com.yangtze.bankwarning.domain.dto.TaskCopyResponse;
 import com.yangtze.bankwarning.domain.dto.TaskParamsUpdateRequest;
 import com.yangtze.bankwarning.domain.dto.TasksCreateRequest;
 import com.yangtze.bankwarning.domain.dto.TaskStatusUpdateRequest;
 import com.yangtze.bankwarning.mapper.HydroConditionMapper;
 import com.yangtze.bankwarning.service.BusinessStoreService;
 import com.yangtze.bankwarning.service.SectionValidationService;
+import com.yangtze.bankwarning.service.TaskCopyService;
 import com.yangtze.bankwarning.service.TaskExecutionService;
 import jakarta.validation.Valid;
 import org.springframework.http.HttpHeaders;
@@ -53,17 +56,20 @@ public class BusinessController {
     private final SectionValidationService sectionValidationService;
     private final HydroConditionMapper hydroConditionMapper;
     private final RiskSegmentSummaryService riskSegmentSummaryService;
+    private final TaskCopyService taskCopyService;
 
     public BusinessController(BusinessStoreService businessStoreService,
                               TaskExecutionService taskExecutionService,
                               SectionValidationService sectionValidationService,
                               HydroConditionMapper hydroConditionMapper,
-                              RiskSegmentSummaryService riskSegmentSummaryService) {
+                              RiskSegmentSummaryService riskSegmentSummaryService,
+                              TaskCopyService taskCopyService) {
         this.businessStoreService = businessStoreService;
         this.taskExecutionService = taskExecutionService;
         this.sectionValidationService = sectionValidationService;
         this.hydroConditionMapper = hydroConditionMapper;
         this.riskSegmentSummaryService = riskSegmentSummaryService;
+        this.taskCopyService = taskCopyService;
     }
 
     /**
@@ -150,6 +156,18 @@ public class BusinessController {
         return Map.of("success", true, "tasks", businessStoreService.listTasks());
     }
 
+    /**
+     * 每个任务的有效结果条数：`{ counts: { task_id: n } }`。
+     *
+     * <p>只服务任务列表的一个前置判断 ——「该任务有没有结果」决定右键菜单里的「分析」
+     * 能不能点。路径刻意用固定字面量 `result-counts` 而不是给 `/tasks/{task_id}` 加参数：
+     * Spring 会优先匹配字面量段，不会被 `{task_id}` 抢走，也不需要额外的查询参数。
+     */
+    @GetMapping("/tasks/result-counts")
+    public Map<String, Object> listTaskResultCounts() {
+        return Map.of("success", true, "counts", businessStoreService.countResultsByTask());
+    }
+
     @GetMapping("/tasks/{task_id}")
     public Map<String, Object> getTask(@PathVariable("task_id") String taskId) {
         return Map.of("success", true, "task", businessStoreService.getTask(taskId));
@@ -159,6 +177,24 @@ public class BusinessController {
     public Map<String, Object> deleteTask(@PathVariable("task_id") String taskId) {
         businessStoreService.deleteTask(taskId);
         return Map.of("success", true, "message", "Task deleted successfully");
+    }
+
+    /**
+     * 复制任务：把「配置 + 断面几何 + 参数集」搬成一个**独立的新任务**。
+     *
+     * <p>默认只复制配置，不复制计算结果（{@code include_results=true} 才连结果与剖面一起搬）。
+     * 三个 id 全部重生成、状态重置为 {@code pending}；岸段/DEM/水动力数据/模型缓存都按引用保留。
+     *
+     * <p>请求体可省略（等同默认策略）。{@code target_task_id} 用于幂等重试；
+     * {@code target_user_id} 是 P1 的跨用户能力，当前只接受本人。
+     *
+     * <p>响应里的 {@code warnings} 必须原样展示：源任务在跑、参数是现物化的、
+     * 某些岸段已失效 —— 这些不阻断复制，但用户不看就不知道副本为什么不完整。
+     */
+    @PostMapping("/tasks/{task_id}/copy")
+    public TaskCopyResponse copyTask(@PathVariable("task_id") String taskId,
+                                     @RequestBody(required = false) TaskCopyRequest request) {
+        return taskCopyService.copy(taskId, request);
     }
 
     /**
