@@ -51,6 +51,27 @@ public interface RiskResultMapper {
     int revertManualOverride(@Param("id") Long id, @Param("userId") Long userId);
 
     /**
+     * 人工新建一条结果（该断面本来没有任何行）。
+     *
+     * <p>与 {@link #insert} 的区别只有一个：带上 `edit_state`，并且**不写 run_id**。
+     * run_id 是模型那一轮的标识，人工录入没有轮次；留 NULL 才能让「这行不是模型算的」
+     * 在库里可分辨（出图/报告只读 indicators，不受影响）。
+     */
+    int insertManualOverride(RiskResultPO result);
+
+    /** 按 id 软删一行。人工新建的结果点「恢复模型原值」时用它 —— 原本就没有原值，撤销 = 删掉。 */
+    int softDeleteById(@Param("id") Long id, @Param("userId") Long userId);
+
+    /**
+     * 取该任务任一结果的 indicators JSON（取最新一行）。
+     *
+     * <p>用途：无结果断面要人工录入时，得先拿到**这个任务**的 sub_thresholds / 权重 / all 阈值。
+     * 同一任务下所有断面的参数完全相同（都来自同一份任务参数快照），所以取任意一行即可；
+     * 拿不到（该任务一条结果都没有）才由调用方回落默认值。
+     */
+    String selectIndicatorsByTaskId(@Param("taskId") String taskId, @Param("userId") Long userId);
+
+    /**
      * 复制任务的计算结果（仅 {@code include_results=true} 时调用）。
      *
      * <p>刻意 `ORDER BY r.id`：{@code selectLatestBySectionId} 取「最新」用的是

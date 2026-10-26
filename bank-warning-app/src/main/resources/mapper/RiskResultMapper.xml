@@ -119,6 +119,47 @@
           AND (user_id = #{userId} OR #{userId, jdbcType=BIGINT} IS NULL)
     </update>
     <!--
+      人工新建一条结果（该断面本来一行都没有）。
+      与 insert 的差别：带 edit_state，且不写 run_id。
+      run_id 是「模型第几轮」的标识，人工录入没有轮次；留 NULL 让这行的来历在库里可分辨。
+      刻意**不写 geom**：出图/地图取的是 cross_sections 的几何，这一列留给模型写入。
+    -->
+    <insert id="insertManualOverride" parameterType="com.yangtze.bankwarning.domain.po.RiskResultPO" useGeneratedKeys="true" keyProperty="id">
+        INSERT INTO bank_risk_results (
+            task_id, section_id, section_name, region_code, bank_id,
+            risk_level, indicators, user_id, edit_state
+        ) VALUES (
+            #{taskId}, #{sectionId}, #{sectionName}, #{regionCode}, #{bankId},
+            #{riskLevel}, #{indicators}::jsonb, #{userId}, #{editState}::jsonb
+        )
+    </insert>
+
+    <!-- 按 id 软删。人工新建的结果「恢复模型原值」= 撤掉这行（原本就没有原值可恢复）。 -->
+    <update id="softDeleteById">
+        UPDATE bank_risk_results SET deleted_at = CURRENT_TIMESTAMP
+        WHERE id = #{id} AND deleted_at IS NULL
+          AND (user_id = #{userId} OR #{userId, jdbcType=BIGINT} IS NULL)
+    </update>
+
+    <!--
+      取该任务任一结果的 indicators（最新一行），给「无结果断面人工录入」沿用任务级阈值/权重。
+      只挑带 thresholds 的行：2026-06 前后的老结果没有这个键，取到它等于回落默认值，
+      反而会与同任务其它断面口径不一致。
+
+      ⚠ 必须用 jsonb_exists(indicators,'thresholds')，不能写 `indicators ? 'thresholds'`：
+      jsonb 的 `?` 存在运算符会被 MyBatis 当成 #{} 之外的占位符 `?`，
+      参数位置整体错一位，运行期报「未设定参数值 N 的内容」。
+    -->
+    <select id="selectIndicatorsByTaskId" resultType="java.lang.String">
+        SELECT indicators::text FROM bank_risk_results
+        WHERE task_id = #{taskId}
+          AND deleted_at IS NULL
+          AND jsonb_exists(indicators, 'thresholds')
+          AND (user_id = #{userId} OR #{userId, jdbcType=BIGINT} IS NULL)
+        ORDER BY id DESC LIMIT 1
+    </select>
+
+    <!--
         复制任务的既有结果。section_id 必须按「源 id → 新 id」的映射重写，
         映射规则与 SectionMapper.copySectionsFromTask 完全一致（同一段 CASE），否则搬过来的
         结果会挂不上任何断面。

@@ -1077,13 +1077,29 @@ public class BusinessStoreService {
             return payload;
         }
 
-        if (!sectionMapper.existsBySectionId(sectionId, userId)) {
+        SectionPO section = sectionMapper.selectBySectionId(sectionId, userId);
+        if (section == null) {
             throw new IllegalArgumentException("Section not found for section_id: " + sectionId);
         }
+
+        // 没算出结果也要把「录入所需的上下文」一起带回去，否则前端只能摊一张全空表：
+        //   * section —— 断面名/所属岸段/任务，弹窗标题与保存时的 task_id 都要用；
+        //   * thresholds —— 任务级阈值与权重（取自同任务其它断面）。人工录入的档位判定
+        //     必须和同任务其它断面用同一把尺子，不能因为本断面没结果就退回内置默认值。
+        Map<String, Object> sectionInfo = new LinkedHashMap<>();
+        sectionInfo.put("section_id", section.getSectionId());
+        sectionInfo.put("section_name", section.getSectionName());
+        sectionInfo.put("bank_id", section.getBankId());
+        sectionInfo.put("region_code", section.getRegionCode());
+        sectionInfo.put("task_id", section.getTaskId());
 
         payload.put("status", "not_computed");
         payload.put("result", null);
         payload.put("reason", "该断面尚无计算结果：可能是分析之后新建的断面，或上次计算因数据问题失败，请重新执行风险分析");
+        payload.put("section", sectionInfo);
+        payload.put("thresholds", taskRiskThresholds(section.getTaskId(), userId));
+        // 能不能人工录入：断面挂在任务下才有地方落库（本表 task_id NOT NULL）。
+        payload.put("manual_editable", section.getTaskId() != null && !section.getTaskId().isBlank());
         return payload;
     }
 
@@ -1162,7 +1178,9 @@ public class BusinessStoreService {
         Long dataFilterUserId = SecurityUtils.getCurrentUserIdForDataFilter();
         RiskResultPO current = riskResultMapper.selectLatestBySectionId(sectionId, dataFilterUserId);
         if (current == null) {
-            throw new IllegalArgumentException("Risk result not found for section_id: " + sectionId);
+            // 该断面一条结果都没有（模型因 DEM/流场数据失败、或断面是分析之后才建的）。
+            // 这不是错误 —— 恰恰是最需要人工评定的对象，所以走「新建一行」。
+            return createManualResult(sectionId, request, dataFilterUserId);
         }
         if (request.taskId() != null && !request.taskId().isBlank()
                 && !request.taskId().equals(current.getTaskId())) {
@@ -1174,12 +1192,183 @@ public class BusinessStoreService {
             throw ResultOverrideException.stale("该断面结果已被新一轮运行覆盖，请刷新后重试");
         }
 
+        OverrideValues values = parseOverrideValues(request, riskThresholdsOf(current.getIndicators()));
+        Map<String, Object> newRawValues = values.rawValues();
+        String note = values.note();
+
+        Object parsedCurrent = parseJson(current.getIndicators());
+        Map<String, Object> nextIndicators = parsedCurrent instanceof Map<?, ?> currentMap
+                ? asStringKeyMap(currentMap)
+                : new LinkedHashMap<>();
+
+        nextIndicators.put("raw_values", newRawValues);
+        Map<String, Object> matrices = nextIndicators.get("matrices") instanceof Map<?, ?> matrixMap
+                ? asStringKeyMap(matrixMap)
+                : new LinkedHashMap<>();
+        matrices.putAll(values.matrices());
+        nextIndicators.put("matrices", matrices);
+        nextIndicators.put("result", values.riskValue());
+        nextIndicators.put("risk-level", oneHotRiskLevel(values.riskLevel()));
+
+        String now = java.time.OffsetDateTime.now().toString();
+        Map<String, Object> overrideMeta = new LinkedHashMap<>();
+        overrideMeta.put("edited", true);
+        overrideMeta.put("edited_at", now);
+        overrideMeta.put("edited_by", SecurityUtils.getCurrentUserId());
+        overrideMeta.put("note", note);
+        nextIndicators.put("manual_override", overrideMeta);
+
+        // 原始快照只在**首次**修改时拍下；后续修改继续沿用，否则「恢复模型原值」会退回到上一次的人工值。
+        //
+        // 旧写法是「只有 original_indicators 非空才沿用 state」，这对人工新建的行是错的：
+        // 那种行只有 created_manual、没有 original_indicators，于是 state 被整个丢弃 ⇒
+        // 第二次编辑后 created_manual 消失 ⇒ 撤销从「删掉这行」退化成「恢复成第一次的人工值」。
+        // 所以无条件以现有 state 为基础，只决定要不要补快照。
+        Object existingState = parseJson(current.getEditState());
+        Map<String, Object> editState = existingState instanceof Map<?, ?> stateMap
+                ? asStringKeyMap(stateMap)
+                : new LinkedHashMap<>();
+        boolean createdManualRow = editState.get("created_manual") != null
+                && Boolean.parseBoolean(String.valueOf(editState.get("created_manual")));
+        if (!createdManualRow && !editState.containsKey("original_indicators")) {
+            editState.put("original_indicators", parsedCurrent);
+            editState.put("original_risk_level", current.getRiskLevel());
+        }
+        editState.put("edited_at", now);
+        editState.put("edited_by", SecurityUtils.getCurrentUserId());
+        editState.put("note", note);
+
+        int updated = riskResultMapper.updateManualOverride(
+                current.getId(), writeJson(nextIndicators), values.riskLevel(), writeJson(editState), dataFilterUserId);
+        if (updated == 0) {
+            throw ResultOverrideException.stale("保存失败：结果行已变化，请刷新后重试");
+        }
+        return RiskResultResponse.from(riskResultMapper.selectLatestBySectionId(sectionId, dataFilterUserId));
+    }
+
+    /**
+     * 给「一条结果都没有」的断面人工新建一行。
+     *
+     * <p>与修改分支共用同一套 patch 校验（{@link #parseOverrideValues}），差别只在落库方式：
+     * <ul>
+     *   <li>阈值取**任务级**参数（同任务任一结果自带的 thresholds），而不是本断面的 ——
+     *       本断面没有结果，自然没有参数；用任务级才能保证人工录入与同任务其它断面同一把尺子。
+     *       任务一条结果都没有时才回落默认值。</li>
+     *   <li>edit_state 只写 {@code created_manual=true} 与留痕，<b>不写 original_indicators</b>：
+     *       这行原本不存在，「恢复模型原值」的语义是**删掉它**，不是恢复成某个快照。
+     *       带一个 null 快照会让回滚把 indicators 写成 JSON null，看起来像一条空白结果。</li>
+     *   <li>run_id 留 NULL（见 {@code RiskResultMapper.insertManualOverride}）。</li>
+     * </ul>
+     */
+    private RiskResultResponse createManualResult(
+            String sectionId, RiskResultOverrideRequest request, Long dataFilterUserId) {
+        Map<String, Object> section = getSectionForResult(sectionId);
+        if (section == null) {
+            throw new IllegalArgumentException("Section not found for section_id: " + sectionId);
+        }
+        String sectionTaskId = section.get("task_id") == null ? null : String.valueOf(section.get("task_id"));
+        String taskId = request.taskId() != null && !request.taskId().isBlank()
+                ? request.taskId()
+                : sectionTaskId;
+        if (taskId == null || taskId.isBlank()) {
+            throw ResultOverrideException.invalid("该断面没有归属任务，无法人工录入结果");
+        }
+        if (sectionTaskId != null && !sectionTaskId.equals(taskId)) {
+            throw ResultOverrideException.invalid("该断面不属于任务 " + taskId);
+        }
+
+        Map<String, Object> taskThresholds = taskRiskThresholds(taskId, dataFilterUserId);
+        double[] all = allThresholdsOf(taskThresholds);
+        OverrideValues values = parseOverrideValues(request, all);
+
+        Map<String, Object> nextIndicators = new LinkedHashMap<>();
+        // 回带任务级阈值/权重：前端下次打开编辑器会用它算档位，不能再落到默认值。
+        if (!taskThresholds.isEmpty()) {
+            nextIndicators.put("thresholds", taskThresholds);
+        }
+        nextIndicators.put("raw_values", values.rawValues());
+        nextIndicators.put("matrices", values.matrices());
+        nextIndicators.put("result", values.riskValue());
+        nextIndicators.put("risk-level", oneHotRiskLevel(values.riskLevel()));
+
+        String now = java.time.OffsetDateTime.now().toString();
+        Map<String, Object> overrideMeta = new LinkedHashMap<>();
+        overrideMeta.put("edited", true);
+        overrideMeta.put("created_manual", true);
+        overrideMeta.put("edited_at", now);
+        overrideMeta.put("edited_by", SecurityUtils.getCurrentUserId());
+        overrideMeta.put("note", values.note());
+        nextIndicators.put("manual_override", overrideMeta);
+
+        Map<String, Object> editState = new LinkedHashMap<>();
+        editState.put("created_manual", true);
+        editState.put("edited_at", now);
+        editState.put("edited_by", SecurityUtils.getCurrentUserId());
+        editState.put("note", values.note());
+
+        RiskResultPO po = new RiskResultPO();
+        po.setUserId(SecurityUtils.getCurrentUserId());
+        po.setTaskId(taskId);
+        po.setSectionId(sectionId);
+        po.setSectionName(section.get("section_name") == null ? null : String.valueOf(section.get("section_name")));
+        po.setRegionCode(section.get("region_code") == null ? null : String.valueOf(section.get("region_code")));
+        po.setBankId(section.get("bank_id") == null ? null : String.valueOf(section.get("bank_id")));
+        po.setRiskLevel(values.riskLevel());
+        po.setIndicators(writeJson(nextIndicators));
+        po.setEditState(writeJson(editState));
+        riskResultMapper.insertManualOverride(po);
+
+        return RiskResultResponse.from(riskResultMapper.selectLatestBySectionId(sectionId, dataFilterUserId));
+    }
+
+    /**
+     * 恢复模型原值。返回恢复后的结果，供前端就地重绘。
+     *
+     * <p>人工**新建**的行（{@code edit_state.created_manual=true}）没有「模型原值」可恢复，
+     * 撤销只能是删掉这一行，于是返回 {@code null} —— 调用方据此把断面打回「未计算」。
+     */
+    public RiskResultResponse revertRiskResultOverride(String sectionId, String taskId) {
+        Long dataFilterUserId = SecurityUtils.getCurrentUserIdForDataFilter();
+        RiskResultPO current = riskResultMapper.selectLatestBySectionId(sectionId, dataFilterUserId);
+        if (current == null) {
+            throw new IllegalArgumentException("Risk result not found for section_id: " + sectionId);
+        }
+        if (taskId != null && !taskId.isBlank() && !taskId.equals(current.getTaskId())) {
+            throw ResultOverrideException.invalid("该断面不属于任务 " + taskId);
+        }
+        Object state = parseJson(current.getEditState());
+        boolean createdManual = state instanceof Map<?, ?> stateMap
+                && stateMap.get("created_manual") != null
+                && Boolean.parseBoolean(String.valueOf(stateMap.get("created_manual")));
+        if (createdManual) {
+            int deleted = riskResultMapper.softDeleteById(current.getId(), dataFilterUserId);
+            if (deleted == 0) {
+                throw ResultOverrideException.stale("撤销失败：结果行已变化，请刷新后重试");
+            }
+            RiskResultPO leftover = riskResultMapper.selectLatestBySectionId(sectionId, dataFilterUserId);
+            return leftover == null ? null : RiskResultResponse.from(leftover);
+        }
+        int updated = riskResultMapper.revertManualOverride(current.getId(), dataFilterUserId);
+        if (updated == 0) {
+            throw ResultOverrideException.invalid("该结果没有人工修改记录");
+        }
+        return RiskResultResponse.from(riskResultMapper.selectLatestBySectionId(sectionId, dataFilterUserId));
+    }
+
+    /**
+     * 校验前端带上来的 patch，并拆成「可落库的四件套」。
+     *
+     * <p>修改分支与新建分支共用这一段 —— 两处各写一遍迟早漂移，而这里恰好是最不能漂的地方
+     * （PL/LC 枚举、风险值与等级必须自洽）。{@code all} 由调用方给出：修改分支用该结果自带的
+     * 阈值，新建分支用任务级阈值。
+     */
+    private OverrideValues parseOverrideValues(RiskResultOverrideRequest request, double[] all) {
         Map<String, Object> patch = request.patch();
         if (!(patch.get("raw_values") instanceof Map<?, ?> rawPatch)) {
             throw ResultOverrideException.invalid("raw_values 缺失");
         }
 
-        Map<String, Object> newRawValues = new LinkedHashMap<>();
+        Map<String, Object> rawValues = new LinkedHashMap<>();
         for (String key : OVERRIDE_INDICATOR_KEYS) {
             if (!rawPatch.containsKey(key)) {
                 throw ResultOverrideException.invalid("缺少指标 " + key);
@@ -1192,12 +1381,12 @@ public class BusinessStoreService {
                     throw ResultOverrideException.invalid(
                             key + " 必须是 " + allowed + " 之一，实际为 " + value);
                 }
-                newRawValues.put(key, text);
+                rawValues.put(key, text);
             } else {
                 if (!(value instanceof Number number) || !Double.isFinite(number.doubleValue())) {
                     throw ResultOverrideException.invalid(key + " 必须是有限数值，实际为 " + value);
                 }
-                newRawValues.put(key, number.doubleValue());
+                rawValues.put(key, number.doubleValue());
             }
         }
 
@@ -1215,7 +1404,6 @@ public class BusinessStoreService {
         if (riskLevel < 1 || riskLevel > 4) {
             throw ResultOverrideException.invalid("风险等级必须在 1~4 之间，实际为 " + riskLevel);
         }
-        double[] all = riskThresholdsOf(current.getIndicators());
         int expectedLevel = bucketRiskLevel(riskValue, all) + 1;
         if (expectedLevel != riskLevel) {
             throw ResultOverrideException.invalid(
@@ -1227,67 +1415,46 @@ public class BusinessStoreService {
             throw ResultOverrideException.invalid("备注不能超过 200 字");
         }
 
-        Object parsedCurrent = parseJson(current.getIndicators());
-        Map<String, Object> nextIndicators = parsedCurrent instanceof Map<?, ?> currentMap
-                ? asStringKeyMap(currentMap)
+        Map<String, Object> matrices = patch.get("matrices") instanceof Map<?, ?> matrixPatch
+                ? asStringKeyMap(matrixPatch)
                 : new LinkedHashMap<>();
 
-        nextIndicators.put("raw_values", newRawValues);
-        Map<String, Object> matrices = nextIndicators.get("matrices") instanceof Map<?, ?> matrixMap
-                ? asStringKeyMap(matrixMap)
-                : new LinkedHashMap<>();
-        if (patch.get("matrices") instanceof Map<?, ?> matrixPatch) {
-            matrices.putAll(asStringKeyMap(matrixPatch));
-        }
-        nextIndicators.put("matrices", matrices);
-        nextIndicators.put("result", riskValue);
-        nextIndicators.put("risk-level", oneHotRiskLevel(riskLevel));
-
-        String now = java.time.OffsetDateTime.now().toString();
-        Map<String, Object> overrideMeta = new LinkedHashMap<>();
-        overrideMeta.put("edited", true);
-        overrideMeta.put("edited_at", now);
-        overrideMeta.put("edited_by", SecurityUtils.getCurrentUserId());
-        overrideMeta.put("note", note);
-        nextIndicators.put("manual_override", overrideMeta);
-
-        // 原始快照只在**首次**修改时拍下；后续修改继续沿用，否则「恢复模型原值」会退回到上一次的人工值。
-        Object existingState = parseJson(current.getEditState());
-        Map<String, Object> editState = existingState instanceof Map<?, ?> stateMap
-                && stateMap.get("original_indicators") != null
-                ? asStringKeyMap(stateMap)
-                : new LinkedHashMap<>();
-        if (!editState.containsKey("original_indicators")) {
-            editState.put("original_indicators", parsedCurrent);
-            editState.put("original_risk_level", current.getRiskLevel());
-        }
-        editState.put("edited_at", now);
-        editState.put("edited_by", SecurityUtils.getCurrentUserId());
-        editState.put("note", note);
-
-        int updated = riskResultMapper.updateManualOverride(
-                current.getId(), writeJson(nextIndicators), riskLevel, writeJson(editState), dataFilterUserId);
-        if (updated == 0) {
-            throw ResultOverrideException.stale("保存失败：结果行已变化，请刷新后重试");
-        }
-        return RiskResultResponse.from(riskResultMapper.selectLatestBySectionId(sectionId, dataFilterUserId));
+        return new OverrideValues(rawValues, matrices, riskValue, riskLevel, note);
     }
 
-    /** 恢复模型原值。返回恢复后的结果，供前端就地重绘。 */
-    public RiskResultResponse revertRiskResultOverride(String sectionId, String taskId) {
-        Long dataFilterUserId = SecurityUtils.getCurrentUserIdForDataFilter();
-        RiskResultPO current = riskResultMapper.selectLatestBySectionId(sectionId, dataFilterUserId);
-        if (current == null) {
-            throw new IllegalArgumentException("Risk result not found for section_id: " + sectionId);
+    /** {@link #parseOverrideValues} 的产物。 */
+    private record OverrideValues(
+            Map<String, Object> rawValues,
+            Map<String, Object> matrices,
+            double riskValue,
+            int riskLevel,
+            String note) {
+    }
+
+    /**
+     * 任务级阈值/权重快照（取自同任务任一结果自带的 {@code indicators.thresholds}）。
+     * 取不到时返回空 Map，由调用方回落 {@link #DEFAULT_RISK_ALL} 与前端默认权重。
+     */
+    public Map<String, Object> taskRiskThresholds(String taskId, Long userId) {
+        if (taskId == null || taskId.isBlank()) return Map.of();
+        Object parsed = parseJson(riskResultMapper.selectIndicatorsByTaskId(taskId, userId));
+        if (parsed instanceof Map<?, ?> map && map.get("thresholds") instanceof Map<?, ?> thresholds) {
+            return asStringKeyMap(thresholds);
         }
-        if (taskId != null && !taskId.isBlank() && !taskId.equals(current.getTaskId())) {
-            throw ResultOverrideException.invalid("该断面不属于任务 " + taskId);
+        return Map.of();
+    }
+
+    /** 从任务级 thresholds 里取 all 阈值；缺失时回落默认。 */
+    private double[] allThresholdsOf(Map<String, Object> thresholds) {
+        if (thresholds != null) {
+            Object all = thresholds.get("risk_threshold");
+            if (all instanceof List<?> list && list.size() >= 3
+                    && list.get(0) instanceof Number a && list.get(1) instanceof Number b
+                    && list.get(2) instanceof Number c) {
+                return new double[]{a.doubleValue(), b.doubleValue(), c.doubleValue()};
+            }
         }
-        int updated = riskResultMapper.revertManualOverride(current.getId(), dataFilterUserId);
-        if (updated == 0) {
-            throw ResultOverrideException.invalid("该结果没有人工修改记录");
-        }
-        return RiskResultResponse.from(riskResultMapper.selectLatestBySectionId(sectionId, dataFilterUserId));
+        return DEFAULT_RISK_ALL;
     }
 
     /** 取该结果自带的 all 阈值；缺失（老记录/自定义参数未回带）时回落默认。 */

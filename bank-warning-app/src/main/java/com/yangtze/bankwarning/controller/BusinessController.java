@@ -499,13 +499,25 @@ public class BusinessController {
         return Map.of("success", true, "edited", true, "result", result);
     }
 
-    /** 恢复模型原始结果（驳回人工修改）。 */
+    /**
+     * 恢复模型原始结果（驳回人工修改）。
+     *
+     * <p>若这一行本来就是人工**新建**的（该断面原本一条结果都没有），撤销 = 删掉它，
+     * 此时 {@code result} 为 {@code null}、{@code status=not_computed} ——
+     * 前端据此把断面打回「无数据」而不是保留一份假的模型值。
+     * 这里不能继续用 {@code Map.of}：它不接受 null 值。
+     */
     @DeleteMapping("/results/{section_id}/override")
     public Map<String, Object> revertRiskResultOverride(
             @PathVariable("section_id") String sectionId,
             @RequestParam(name = "task_id", required = false) String taskId) {
         var result = businessStoreService.revertRiskResultOverride(sectionId, taskId);
-        return Map.of("success", true, "edited", false, "result", result);
+        Map<String, Object> payload = new java.util.LinkedHashMap<>();
+        payload.put("success", true);
+        payload.put("edited", false);
+        payload.put("status", result == null ? "not_computed" : "computed");
+        payload.put("result", result);
+        return payload;
     }
 
     @GetMapping("/tasks/{task_id}/section-profiles")
