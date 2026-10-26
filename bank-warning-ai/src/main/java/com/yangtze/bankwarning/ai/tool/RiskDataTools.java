@@ -37,6 +37,9 @@ public class RiskDataTools {
                 "LEFT JOIN cross_sections cs ON r.section_id = cs.section_id " +
                 "LEFT JOIN banks b ON COALESCE(cs.bank_id, r.bank_id) = b.bank_id " +
                 "WHERE r.task_id = ? AND r.deleted_at IS NULL " +
+                // 人工标记无效的断面不进报告取数：与前端图面、风险段汇总同一口径，
+                // 否则「我明明藏起来的断面」会重新出现在报告文字里。
+                "AND COALESCE(cs.manual_invalid, false) = false " +
                 "ORDER BY r.risk_level DESC";
 
         List<Map<String, Object>> rows = jdbcTemplate.queryForList(sql, taskId);

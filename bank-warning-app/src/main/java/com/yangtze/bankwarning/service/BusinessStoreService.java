@@ -2,7 +2,9 @@ package com.yangtze.bankwarning.service;
 
 import com.yangtze.bankwarning.domain.po.*;
 import com.yangtze.bankwarning.domain.dto.*;
+import com.yangtze.bankwarning.domain.exception.BankGeometryException;
 import com.yangtze.bankwarning.domain.exception.ResultOverrideException;
+import com.yangtze.bankwarning.domain.exception.SectionManualInvalidException;
 import com.yangtze.bankwarning.mapper.*;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.JsonNode;
@@ -109,6 +111,137 @@ public class BusinessStoreService {
         if (bankMapper.deleteByBankId(bankId, userId) == 0) {
             throw new IllegalArgumentException("Bank not found: " + bankId);
         }
+    }
+
+    /**
+     * 只改岸段几何（折点编辑）。
+     *
+     * <p>为什么单开一个入口而不走 {@link #updateBank}：那条路径用 {@code BankPayload}
+     * 全字段覆盖，前端拖折点时手里只有几何，还必须凑出 bank_name / region_code 才能过校验；
+     * 一旦某次漏填就会把岸段名写空。这里只碰 {@code bank_geometry} 一列。
+     *
+     * <p>返回影响面（引用该岸段的任务数 / 断面数）：岸段是用户级共享资源，
+     * 改一条会同时改变所有引用它的任务的色带位置，调用方需要据此提示。
+     */
+    public Map<String, Object> updateBankGeometry(String bankId, Map<String, Object> geometry) {
+        Long userId = SecurityUtils.getCurrentUserIdForDataFilter();
+        BankPO existing = bankMapper.selectByBankId(bankId, userId);
+        if (existing == null) {
+            throw BankGeometryException.notFound(bankId);
+        }
+        List<List<Double>> coords = validateBankGeometry(geometry);
+
+        int updated = bankMapper.updateGeometry(bankId, writeJson(geometry), userId);
+        if (updated == 0) {
+            // 校验过存在却更新 0 行：并发删除。让前端知道该刷新而不是重试。
+            throw BankGeometryException.notFound(bankId);
+        }
+
+        Map<String, Object> usage = bankMapper.selectUsageByBankId(bankId, userId);
+        Map<String, Object> result = new LinkedHashMap<>();
+        result.put("success", true);
+        result.put("bank_id", bankId);
+        result.put("updated", true);
+        result.put("vertex_count", coords.size());
+        result.put("task_count", usage == null ? 0 : toLong(usage.get("task_count")));
+        result.put("section_count", usage == null ? 0 : toLong(usage.get("section_count")));
+        return result;
+    }
+
+    /** 岸段被引用的任务数 / 断面数。进入折点编辑模式前先问一次，用于提示影响面。 */
+    public Map<String, Object> getBankUsage(String bankId) {
+        Long userId = SecurityUtils.getCurrentUserIdForDataFilter();
+        BankPO bank = bankMapper.selectByBankId(bankId, userId);
+        if (bank == null) {
+            throw BankGeometryException.notFound(bankId);
+        }
+        Map<String, Object> usage = bankMapper.selectUsageByBankId(bankId, userId);
+        Map<String, Object> result = new LinkedHashMap<>();
+        result.put("success", true);
+        result.put("bank_id", bankId);
+        // 顺带回带名称：前端编辑浮栏要显示「在改哪条岸段」，
+        // 不带上就得多打一次 /banks/{id}，而那条接口返回整段几何（可能上千折点）。
+        result.put("bank_name", bank.getBankName());
+        result.put("task_count", usage == null ? 0 : toLong(usage.get("task_count")));
+        result.put("section_count", usage == null ? 0 : toLong(usage.get("section_count")));
+        return result;
+    }
+
+    private static long toLong(Object value) {
+        return value instanceof Number number ? number.longValue() : 0L;
+    }
+
+    /**
+     * 校验并规范化岸段几何。
+     *
+     * <p>只接受 {@code LineString}：岸段在系统里处处按「一条首尾有序的线」对待
+     * （断面里程 projection、色带 gradient、按里程切片），接进来一个 MultiLineString
+     * 会让后面三处同时要加分支。真要支持多段，应当在生成岸段时就切开。
+     *
+     * <p>逐点校验而不是只看长度：NaN / Infinity 一旦入库，Mapbox 会静默丢整条线，
+     * 色带凭空消失且没有任何报错 —— 宁可在这里 400，也不要留一条画不出来的岸段。
+     */
+    private List<List<Double>> validateBankGeometry(Map<String, Object> geometry) {
+        if (geometry == null) {
+            throw BankGeometryException.invalid("缺少 bank_geometry");
+        }
+        Object type = geometry.get("type");
+        if (!"LineString".equals(String.valueOf(type))) {
+            throw BankGeometryException.invalid("岸段几何必须是 LineString，实际为 " + type);
+        }
+        if (!(geometry.get("coordinates") instanceof List<?> rawPoints)) {
+            throw BankGeometryException.invalid("coordinates 必须是坐标数组");
+        }
+        if (rawPoints.size() < 2) {
+            throw BankGeometryException.invalid("岸段至少需要 2 个折点，实际为 " + rawPoints.size());
+        }
+
+        List<List<Double>> normalized = new ArrayList<>(rawPoints.size());
+        Double prevLng = null;
+        Double prevLat = null;
+        boolean distinct = false;
+        for (int i = 0; i < rawPoints.size(); i++) {
+            if (!(rawPoints.get(i) instanceof List<?> point) || point.size() < 2) {
+                throw BankGeometryException.invalid("第 " + (i + 1) + " 个折点不是 [lng, lat]");
+            }
+            double lng = toFiniteDouble(point.get(0), i, "经度");
+            double lat = toFiniteDouble(point.get(1), i, "纬度");
+            if (lng < -180 || lng > 180) {
+                throw BankGeometryException.invalid("第 " + (i + 1) + " 个折点经度越界：" + lng);
+            }
+            if (lat < -90 || lat > 90) {
+                throw BankGeometryException.invalid("第 " + (i + 1) + " 个折点纬度越界：" + lat);
+            }
+            if (prevLng != null && (Math.abs(lng - prevLng) > 1e-9 || Math.abs(lat - prevLat) > 1e-9)) {
+                distinct = true;
+            }
+            prevLng = lng;
+            prevLat = lat;
+            List<Double> pair = new ArrayList<>(2);
+            pair.add(lng);
+            pair.add(lat);
+            normalized.add(pair);
+        }
+        if (!distinct) {
+            throw BankGeometryException.invalid("所有折点重合，无法构成岸段");
+        }
+
+        // 回写规范化后的坐标：前端可能传整数或字符串数字，统一成 double 落库，
+        // 否则同一个折点在 JSON 里出现 120 与 120.0 两种写法，比对签名时会被当成不同值。
+        geometry.put("coordinates", normalized);
+        return normalized;
+    }
+
+    private static double toFiniteDouble(Object value, int index, String label) {
+        if (!(value instanceof Number number)) {
+            throw BankGeometryException.invalid(
+                    "第 " + (index + 1) + " 个折点" + label + "不是数值：" + value);
+        }
+        double parsed = number.doubleValue();
+        if (!Double.isFinite(parsed)) {
+            throw BankGeometryException.invalid("第 " + (index + 1) + " 个折点" + label + "不是有限数");
+        }
+        return parsed;
     }
 
     // ==================== Task ====================
@@ -1005,6 +1138,54 @@ public class BusinessStoreService {
         sectionMapper.batchUpdateParams(sectionIds, params, userId);
     }
 
+    /** 人工无效原因的最大长度，与 `cross_sections.manual_invalid_reason` 的列宽一致。 */
+    private static final int MANUAL_INVALID_REASON_MAX = 200;
+
+    /**
+     * 把断面标记为「无效」或恢复有效。
+     *
+     * <p><b>不删结果、不作废结果。</b>标记的语义是「这条断面先别给我看」，不是「这次算的数不算数」：
+     *   · 结果保留 ⇒ 恢复有效时立刻就能重新上色，不需要重算；
+     *   · 只有图面、统计、框选分析按「无风险值」处理（前端 `resolveSectionRisk` 优先判它）。
+     * 如果这里顺手把结果软删了，"暂时藏一下"就变成了不可逆的数据损失。
+     *
+     * <p>也不碰 `is_valid`：那是几何校验的结论，重新校验时会被覆写，
+     * 两件事混在一列会导致「跑一次校验把人工标记洗掉」。
+     *
+     * @param sectionIds 断面业务 id（`section_id`）
+     * @param invalid    true = 标记无效；false = 恢复有效
+     * @param reason     标记原因（选填）；恢复有效时会被清空
+     * @return 实际更新行数；小于请求条数说明有 id 越权或已被删除
+     */
+    public int setSectionsManualInvalid(List<String> sectionIds, Boolean invalid, String reason) {
+        if (invalid == null) {
+            throw SectionManualInvalidException.invalid("invalid 必填：true = 标记无效，false = 恢复有效");
+        }
+        Long userId = SecurityUtils.getCurrentUserIdForDataFilter();
+
+        List<String> ids = new ArrayList<>();
+        if (sectionIds != null) {
+            for (String raw : sectionIds) {
+                if (raw == null) continue;
+                String id = raw.trim();
+                if (!id.isEmpty() && !ids.contains(id)) ids.add(id);
+            }
+        }
+        if (ids.isEmpty()) {
+            throw SectionManualInvalidException.invalid("section_ids 不能为空");
+        }
+
+        String trimmed = reason == null ? null : reason.trim();
+        if (trimmed != null && trimmed.length() > MANUAL_INVALID_REASON_MAX) {
+            throw SectionManualInvalidException.invalid(
+                    "标记原因最多 " + MANUAL_INVALID_REASON_MAX + " 字，当前 " + trimmed.length() + " 字");
+        }
+        // 恢复有效时 reason 由 SQL 的 CASE 清空，这里不必清，但也不该把"上次的原因"当成这次的原因传下去。
+        if (!invalid) trimmed = null;
+
+        return sectionMapper.updateManualInvalid(ids, invalid, trimmed, userId);
+    }
+
     /**
      * 统计该参数模板下有多少断面的快照与模板不一致（只读，供界面提示「N 条断面未同步」）。
      * 不一致的典型来源：断面先建、模板后改。
@@ -1071,13 +1252,17 @@ public class BusinessStoreService {
         Long userId = SecurityUtils.getCurrentUserIdForDataFilter();
         Map<String, Object> payload = new LinkedHashMap<>();
         RiskResultPO po = riskResultMapper.selectLatestBySectionId(sectionId, userId);
+        // 「人工无效」是**断面**属性，不在结果行上 —— 有结果的断面也可能被标为无效，
+        // 所以无论有没有结果都得读一次断面。弹窗靠这个字段决定是否显示"已标记无效"。
+        SectionPO section = sectionMapper.selectBySectionId(sectionId, userId);
         if (po != null) {
             payload.put("status", "computed");
             payload.put("result", RiskResultResponse.from(po));
+            payload.put("manual_invalid", section != null && Boolean.TRUE.equals(section.getManualInvalid()));
+            payload.put("manual_invalid_reason", section == null ? null : section.getManualInvalidReason());
             return payload;
         }
 
-        SectionPO section = sectionMapper.selectBySectionId(sectionId, userId);
         if (section == null) {
             throw new IllegalArgumentException("Section not found for section_id: " + sectionId);
         }
@@ -1092,9 +1277,14 @@ public class BusinessStoreService {
         sectionInfo.put("bank_id", section.getBankId());
         sectionInfo.put("region_code", section.getRegionCode());
         sectionInfo.put("task_id", section.getTaskId());
+        sectionInfo.put("manual_invalid", Boolean.TRUE.equals(section.getManualInvalid()));
+        sectionInfo.put("manual_invalid_reason", section.getManualInvalidReason());
 
         payload.put("status", "not_computed");
         payload.put("result", null);
+        payload.put("manual_invalid", Boolean.TRUE.equals(section.getManualInvalid()));
+        // 注意别和下面那个 `reason` 混了：那个是「为什么没有结果」，这个是「为什么被标为无效」。
+        payload.put("manual_invalid_reason", section.getManualInvalidReason());
         payload.put("reason", "该断面尚无计算结果：可能是分析之后新建的断面，或上次计算因数据问题失败，请重新执行风险分析");
         payload.put("section", sectionInfo);
         payload.put("thresholds", taskRiskThresholds(section.getTaskId(), userId));
@@ -1607,6 +1797,8 @@ public class BusinessStoreService {
         map.put("is_valid", po.getIsValid());
         map.put("validation_status", po.getValidationStatus());
         map.put("validation_message", po.getValidationMessage());
+        map.put("manual_invalid", Boolean.TRUE.equals(po.getManualInvalid()));
+        map.put("manual_invalid_reason", po.getManualInvalidReason());
         map.put("created_at", po.getCreatedAt());
         map.put("updated_at", po.getUpdatedAt());
         return map;

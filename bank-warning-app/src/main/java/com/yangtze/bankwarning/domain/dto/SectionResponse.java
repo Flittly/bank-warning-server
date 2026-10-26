@@ -35,6 +35,9 @@ public record SectionResponse(
     @JsonProperty("is_valid") Boolean isValid,
     @JsonProperty("validation_status") String validationStatus,
     @JsonProperty("validation_message") String validationMessage,
+    /** 人工标记无效：不参与着色/统计/出图，图上按「无数据」的灰色虚线画。与 is_valid 无关。 */
+    @JsonProperty("manual_invalid") Boolean manualInvalid,
+    @JsonProperty("manual_invalid_reason") String manualInvalidReason,
     @JsonProperty("created_at") LocalDateTime createdAt,
     @JsonProperty("updated_at") LocalDateTime updatedAt
 ) {
@@ -51,6 +54,7 @@ public record SectionResponse(
             po.getComparisonTimepoint(),
             JsonUtil.parse(po.getRiskThresholds()), JsonUtil.parse(po.getWeights()), JsonUtil.parse(po.getOtherParams()),
             po.getIsValid(), po.getValidationStatus(), po.getValidationMessage(),
+            Boolean.TRUE.equals(po.getManualInvalid()), po.getManualInvalidReason(),
             po.getCreatedAt(), po.getUpdatedAt()
         );
     }

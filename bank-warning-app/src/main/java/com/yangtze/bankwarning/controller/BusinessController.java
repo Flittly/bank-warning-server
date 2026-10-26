@@ -2,6 +2,7 @@ package com.yangtze.bankwarning.controller;
 
 import com.yangtze.bankwarning.ai.service.ReportPackageService;
 import com.yangtze.bankwarning.ai.service.RiskSegmentSummaryService;
+import com.yangtze.bankwarning.domain.dto.BankGeometryUpdateRequest;
 import com.yangtze.bankwarning.domain.dto.BankPayload;
 import com.yangtze.bankwarning.domain.dto.BanksCreateRequest;
 import com.yangtze.bankwarning.domain.dto.BasicParamPayload;
@@ -10,6 +11,7 @@ import com.yangtze.bankwarning.domain.dto.RiskResultOverrideRequest;
 import com.yangtze.bankwarning.domain.dto.SectionPayload;
 import com.yangtze.bankwarning.domain.dto.SectionsCreateRequest;
 import com.yangtze.bankwarning.domain.dto.SectionBatchUpdateRequest;
+import com.yangtze.bankwarning.domain.dto.SectionManualInvalidRequest;
 import com.yangtze.bankwarning.domain.dto.TaskBanksAppendRequest;
 import com.yangtze.bankwarning.domain.dto.TaskCopyRequest;
 import com.yangtze.bankwarning.domain.dto.TaskCopyResponse;
@@ -133,6 +135,26 @@ public class BusinessController {
     public Map<String, Object> updateBank(@PathVariable("bank_id") String bankId, @RequestBody BankPayload payload) {
         businessStoreService.updateBank(bankId, payload);
         return Map.of("success", true, "bank_id", bankId, "updated", true);
+    }
+
+    /**
+     * 只改岸段几何（折点编辑）。
+     *
+     * <p>与 {@link #updateBank} 分开是刻意的：那条是全字段覆盖，而拖折点时前端只持有几何。
+     * 返回体带 {@code task_count} / {@code section_count} —— 岸段是用户级共享资源，
+     * 改一条会同时挪动所有引用它的任务的色带，调用方据此提示影响面。
+     */
+    @PutMapping("/banks/{bank_id}/geometry")
+    public Map<String, Object> updateBankGeometry(
+            @PathVariable("bank_id") String bankId,
+            @RequestBody BankGeometryUpdateRequest request) {
+        return businessStoreService.updateBankGeometry(bankId, request.bankGeometry());
+    }
+
+    /** 岸段被引用的任务数 / 断面数。进入折点编辑前先问一次，用于提示影响面。 */
+    @GetMapping("/banks/{bank_id}/usage")
+    public Map<String, Object> getBankUsage(@PathVariable("bank_id") String bankId) {
+        return businessStoreService.getBankUsage(bankId);
     }
 
     @DeleteMapping("/banks/{bank_id}")
@@ -405,6 +427,30 @@ public class BusinessController {
     public Map<String, Object> batchUpdateSectionParams(@RequestBody SectionBatchUpdateRequest request) {
         businessStoreService.batchUpdateSectionParams(request.sectionIds(), request.params());
         return Map.of("success", true, "updated", request.sectionIds().size());
+    }
+
+    /**
+     * 批量把断面标记为「无效」/ 恢复有效。
+     *
+     * <p>路径是字面量 `/sections/manual-invalid`，与 `PUT /sections/{section_id}` 同为两段
+     * PUT —— 由 Spring 的 PathPattern 排序保证字面量优先（与 `/sections/batch-params`
+     * 完全同一套写法，那边已经在用）。
+     *
+     * <p>语义边界（改之前先读 `BusinessStoreService#setSectionsManualInvalid`）：
+     *   · **不删结果、不作废结果** —— 恢复有效立刻能重新上色，不需要重算；
+     *   · **不碰 is_valid** —— 那是几何校验结论，混用会被重新校验洗掉；
+     *   · 只影响「图面 / 统计 / 框选分析」对这条断面的取数口径。
+     */
+    @PutMapping("/sections/manual-invalid")
+    public Map<String, Object> setSectionsManualInvalid(@RequestBody SectionManualInvalidRequest request) {
+        int updated = businessStoreService.setSectionsManualInvalid(
+                request.sectionIds(), request.invalid(), request.reason());
+        Map<String, Object> response = new LinkedHashMap<>();
+        response.put("success", true);
+        response.put("requested", request.sectionIds() == null ? 0 : request.sectionIds().size());
+        response.put("updated", updated);
+        response.put("invalid", Boolean.TRUE.equals(request.invalid()));
+        return response;
     }
 
     /**

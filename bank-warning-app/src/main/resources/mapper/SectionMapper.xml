@@ -33,6 +33,8 @@
         <result property="isValid" column="is_valid"/>
         <result property="validationStatus" column="validation_status"/>
         <result property="validationMessage" column="validation_message"/>
+        <result property="manualInvalid" column="manual_invalid"/>
+        <result property="manualInvalidReason" column="manual_invalid_reason"/>
         <result property="createdAt" column="created_at"/>
         <result property="updatedAt" column="updated_at"/>
         <result property="deletedAt" column="deleted_at"/>
@@ -312,10 +314,15 @@
            ST_GeomFromGeoJSON(section_geometry) 派生），只有 SELECT 才能原样搬；
         3. 2000+ 断面的大任务，Java 往返 + 分批 insert 是秒级，一条 SQL 是百毫秒级。
 
-        【两个容易漏的列】
+        【三个容易漏的列】
         · is_valid / validation_status / validation_message —— 不在单条 insert 的列清单里
           （由 SectionValidationService 单独 UPDATE）。这里必须显式带上，否则复制完
           全部断面都会变回「未校验」，而几何与参数其实一字未改。
+        · manual_invalid / manual_invalid_reason —— 同样不在单条 insert 的列清单里
+          （新断面默认 false）。复制任务 = 照搬现状，人工标记为无效的断面在新任务里
+          也该是无效的；漏掉这一列的后果是「复制完所有断面都变成有效的」，
+          而且没有任何报错，只能靠人眼在图面上发现。**resetValidation 不影响这两列**：
+          那是几何校验结论，与人的判断无关。
         · basic_param_id 指向**新任务**的参数行，绝不沿用源任务的 param 行 id。
 
         【section_id 重生成】`sec-<新 taskId><原后缀>`，后缀沿用源 id 的前缀切片，
@@ -329,7 +336,8 @@
             basic_param_id, param_name, bench_segment, current_timepoint, set_name, water_qs,
             tidal_level, bench_id, ref_id, hs, hc, protection_level, control_level,
             comparison_timepoint, risk_thresholds, weights, other_params,
-            is_valid, validation_status, validation_message, user_id, created_at, updated_at)
+            is_valid, validation_status, validation_message,
+            manual_invalid, manual_invalid_reason, user_id, created_at, updated_at)
         SELECT
             #{newTaskId},
             'sec-' || #{newTaskId} || CASE
@@ -345,11 +353,38 @@
             CASE WHEN #{resetValidation} THEN NULL          ELSE is_valid           END,
             CASE WHEN #{resetValidation} THEN 'pending'     ELSE validation_status  END,
             CASE WHEN #{resetValidation} THEN NULL          ELSE validation_message END,
+            manual_invalid, manual_invalid_reason,
             #{targetUserId, jdbcType=BIGINT},
             CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
         FROM cross_sections
         WHERE task_id = #{srcTaskId} AND deleted_at IS NULL
         ORDER BY segment_index, id
     </insert>
+    <!--
+      人工标记断面为「无效」/「恢复有效」。
+
+      【为什么是独立 UPDATE 而不是复用 update(SectionPO)】
+      那条是 COALESCE 全字段更新：传 null 就保持原值，没有「显式置回 false」的表达能力 ——
+      而"恢复有效"恰恰要把 true 改回 false。用 SectionPO 走一遍还得先把整行读出来再写回，
+      顺手把 geometry/params 的 jsonb 过一遍 Jackson，属于无意义的漂移风险。
+
+      【reason 的语义】只有在 invalid=true 时才有意义，所以恢复时一并清空，
+      否则会出现「有效但带着一条无效原因」的自相矛盾数据。
+
+      【userId 过滤】与 batchUpdateParams 一致：admin(null) 不过滤，普通用户只能改自己的。
+      返回受影响行数，供调用方判断「一条都没匹配上」（越权 / 已被删）。
+    -->
+    <update id="updateManualInvalid">
+        UPDATE cross_sections
+        SET manual_invalid = #{invalid},
+            manual_invalid_reason = CASE WHEN #{invalid} THEN #{reason} ELSE NULL END,
+            updated_at = CURRENT_TIMESTAMP
+        WHERE section_id IN
+        <foreach collection="sectionIds" item="sid" open="(" separator="," close=")">
+            #{sid}
+        </foreach>
+        AND deleted_at IS NULL
+        AND (user_id = #{userId} OR #{userId, jdbcType=BIGINT} IS NULL)
+    </update>
 
 </mapper>

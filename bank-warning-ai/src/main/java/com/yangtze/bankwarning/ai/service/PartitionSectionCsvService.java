@@ -205,6 +205,10 @@ public class PartitionSectionCsvService {
      * <p>join / where 与 {@code RiskDataTools.queryRiskData} 保持一致（同一行集），
      * 只是多取了几列用于 CSV；断面端点一律走 {@code cross_sections.geom}
      * （{@code banks.geom} 从不被写入，不要用它）。
+     *
+     * <p><b>人工标记无效的断面不导出</b>：明细表与风险段汇总、报告配图必须同一口径 ——
+     * 汇总里没有的段却在明细里出现，是最坏的一种"两份报表互相矛盾"。
+     * 用户要核对"我标了哪些无效"，界面上的灰色虚线就是那个清单。
      */
     List<Map<String, Object>> querySectionDetails(String taskId) {
         String sql = "SELECT r.section_id, "
@@ -223,6 +227,7 @@ public class PartitionSectionCsvService {
                 + "LEFT JOIN cross_sections cs ON r.section_id = cs.section_id "
                 + "LEFT JOIN banks b ON COALESCE(cs.bank_id, r.bank_id) = b.bank_id "
                 + "WHERE r.task_id = ? AND r.deleted_at IS NULL "
+                + "AND COALESCE(cs.manual_invalid, false) = false "
                 + "ORDER BY r.section_id";
         return jdbcTemplate.queryForList(sql, taskId);
     }

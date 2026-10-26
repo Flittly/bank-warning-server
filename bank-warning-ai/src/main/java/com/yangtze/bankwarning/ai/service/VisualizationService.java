@@ -692,7 +692,10 @@ public class VisualizationService {
                 "FROM bank_risk_results r " +
                 "LEFT JOIN cross_sections cs ON r.section_id = cs.section_id " +
                 "LEFT JOIN banks b ON COALESCE(cs.bank_id, r.bank_id) = b.bank_id " +
-                "WHERE r.deleted_at IS NULL"
+                "WHERE r.deleted_at IS NULL " +
+                // 人工标记无效的断面不出图：图面（前端）已把它画成灰色虚线、不参与着色，
+                // 报告配图如果还算它，同一份成果里会出现两套结论。COALESCE 兜住断面已删（cs 缺失）。
+                "AND COALESCE(cs.manual_invalid, false) = false"
         );
 
         List<Object> params = new ArrayList<>();

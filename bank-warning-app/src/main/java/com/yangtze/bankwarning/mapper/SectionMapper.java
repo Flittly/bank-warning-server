@@ -35,6 +35,20 @@ public interface SectionMapper {
     int batchUpdateParams(@Param("sectionIds") List<String> sectionIds, @Param("params") Map<String, Object> params, @Param("userId") Long userId);
 
     /**
+     * 人工标记断面为无效 / 恢复有效。
+     *
+     * <p>与 {@link #batchUpdateParams} 的 {@code params} 不同，这里的 {@code invalid}
+     * 是**显式布尔**（数据库列 NOT NULL DEFAULT false）：恢复有效必须能把 true 写回 false，
+     * 不能用「传 null 就保持原值」的 COALESCE 语义。
+     *
+     * @return 实际受影响行数（0 = 越权或断面已被删，调用方据此报错）
+     */
+    int updateManualInvalid(@Param("sectionIds") List<String> sectionIds,
+                            @Param("invalid") boolean invalid,
+                            @Param("reason") String reason,
+                            @Param("userId") Long userId);
+
+    /**
      * 把断面上的参数快照刷新为**本任务参数集**的当前值，作用域严格限定在一个任务内。
      *
      * 为什么必须带 task_id：basic_params 里 task_id IS NULL 的行是模板库主数据

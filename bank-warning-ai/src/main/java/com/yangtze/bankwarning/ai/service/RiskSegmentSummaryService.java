@@ -152,11 +152,15 @@ public class RiskSegmentSummaryService {
      * 一条断面就被算成代表 28.9 km 岸线；用全部断面估是 8 km，才接近真实抽样密度。
      *
      * <p>查询失败时返回空 Map（调用方自动退回「参与断面」的间距），不影响主流程。
+     *
+     * <p><b>人工标记无效的断面不参与间距估计</b>：这类断面是"用户判定位置/数据不可用"，
+     * 它的里程同样是可疑值；拿它去估抽样密度会把相邻断面的代表长度整体带偏。
      */
     Map<String, Double> queryBankSpacings(String taskId) {
         String sql = "SELECT COALESCE(bank_id, '') AS bank_id, distance "
                 + "FROM cross_sections "
                 + "WHERE task_id = ? AND deleted_at IS NULL AND distance IS NOT NULL "
+                + "  AND manual_invalid = false "
                 + "ORDER BY bank_id, distance";
         try {
             List<Map<String, Object>> rows = jdbcTemplate.queryForList(sql, taskId);
@@ -240,6 +244,10 @@ public class RiskSegmentSummaryService {
                 + " FROM latest l "
                 + " LEFT JOIN cross_sections cs ON l.section_id = cs.section_id "
                 + " LEFT JOIN banks b ON COALESCE(cs.bank_id, l.bank_id) = b.bank_id "
+                // 人工标记无效的断面**不参与风险段聚合**：它在图面上已被画成灰色虚线、
+                // 不参与着色与框选统计，如果导出/报告里还算它一段，用户看到的就是
+                // "我明明藏起来的那条，报表上还在"。COALESCE 兜住 cs 缺失（断面已删）的情况。
+                + " WHERE COALESCE(cs.manual_invalid, false) = false "
                 + " ORDER BY bank_id, distance, segment_index";
 
         List<Map<String, Object>> rows = jdbcTemplate.queryForList(sql, taskId);

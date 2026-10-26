@@ -1,6 +1,8 @@
 package com.yangtze.bankwarning.controller;
 
+import com.yangtze.bankwarning.domain.exception.BankGeometryException;
 import com.yangtze.bankwarning.domain.exception.ResultOverrideException;
+import com.yangtze.bankwarning.domain.exception.SectionManualInvalidException;
 import com.yangtze.bankwarning.domain.exception.SectionRecomputeException;
 import com.yangtze.bankwarning.domain.exception.TaskCopyException;
 import org.slf4j.Logger;
@@ -63,6 +65,20 @@ public class ApiExceptionHandler {
     }
 
     /**
+     * 「断面人工无效」的入参不合法 = 400。
+     *
+     * <p>不能用 IllegalArgumentException 兜：它被固定映射成 404，前端会以为「断面已被删」
+     * 从而关掉弹窗 —— 而真实原因是请求缺了 {@code invalid} 字段。用户看到的现象会是
+     * "点了按钮，弹窗自己关了，什么都没发生"，比报错更难查。
+     */
+    @ExceptionHandler(SectionManualInvalidException.class)
+    public ResponseEntity<Map<String, Object>> handleSectionManualInvalid(SectionManualInvalidException exception) {
+        log.warn("[api-error] manual invalid rejected({}): {}", exception.getCode(), exception.getMessage());
+        return ResponseEntity.status(exception.getStatus())
+                .body(error(exception.getCode(), exception.getMessage(), null));
+    }
+
+    /**
      * 复制任务的三种「可预期的不能做」：目标 id 撞车 / 源任务在跑（结果不完整）= 409，
      * 入参不合法 = 400，跨用户未开放 = 403。不能拿 IllegalArgumentException 兜成 404，
      * 否则前端分不清「任务没了」和「换个名字再试」。
@@ -70,6 +86,18 @@ public class ApiExceptionHandler {
     @ExceptionHandler(TaskCopyException.class)
     public ResponseEntity<Map<String, Object>> handleTaskCopy(TaskCopyException exception) {
         log.warn("[api-error] task copy rejected({}): {}", exception.getCode(), exception.getMessage());
+        return ResponseEntity.status(exception.getStatus())
+                .body(error(exception.getCode(), exception.getMessage(), null));
+    }
+
+    /**
+     * 岸段几何编辑的两种可预期失败：几何不合法 = 400（前端回滚这一次改动、留在编辑态），
+     * 岸段不存在 / 已被删 = 404。同样不能用 IllegalArgumentException 兜 ——
+     * 它被固定映射成 404，会让「折点不够」看起来像「岸段没了」。
+     */
+    @ExceptionHandler(BankGeometryException.class)
+    public ResponseEntity<Map<String, Object>> handleBankGeometry(BankGeometryException exception) {
+        log.warn("[api-error] bank geometry rejected({}): {}", exception.getCode(), exception.getMessage());
         return ResponseEntity.status(exception.getStatus())
                 .body(error(exception.getCode(), exception.getMessage(), null));
     }
