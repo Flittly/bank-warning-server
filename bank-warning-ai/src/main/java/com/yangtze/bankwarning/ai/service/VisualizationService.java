@@ -245,6 +245,29 @@ public class VisualizationService {
             return Map.of("success", false,
                     "error", bankId != null ? ("岸段 " + bankId + " 没有风险数据") : "没有风险数据");
         }
+        // 人工标为无效的断面**留在 result set 里但等级为空**（见 queryRiskData 注释），
+        // 所以「有行」不等于「有东西可画」：全都被标无效时必须照旧报错，
+        // 否则会安静地出一张只剩底图和指北针的空图，报告里也没法解释。
+        long invalidCount = riskData.stream()
+                .filter(d -> Boolean.TRUE.equals(d.get("manual_invalid")))
+                .count();
+        long renderableCount = riskData.stream().filter(d -> {
+            Object level = d.get("risk_level");
+            return level instanceof Number n && n.intValue() >= 1;
+        }).count();
+        if (renderableCount == 0) {
+            String who = bankId != null ? ("岸段 " + bankId) : "该任务";
+            String why = invalidCount == riskData.size()
+                    ? "的断面已全部标记为无效，按口径不出图"
+                    : "没有可着色的风险等级";
+            log.info("[viz] skip render: {} {}（断面 {} 条，其中人工无效 {} 条）",
+                    who, why, riskData.size(), invalidCount);
+            return Map.of("success", false, "error", who + why);
+        }
+        if (invalidCount > 0) {
+            log.info("[viz] 断面 {} 条，其中人工无效 {} 条（等级置空、岸段对应区段不着色）",
+                    riskData.size(), invalidCount);
+        }
 
         // 计算风险数据的经纬度范围
         double minLng = Double.MAX_VALUE, maxLng = -Double.MAX_VALUE;
@@ -459,10 +482,14 @@ public class VisualizationService {
     /**
      * 取该任务下真正有风险结果的岸段（可选按 bankIds 过滤）。
      * 只筛出有结果的岸段，避免为无数据的岸段白跑一次出图。
+     *
+     * <p>HAVING 那一条：断面全部被人工标为无效的岸段不出图。它们留着也只能画出
+     * 一张没颜色的岸线（见 {@link #queryRiskData} 的说明），白白占一个「出图失败 /
+     * 空图」条目，还会让报告里的图数与岸段数对不上。
      */
     private List<Map<String, Object>> resolveTaskBanks(String taskId, List<String> bankIds) {
         StringBuilder sql = new StringBuilder(
-                "SELECT DISTINCT cs.bank_id AS bank_id, b.bank_name AS bank_name " +
+                "SELECT cs.bank_id AS bank_id, b.bank_name AS bank_name " +
                 "FROM bank_risk_results r " +
                 "JOIN cross_sections cs ON r.section_id = cs.section_id " +
                 "LEFT JOIN banks b ON cs.bank_id = b.bank_id " +
@@ -475,7 +502,9 @@ public class VisualizationService {
                     .append(")");
             params.addAll(bankIds);
         }
-        sql.append(" ORDER BY cs.bank_id");
+        sql.append(" GROUP BY cs.bank_id, b.bank_name")
+                .append(" HAVING count(*) FILTER (WHERE COALESCE(cs.manual_invalid, false) = false) > 0")
+                .append(" ORDER BY cs.bank_id");
         return jdbcTemplate.queryForList(sql.toString(), params.toArray());
     }
 
@@ -671,18 +700,37 @@ public class VisualizationService {
     }
 
     /**
-     * 查询风险数据
+     * 风险取数的 SQL 与绑定参数。
+     *
+     * <p>单独抽出来只为一件事：让「无效断面必须保留在结果集里、等级置空」这条口径
+     * 能被单元测试直接钉住（{@code queryRiskData} 是 private 且依赖 JdbcTemplate，
+     * 不抽就只能靠实跑一张图去肉眼看）。
      */
-    private List<Map<String, Object>> queryRiskData(String taskId, String bankId) {
+    record RiskDataQuery(String sql, List<Object> params) {}
+
+    /** 组装风险取数查询（包级可见，供单元测试锁口径）。 */
+    RiskDataQuery buildRiskDataQuery(String taskId, String bankId) {
         // 注意：banks.geom 不被写入（BankMapper 只维护 bank_geometry jsonb），
         // 所以岸段几何取 b.bank_geometry，与前端 ResultPage 的口径保持一致。
         // ::text 是刻意的：jsonb 列经 JdbcTemplate 取回是 PGobject，显式转 text 让驱动
         // 直接返回字符串，避免依赖驱动的类型行为（Java 侧仍兼容 PGobject 作为兜底）。
         // bank_id 用 COALESCE 兜底：cross_sections 缺行时 cs.bank_id 为 NULL，
         // 而 bank_risk_results 自带 bank_id 且实测 100% 非空。
+        //
+        // ⚠ 人工标记无效的断面**必须留在结果集里**，只把 risk_level 置空（见下方 CASE），
+        //   不能像 2026-10-26 那版那样直接 `AND manual_invalid = false` 把它们过滤掉。
+        //   原因：岸段色带是按「断面管辖区间」着色的（Python 侧
+        //   gradient.build_span_colors 用最近断面给每个折线段定色）。断面行一旦缺席，
+        //   它原本管辖的那段岸线就改由**左右两个有效断面**就近接管 —— 于是被标为无效
+        //   的那一段照样被邻居的颜色铺满，图上根本看不出「这里被隐藏了」。
+        //   保留行 + 等级为空，Python 的 is_rendered_level(None)=False 就会让整段不画，
+        //   与页面「灰虚线、不着色」是同一套口径。
+        //   COALESCE 兜住断面已删（cs 缺失）的情况。
         StringBuilder sql = new StringBuilder(
                 "SELECT r.section_id, cs.section_name, COALESCE(cs.bank_id, r.bank_id) as bank_id, " +
-                "cs.distance, r.risk_level, " +
+                "cs.distance, " +
+                "CASE WHEN COALESCE(cs.manual_invalid, false) THEN NULL ELSE r.risk_level END as risk_level, " +
+                "COALESCE(cs.manual_invalid, false) as manual_invalid, " +
                 "r.indicators->>'result' as risk_value, " +
                 "b.bank_name, b.bank_geometry::text as bank_geometry, " +
                 "ST_X(ST_StartPoint(cs.geom)) as start_lng, " +
@@ -692,10 +740,7 @@ public class VisualizationService {
                 "FROM bank_risk_results r " +
                 "LEFT JOIN cross_sections cs ON r.section_id = cs.section_id " +
                 "LEFT JOIN banks b ON COALESCE(cs.bank_id, r.bank_id) = b.bank_id " +
-                "WHERE r.deleted_at IS NULL " +
-                // 人工标记无效的断面不出图：图面（前端）已把它画成灰色虚线、不参与着色，
-                // 报告配图如果还算它，同一份成果里会出现两套结论。COALESCE 兜住断面已删（cs 缺失）。
-                "AND COALESCE(cs.manual_invalid, false) = false"
+                "WHERE r.deleted_at IS NULL"
         );
 
         List<Object> params = new ArrayList<>();
@@ -709,7 +754,15 @@ public class VisualizationService {
         }
         sql.append(" ORDER BY r.risk_level DESC");
 
-        return jdbcTemplate.queryForList(sql.toString(), params.toArray());
+        return new RiskDataQuery(sql.toString(), params);
+    }
+
+    /**
+     * 查询风险数据（含人工无效断面，其 risk_level 为空，见 buildRiskDataQuery）。
+     */
+    private List<Map<String, Object>> queryRiskData(String taskId, String bankId) {
+        RiskDataQuery query = buildRiskDataQuery(taskId, bankId);
+        return jdbcTemplate.queryForList(query.sql(), query.params().toArray());
     }
 
     /**
