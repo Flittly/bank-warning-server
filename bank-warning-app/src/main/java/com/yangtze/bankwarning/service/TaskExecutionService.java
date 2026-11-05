@@ -10,6 +10,8 @@ import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
 import com.yangtze.bankwarning.dto.kafka.ModelTask;
 import org.springframework.beans.factory.annotation.Value;
+import org.springframework.security.core.context.SecurityContext;
+import org.springframework.security.core.context.SecurityContextHolder;
 
 import java.time.Instant;
 import java.util.UUID;
@@ -19,12 +21,36 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.stream.Collectors;
 
 @Service
 public class TaskExecutionService {
 
     private static final Logger log = LoggerFactory.getLogger(TaskExecutionService.class);
+
+    /**
+     * 并行度的硬上限，与配置无关的保险丝。
+     *
+     * <p>只防止「配置写错一个零」把机器打死：每路并行会向模型服务压进约 7 个子进程，
+     * 16 路 = 112 个 GDAL 子进程，已经远超任何单机的内存承载力。
+     * 正常取值应由 {@code app.section.parallelism} 决定，这里只在越界时兜住。
+     */
+    private static final int MAX_PARALLELISM = 16;
+
+    /**
+     * 心跳间隔（秒）。原实现把心跳挂在断面循环里（一条断面才跳一次，几十秒一次），
+     * 并行后必须独立成一条定时线程——否则 N 个 worker 各自续租会让租约刷新过密，
+     * 取消判定也会分裂成 N 份，谁先看到谁停，语义变成不可解释的「部分停止」。
+     */
+    private static final long HEARTBEAT_SECONDS = 5;
 
     private final BusinessStoreService businessStoreService;
     private final ModelGatewayService modelGatewayService;
@@ -37,6 +63,13 @@ public class TaskExecutionService {
 
     @Value("${app.kafka.enabled:false}")
     private boolean kafkaEnabled;
+
+    /**
+     * 单个任务内同时计算的断面数。见 {@code application.yml} 里 app.section.parallelism
+     * 的说明：它与模型侧 MAX_RUNNING_MODEL_CASE_NUM 是一对参数，必须一起调。
+     */
+    @Value("${app.section.parallelism:4}")
+    private int sectionParallelism;
 
     public TaskExecutionService(
             BusinessStoreService businessStoreService,
@@ -168,60 +201,22 @@ public class TaskExecutionService {
 
         try {
             log.info("[task-run] loaded sections, taskId={}, sectionCount={}", taskId, sections.size());
-            List<Map<String, Object>> results = new ArrayList<>();
-            List<Map<String, Object>> failures = new ArrayList<>();
-
-            boolean cancelRequested = false;
-            boolean lostOwnership = false;
-            for (Map<String, Object> section : sections) {
-                // 协作式取消的唯一检查点：断面之间。刻意不打断正在进行的模型调用 ——
-                // 既保证"已算完的断面结果不丢"，也让停止时机可解释（最迟当前这条算完就停）。
-                //
-                // 这一次调用同时办三件事：续期租约（声明"我还活着"）、查取消标志、确认自己仍是
-                // 这个任务的所有者。合并成一次是因为三者必须同时成立才有意义 —— 分开查会有缝隙，
-                // 而且断面本身要算几秒，多一次往返不划算。
-                TaskCancelRegistry.CancelSignal signal = taskCancelRegistry.heartbeatAndCheck(taskId);
-                if (signal == TaskCancelRegistry.CancelSignal.LOST_OWNERSHIP) {
-                    // 租约已被别的实例接管（同一任务被再启动一次），或本实例续不上期。
-                    // 此时必须停手：继续算下去会和对方同时往同一批断面写结果。
-                    lostOwnership = true;
-                    log.warn("[task-run] lost ownership, stop without writing final status, taskId={}, done={}",
-                            taskId, results.size() + failures.size());
-                    break;
-                }
-                if (signal == TaskCancelRegistry.CancelSignal.CANCEL_REQUESTED) {
-                    cancelRequested = true;
-                    log.info("[task-run] cancel requested, stop before next section, taskId={}, done={}",
-                            taskId, results.size() + failures.size());
-                    break;
-                }
-                String sectionId = String.valueOf(section.get("section_id"));
-                try {
-                    results.add(computeAndSaveSection(taskId, section));
-                } catch (Exception sectionException) {
-                    log.error("[task-run] section failed, taskId={}, sectionId={}, message={}",
-                            taskId,
-                            sectionId,
-                            sectionException.getMessage(),
-                            sectionException);
-                    Map<String, Object> errorInfo = classifyError(sectionException);
-                    Map<String, Object> failed = new LinkedHashMap<>();
-                    failed.put("section_id", section.get("section_id"));
-                    failed.put("status", 500);
-                    failed.put("error_code", errorInfo.get("error_code"));
-                    failed.put("error_message", errorInfo.get("error_message"));
-                    failed.put("error_detail", sectionException.getMessage());
-                    failed.put("executed_at", Instant.now().toString());
-                    failures.add(failed);
-                }
-            }
+            // 断面之间并行计算。原先是单线程 for 循环，一次只有一个断面在途 ——
+            // 而每个断面内部是「提交模型 → 轮询等结果」的阻塞流程，等待期间那一个
+            // Tomcat 线程什么也干不了。有界 worker 池把这层等待重叠起来：
+            // worker 数 = 同时推进的断面数，模型槽位由 Python 侧的 MAX 兜住。
+            SectionRunOutcome outcome = runSectionsInParallel(taskId, sections);
+            List<Map<String, Object>> results = outcome.results();
+            List<Map<String, Object>> failures = outcome.failures();
 
             // 失去所有权 ⇒ 直接返回，**不写任何终态**。
             // 终态归接管者写；这里若顺手写个 cancelled / completed，就会与对方互相覆盖，
             // 那正是「两个写入者打架」的老问题换了个入口。
             // 返回 status=superseded 只是为了让人看得懂发生了什么（前端不识别这个值时会走未知分支，
             // 不会崩；且这个分支在单写者部署下不会触发）。
-            if (lostOwnership) {
+            if (outcome.signal() == TaskCancelRegistry.CancelSignal.LOST_OWNERSHIP) {
+                log.warn("[task-run] lost ownership, stop without writing final status, taskId={}, done={}",
+                        taskId, results.size() + failures.size());
                 return Map.of(
                         "success", false,
                         "task_id", taskId,
@@ -236,11 +231,14 @@ public class TaskExecutionService {
                         ));
             }
 
-            // 终止优先于任何终态。用「或」而不是只看循环里那个布尔量：取消请求可能刚好落在
-            // 最后一次检查之后（循环已正常跑完），此时若不补这一下，本方法返回前写下的
+            // 终止优先于任何终态。用「或」而不是只看并行执行器返回的信号：取消请求可能刚好落在
+            // 最后一次心跳之后（worker 已全部跑完），此时若不补这一下，本方法返回前写下的
             // completed / partial_failed 会盖掉取消接口刚写下的 cancelled —— 那就是"假停止"的翻版。
-            if (cancelRequested || taskCancelRegistry.isCancelRequested(taskId)) {
+            if (outcome.signal() == TaskCancelRegistry.CancelSignal.CANCEL_REQUESTED
+                    || taskCancelRegistry.isCancelRequested(taskId)) {
                 int handled = results.size() + failures.size();
+                // 并行后停止粒度从「当前这一条」变成「当前在途的这一批」：最多再算完
+                // parallelism 条才会真正停下，文案必须跟着改，否则用户会以为按钮没生效。
                 String cancelMessage = String.format(
                         "已由用户手动终止：成功 %d 个断面、失败 %d 个，%d 个未处理；已完成的结果全部保留。",
                         results.size(), failures.size(), Math.max(0, sections.size() - handled));
@@ -300,6 +298,160 @@ public class TaskExecutionService {
             // 于是它只置标志、不写库，界面上那个 running 就再也没人收了。
             taskCancelRegistry.unregister(taskId);
         }
+    }
+
+    /** 一次并行执行的整体结论：已产出的成功/失败明细，以及停止原因。 */
+    private record SectionRunOutcome(
+            List<Map<String, Object>> results,
+            List<Map<String, Object>> failures,
+            TaskCancelRegistry.CancelSignal signal) {
+    }
+
+    /**
+     * 用有界 worker 池并行计算一批断面。
+     *
+     * <p><b>并发模型</b>：worker 从同一个游标里领索引，领完即算，算完再领。因此
+     * 一个索引只会被一个 worker 领走 —— 每个槽位只有一个写者。主线程等所有 worker
+     * 退出后统一读，既天然保序，也不需要给结果容器加锁。
+     * （直接把 {@code ArrayList} 换成并发容器是不行的：那能防丢元素，但换不回顺序。）
+     *
+     * <p>刻意不用 {@code parallelStream()}：它跑在 JVM 全局 commonPool 上，
+     * 会和其他并行流抢核、并发度不可配，取消也没法精确控制。
+     *
+     * <p><b>为什么 worker 数要跟模型侧 MAX 配对</b>：worker 只决定「同时有几个断面
+     * 在推进」，真正同时在跑的是模型子进程。一个断面稳态约 7 个 case，
+     * 4 路就是 28 个，模型侧 MAX_RUNNING_MODEL_CASE_NUM 必须不小于这个量，
+     * 否则超出的 case 会落到 Python 的 deferred 队列里反复轮转（更慢，不是更快）。
+     */
+    @SuppressWarnings("unchecked")
+    private SectionRunOutcome runSectionsInParallel(String taskId, List<Map<String, Object>> sections) {
+        int total = sections.size();
+        // 断面数少于并行度时不白开线程；MAX_PARALLELISM 是防误配置的保险丝。
+        int workers = Math.max(1, Math.min(Math.min(sectionParallelism, MAX_PARALLELISM), total));
+
+        // 按索引落槽：results[i] 与 failures[i] 最多一个非 null。
+        Map<String, Object>[] results = new Map[total];
+        Map<String, Object>[] failures = new Map[total];
+
+        AtomicInteger cursor = new AtomicInteger();
+        AtomicReference<TaskCancelRegistry.CancelSignal> stop =
+                new AtomicReference<>(TaskCancelRegistry.CancelSignal.CONTINUE);
+
+        // ⚠ 必须显式把登录身份带进 worker 线程。
+        // SecurityContextHolder 是 ThreadLocal，worker 里是空的；而
+        // BusinessStoreService.saveRiskResult 与 SectionProfileService.saveSectionProfile
+        // 都会调用 SecurityUtils.getCurrentUserIdForDataFilter() + getCurrentUserId()。
+        // 空上下文下前者返回 null，语义等于「管理员」（fail-open），后者直接写出 user_id = NULL
+        // —— 结果是普通用户再也查不到自己任务的结果，而且全程不报任何错。
+        SecurityContext callerContext = SecurityContextHolder.getContext();
+
+        AtomicInteger workerSeq = new AtomicInteger();
+        ExecutorService pool = Executors.newFixedThreadPool(workers, job -> {
+            Thread thread = new Thread(job, "section-worker-" + workerSeq.incrementAndGet());
+            thread.setDaemon(true);
+            return thread;
+        });
+
+        ScheduledExecutorService heartbeat = Executors.newSingleThreadScheduledExecutor(job -> {
+            Thread thread = new Thread(job, "task-heartbeat");
+            thread.setDaemon(true);
+            return thread;
+        });
+
+        try {
+            // 心跳独立成一条线程：原实现挂在断面循环里（一条断面才跳一次），
+            // 并行后若让 N 个 worker 各自续租，租约刷新会过密、取消判定会分裂成 N 份。
+            heartbeat.scheduleWithFixedDelay(() -> {
+                try {
+                    TaskCancelRegistry.CancelSignal signal = taskCancelRegistry.heartbeatAndCheck(taskId);
+                    if (signal != TaskCancelRegistry.CancelSignal.CONTINUE) {
+                        // 保留第一个非 CONTINUE 的信号，避免多个来源互相覆盖结论。
+                        stop.compareAndSet(TaskCancelRegistry.CancelSignal.CONTINUE, signal);
+                    }
+                } catch (Exception heartbeatError) {
+                    // 心跳失败不打死任务：下一拍再试。真丢了所有权，下次会返回 LOST_OWNERSHIP。
+                    log.warn("[task-run] heartbeat failed, taskId={}, message={}",
+                            taskId, heartbeatError.getMessage());
+                }
+            }, 0, HEARTBEAT_SECONDS, TimeUnit.SECONDS);
+
+            List<Future<?>> pending = new ArrayList<>(workers);
+            for (int i = 0; i < workers; i++) {
+                pending.add(pool.submit(() -> {
+                    SecurityContextHolder.setContext(callerContext);
+                    try {
+                        while (stop.get() == TaskCancelRegistry.CancelSignal.CONTINUE) {
+                            int index = cursor.getAndIncrement();
+                            if (index >= total) {
+                                return;   // 活干完了
+                            }
+                            Map<String, Object> section = sections.get(index);
+                            try {
+                                results[index] = computeAndSaveSection(taskId, section);
+                            } catch (Exception sectionException) {
+                                // 断面级失败不中断其它断面：与串行实现一致，记一条 failures 继续下一条。
+                                failures[index] = buildSectionFailure(taskId, section, sectionException);
+                            }
+                        }
+                    } finally {
+                        SecurityContextHolder.clearContext();
+                    }
+                }));
+            }
+
+            for (Future<?> future : pending) {
+                try {
+                    future.get();
+                } catch (InterruptedException interrupted) {
+                    Thread.currentThread().interrupt();
+                    throw new IllegalStateException(
+                            "Section workers interrupted, taskId=" + taskId, interrupted);
+                } catch (ExecutionException executionException) {
+                    // 断面级异常已在 worker 内吞掉，能走到这里的只有 worker 本身挂了
+                    // （OOM / Error）—— 直接抛出并由上层写 error 终态，不要假装成功。
+                    throw new IllegalStateException(
+                            "Section worker died, taskId=" + taskId, executionException.getCause());
+                }
+            }
+        } finally {
+            // 必须关闭：定时线程是 scheduleWithFixedDelay，不关就永久存活。
+            // 每个任务泄漏 workers+1 条线程，几天后线程数就会耗尽。
+            heartbeat.shutdownNow();
+            pool.shutdownNow();
+        }
+
+        // 按原索引顺序压实。null 槽位 = 取消后没被领走，或 worker 提前退出没产出。
+        // 这样前端拿到的结果顺序与串行实现完全一致，不需要跟着改。
+        List<Map<String, Object>> orderedResults = new ArrayList<>(total);
+        List<Map<String, Object>> orderedFailures = new ArrayList<>();
+        for (int index = 0; index < total; index++) {
+            if (results[index] != null) {
+                orderedResults.add(results[index]);
+            } else if (failures[index] != null) {
+                orderedFailures.add(failures[index]);
+            }
+        }
+        return new SectionRunOutcome(orderedResults, orderedFailures, stop.get());
+    }
+
+    /** 把断面级异常整理成与任务返回体里 failures 同形状的一条记录。 */
+    private Map<String, Object> buildSectionFailure(String taskId,
+                                                    Map<String, Object> section,
+                                                    Exception exception) {
+        log.error("[task-run] section failed, taskId={}, sectionId={}, message={}",
+                taskId,
+                section.get("section_id"),
+                exception.getMessage(),
+                exception);
+        Map<String, Object> errorInfo = classifyError(exception);
+        Map<String, Object> failed = new LinkedHashMap<>();
+        failed.put("section_id", section.get("section_id"));
+        failed.put("status", 500);
+        failed.put("error_code", errorInfo.get("error_code"));
+        failed.put("error_message", errorInfo.get("error_message"));
+        failed.put("error_detail", exception.getMessage());
+        failed.put("executed_at", Instant.now().toString());
+        return failed;
     }
 
     /**
