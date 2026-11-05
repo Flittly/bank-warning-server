@@ -27,6 +27,12 @@ public final class SkillPathGuard {
         Path baseNorm = base.toAbsolutePath().normalize();
         // Windows 反斜杠（..\）也视为分隔符，防止把路径当普通文件名绕过校验
         String normalizedRel = relPath.replace('\\', '/');
+        // 显式拒绝绝对路径，不能指望 resolve 之后用 startsWith 兜：
+        // Linux 上 "C:/windows/x" 不是绝对路径（没有前导 /），会被当成 base 下的普通相对路径，
+        // 于是 startsWith(base) 恒为真、静默放行；盘符形态必须自己判。
+        if (normalizedRel.startsWith("/") || isWindowsDrivePath(normalizedRel)) {
+            throw new IllegalArgumentException("不允许绝对路径: " + relPath);
+        }
         Path candidate = baseNorm.resolve(normalizedRel).normalize();
         // 必须先 normalize 再 startsWith：base/../evil 词法前缀是 base 会误判，
         // normalize 还原成 ../evil 后才能识别出逃逸
@@ -43,5 +49,10 @@ public final class SkillPathGuard {
         Path baseNorm = base.toAbsolutePath().normalize();
         Path targetNorm = target.toAbsolutePath().normalize();
         return targetNorm.startsWith(baseNorm);
+    }
+
+    /** 盘符形态（{@code C:} / {@code C:/x} / {@code C:\x}），与平台无关地识别 Windows 绝对路径。 */
+    private static boolean isWindowsDrivePath(String s) {
+        return s.length() >= 2 && s.charAt(1) == ':' && Character.isLetter(s.charAt(0));
     }
 }
