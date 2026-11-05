@@ -1,5 +1,7 @@
 package com.yangtze.bankwarning.ai.tool;
 
+import com.yangtze.bankwarning.ai.context.AiCaller;
+import com.yangtze.bankwarning.ai.service.TaskContextService;
 import com.yangtze.bankwarning.ai.service.VisualizationService;
 import io.agentscope.core.tool.Tool;
 import io.agentscope.core.tool.ToolParam;
@@ -13,9 +15,12 @@ public class VisualizationTools {
 
     private static final Logger log = LoggerFactory.getLogger(VisualizationTools.class);
     private final VisualizationService vizService;
+    /** 归属校验用；出图服务本身是黑盒（Python 端按 id 取数），只能在进它之前挡一道。 */
+    private final TaskContextService taskContextService;
 
-    public VisualizationTools(VisualizationService vizService) {
+    public VisualizationTools(VisualizationService vizService, TaskContextService taskContextService) {
         this.vizService = vizService;
+        this.taskContextService = taskContextService;
     }
 
     // 分幅三个参数必须 required = false：@ToolParam 默认 required = true，
@@ -35,9 +40,17 @@ public class VisualizationTools {
                     description = "经度方向分块数，1=不分块（缺省1）") Integer splitCols,
             @ToolParam(name = "split_tiles", required = false,
                     description = "逐幅自定义经纬度边界的 JSON 数组，"
-                            + "每项可含 row/col 与 west/south/east/north，缺省的边沿用均分网格的对应边界") String splitTiles) {
-        log.info("[tool] generating risk distribution map, taskId={}, split={}x{}, tiles={}",
-                taskId, splitRows, splitCols, splitTiles);
+                            + "每项可含 row/col 与 west/south/east/north，缺省的边沿用均分网格的对应边界") String splitTiles,
+            AiCaller caller) {
+        AiCaller who = AiCaller.orAnonymous(caller);
+        log.info("[tool] generating risk distribution map, taskId={}, split={}x{}, tiles={}, caller={}",
+                taskId, splitRows, splitCols, splitTiles, who);
+        if (!who.isAuthenticated()) {
+            return AiCaller.ANONYMOUS_MESSAGE;
+        }
+        if (!taskContextService.canAccessTask(taskId, who)) {
+            return AiCaller.NOT_FOUND_MESSAGE + "（task_id: " + taskId + "）";
+        }
         Map<String, Object> result = vizService.generateRiskMap(
                 taskId, null, splitRows, splitCols, splitTiles);
         return formatResult(result);
@@ -45,16 +58,32 @@ public class VisualizationTools {
 
     @Tool(name = "generate_scour_heatmap", description = "生成冲淤热力图，显示断面河床高程的冲淤变化情况")
     public String generateScourHeatmap(
-            @ToolParam(name = "section_id", description = "断面ID") String sectionId) {
-        log.info("[tool] generating scour heatmap, sectionId={}", sectionId);
+            @ToolParam(name = "section_id", description = "断面ID") String sectionId,
+            AiCaller caller) {
+        AiCaller who = AiCaller.orAnonymous(caller);
+        log.info("[tool] generating scour heatmap, sectionId={}, caller={}", sectionId, who);
+        if (!who.isAuthenticated()) {
+            return AiCaller.ANONYMOUS_MESSAGE;
+        }
+        if (!taskContextService.canAccessSection(sectionId, who)) {
+            return AiCaller.NOT_FOUND_MESSAGE + "（section_id: " + sectionId + "）";
+        }
         Map<String, Object> result = vizService.generateHeatmap(sectionId, null);
         return formatResult(result);
     }
 
     @Tool(name = "generate_section_comparison_chart", description = "生成断面对比图，对比不同时间点的断面形态变化")
     public String generateSectionComparisonChart(
-            @ToolParam(name = "section_id", description = "断面ID") String sectionId) {
-        log.info("[tool] generating section comparison chart, sectionId={}", sectionId);
+            @ToolParam(name = "section_id", description = "断面ID") String sectionId,
+            AiCaller caller) {
+        AiCaller who = AiCaller.orAnonymous(caller);
+        log.info("[tool] generating section comparison chart, sectionId={}, caller={}", sectionId, who);
+        if (!who.isAuthenticated()) {
+            return AiCaller.ANONYMOUS_MESSAGE;
+        }
+        if (!taskContextService.canAccessSection(sectionId, who)) {
+            return AiCaller.NOT_FOUND_MESSAGE + "（section_id: " + sectionId + "）";
+        }
         Map<String, Object> result = vizService.generateSectionComparison(sectionId, null);
         return formatResult(result);
     }

@@ -7,16 +7,36 @@ import com.yangtze.bankwarning.domain.exception.SectionRecomputeException;
 import com.yangtze.bankwarning.domain.exception.TaskCopyException;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.core.Ordered;
+import org.springframework.core.annotation.Order;
+import org.springframework.http.HttpMethod;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
+import org.springframework.security.access.AccessDeniedException;
+import org.springframework.security.core.AuthenticationException;
+import org.springframework.web.HttpMediaTypeNotSupportedException;
+import org.springframework.web.HttpRequestMethodNotSupportedException;
 import org.springframework.web.bind.MethodArgumentNotValidException;
 import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.ResponseStatus;
 import org.springframework.web.bind.annotation.RestControllerAdvice;
+import org.springframework.web.servlet.resource.NoResourceFoundException;
 
 import java.util.LinkedHashMap;
 import java.util.Map;
+import java.util.Set;
 
+/**
+ * 全局兜底：业务异常 → 语义化状态码，未知异常 → 500。
+ *
+ * <p><b>与 {@code bank-warning-security} 的 {@code GlobalExceptionHandler} 的关系</b>：
+ * Spring 的 {@code ExceptionHandlerExceptionResolver} 是「按 advice 顺序，第一个能匹配的
+ * advice 整包胜出」，<b>不</b>跨 advice 比较异常精确度。两边都声明 {@code Exception} 兜底时，
+ * 谁先谁后决定一切 —— 而被 {@code Exception} 接住的那一方，其专用 handler 全部变成死代码。
+ * <p>因此这里显式声明 {@link Ordered#LOWEST_PRECEDENCE}：安全模块的 401/403/404
+ * （用户不存在 / 凭证错误 / 无权操作）优先，本类只做应用层兜底。
+ */
+@Order(Ordered.LOWEST_PRECEDENCE)
 @RestControllerAdvice
 public class ApiExceptionHandler {
 
@@ -100,6 +120,79 @@ public class ApiExceptionHandler {
         log.warn("[api-error] bank geometry rejected({}): {}", exception.getCode(), exception.getMessage());
         return ResponseEntity.status(exception.getStatus())
                 .body(error(exception.getCode(), exception.getMessage(), null));
+    }
+
+    /**
+     * HTTP 方法用错 = 405，不是 500。
+     *
+     * <p>这条以前掉进 {@link #handleGeneric}，于是「请求方法不对」被记成
+     * {@code internal error} 并打满 97 行栈。后果有三：
+     * <ol>
+     *   <li>客户端拿到 500 而不是 405，监控里「探针方法配错」与「服务真崩」无法区分；</li>
+     *   <li>健康检查探针打错接口时，每次 ~16KB 堆栈，5 秒一轮 ≈ 270MB/天；</li>
+     *   <li>真正的 500 被这堆噪音淹没。</li>
+     * </ol>
+     */
+    @ExceptionHandler(HttpRequestMethodNotSupportedException.class)
+    @ResponseStatus(HttpStatus.METHOD_NOT_ALLOWED)
+    public Map<String, Object> handleMethodNotSupported(HttpRequestMethodNotSupportedException exception) {
+        Set<HttpMethod> supported = exception.getSupportedHttpMethods();
+        log.warn("[api-error] method not allowed: {} (supported: {})", exception.getMethod(), supported);
+        return error(
+                "METHOD_NOT_ALLOWED",
+                exception.getMessage(),
+                supported == null ? null : Map.<String, Object>of("supported", supported));
+    }
+
+    /**
+     * 请求体的 Content-Type 不支持 = 415，不是 500。同样是「请求本身有问题」，与代码缺陷无关。
+     */
+    @ExceptionHandler(HttpMediaTypeNotSupportedException.class)
+    @ResponseStatus(HttpStatus.UNSUPPORTED_MEDIA_TYPE)
+    public Map<String, Object> handleMediaTypeNotSupported(HttpMediaTypeNotSupportedException exception) {
+        log.warn("[api-error] unsupported media type: {} (supported: {})",
+                exception.getContentType(), exception.getSupportedMediaTypes());
+        return error("UNSUPPORTED_MEDIA_TYPE", exception.getMessage(), null);
+    }
+
+    /**
+     * 路径不存在 = 404，不是 500。Spring 6.1+ 起「没有匹配的 handler」由
+     * {@code ResourceHttpRequestHandler} 抛 {@link NoResourceFoundException}，
+     * 不加这条就会掉进兜底被记成内部错误 —— 用户敲错一个 URL 也会让日志红一片。
+     */
+    @ExceptionHandler(NoResourceFoundException.class)
+    @ResponseStatus(HttpStatus.NOT_FOUND)
+    public Map<String, Object> handleNoResource(NoResourceFoundException exception) {
+        log.warn("[api-error] no handler for path: {}", exception.getResourcePath());
+        return error("NOT_FOUND", exception.getMessage(), null);
+    }
+
+    /**
+     * 认证失败 = 401。{@code AuthController#login} 里 {@code authenticationManager.authenticate()}
+     * 抛的是 Spring Security 的 {@code BadCredentialsException} / {@code UsernameNotFoundException}
+     * （不是 security 模块自定义的 {@code InvalidCredentialsException}），以前掉进兜底变成 500 ——
+     * 前端于是只能显示「登录失败 (500)」，看不到原因。
+     *
+     * <p>对外统一话术「用户名或密码错误」，不回显原始 message：区分「用户不存在」和「密码错」
+     * 等于把账号枚举接口白送出去。
+     */
+    @ExceptionHandler(AuthenticationException.class)
+    @ResponseStatus(HttpStatus.UNAUTHORIZED)
+    public Map<String, Object> handleAuthentication(AuthenticationException exception) {
+        log.warn("[api-error] authentication failed: {}", exception.getMessage());
+        return error("INVALID_CREDENTIALS", "用户名或密码错误", null);
+    }
+
+    /**
+     * 已登录但权限不足 = 403。{@code @PreAuthorize} 抛出的 {@code AccessDeniedException}
+     * 在方法级生效，不会经过过滤器链的 ExceptionTranslationFilter，以前同样掉进兜底变 500 ——
+     * 普通用户点管理入口看到的是「服务器内部错误」而不是「无权操作」。
+     */
+    @ExceptionHandler(AccessDeniedException.class)
+    @ResponseStatus(HttpStatus.FORBIDDEN)
+    public Map<String, Object> handleAccessDenied(AccessDeniedException exception) {
+        log.warn("[api-error] access denied: {}", exception.getMessage());
+        return error("PERMISSION_DENIED", "无权执行该操作", null);
     }
 
     @ExceptionHandler(Exception.class)

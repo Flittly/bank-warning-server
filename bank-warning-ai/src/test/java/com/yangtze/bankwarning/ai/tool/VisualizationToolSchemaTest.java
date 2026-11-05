@@ -18,6 +18,10 @@ import static org.junit.jupiter.api.Assertions.*;
  * 默认是 true，若分幅三参数被声明成必填，LLM 少传就会在 ToolExecutor 的
  * schema 校验处被拒 —— 工具直接返回 error，报告里的风险分布图必然缺失。
  * 因此分幅参数必须显式 required = false。
+ *
+ * <p>另一半守卫是**注入参数不能泄漏进 Schema**：{@code AiCaller} 是框架的「上下文字参」
+ * （不带 {@code @ToolParam}），一旦被当成普通参数，模型会看到一个必填的 caller 字段、
+ * 且无法满足 ⇒ 所有出图调用在 schema 校验处就挂了。
  */
 @DisplayName("出图工具的 JSON Schema 契约")
 class VisualizationToolSchemaTest {
@@ -25,7 +29,7 @@ class VisualizationToolSchemaTest {
     @SuppressWarnings("unchecked")
     private Map<String, Object> schemaOf(String toolName) {
         Toolkit toolkit = new Toolkit();
-        toolkit.registerTool(new VisualizationTools(null));
+        toolkit.registerTool(new VisualizationTools(null, null));
         AgentTool tool = toolkit.getTool(toolName);
         assertNotNull(tool, "工具未注册: " + toolName);
         return tool.getParameters();
@@ -48,5 +52,18 @@ class VisualizationToolSchemaTest {
                 : List.of();
         assertEquals(List.of("task_id"), requiredList,
                 "generate_risk_distribution_map 只应必填 task_id，分幅参数必须可选");
+    }
+
+    @Test
+    @DisplayName("注入的身份参数不得出现在任何工具的 schema 里")
+    void callerParamIsNotExposed() {
+        for (String tool : List.of("generate_risk_distribution_map",
+                "generate_scour_heatmap", "generate_section_comparison_chart")) {
+            Map<String, Object> schema = schemaOf(tool);
+            @SuppressWarnings("unchecked")
+            Map<String, Object> properties = (Map<String, Object>) schema.get("properties");
+            assertFalse(properties.containsKey("caller"),
+                    tool + " 的 schema 泄漏了 AiCaller 参数，模型会被要求传一个它给不出的值");
+        }
     }
 }

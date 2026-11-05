@@ -7,11 +7,13 @@ import com.yangtze.bankwarning.ai.service.KnowledgeService;
 import com.yangtze.bankwarning.ai.service.NacosSkillRepositoryHolder;
 import com.yangtze.bankwarning.ai.service.PdfService;
 import com.yangtze.bankwarning.ai.service.SkillVersionService;
+import com.yangtze.bankwarning.ai.service.TaskContextService;
 import com.yangtze.bankwarning.ai.service.VisualizationService;
 import com.yangtze.bankwarning.ai.service.WeatherService;
 import com.yangtze.bankwarning.ai.tool.KnowledgeQueryTool;
 import com.yangtze.bankwarning.ai.tool.PdfTools;
 import com.yangtze.bankwarning.ai.tool.RiskDataTools;
+import com.yangtze.bankwarning.ai.tool.TaskLookupTools;
 import com.yangtze.bankwarning.ai.tool.VisualizationTools;
 import com.yangtze.bankwarning.ai.tool.WeatherTools;
 import io.agentscope.harness.agent.HarnessAgent;
@@ -69,13 +71,41 @@ public class AgentScopeConfig {
             @Value("${agentscope.dashscope.embedding-model-name:text-embedding-v3}") String modelName,
             @Value("${agentscope.dashscope.embedding-dimensions:1024}") int dimensions) {
         log.info("[config] DashScope apiKey={}, modelName={}, dimensions={}",
-                apiKey != null ? apiKey.substring(0, Math.min(8, apiKey.length())) + "..." : "null",
-                modelName, dimensions);
+                maskSecret(apiKey), modelName, dimensions);
+
+        // DashScopeTextEmbedding.build() 对空 apiKey 会直接抛 IllegalStateException，
+        // 而本方法是启动期 @Bean。若不兜底，「清空 key」这一运维动作会让整个应用起不来。
+        // 这里降级为「构造成功、调用即报错」的占位实现：启动不受影响，
+        // 知识库相关接口在真正被调用时返回明确原因。
+        if (apiKey == null || apiKey.isBlank()) {
+            log.warn("[config] DashScope apiKey 未配置，知识库（向量嵌入/检索）将不可用；"
+                    + "应用其余功能不受影响。设置环境变量 DASHSCOPE_API_KEY 可启用。");
+            return new UnconfiguredEmbeddingModel(dimensions);
+        }
+
         return DashScopeTextEmbedding.builder()
                 .apiKey(apiKey)
                 .modelName(modelName)
                 .dimensions(dimensions)
                 .build();
+    }
+
+    /**
+     * 密钥只报「有没有配 / 多长 / 末 4 位」，不报前缀。
+     *
+     * <p>原来打的是前 8 位（形如 {@code sk-10359...}）：{@code sk-} 前缀本身是固定的，
+     * 等于白送 5 位有效字符；而这类启动日志通常会被 ELK / 云日志原样采走。
+     * 末 4 位够用来核「线上到底加载了哪把 key」，又不构成实质泄露。
+     */
+    private static String maskSecret(String secret) {
+        if (secret == null || secret.isBlank()) {
+            return "unset";
+        }
+        String value = secret.trim();
+        if (value.length() <= 8) {
+            return "set(len=" + value.length() + ")";
+        }
+        return "set(len=" + value.length() + ",tail=" + value.substring(value.length() - 4) + ")";
     }
 
     @Bean
@@ -114,8 +144,10 @@ public class AgentScopeConfig {
     }
 
     @Bean
-    public VisualizationTools visualizationTools(VisualizationService vizService) {
-        return new VisualizationTools(vizService);
+    public VisualizationTools visualizationTools(VisualizationService vizService,
+                                                 TaskContextService taskContextService) {
+        // 出图服务按 id 直接取数、自己不做归属判断，所以工具层必须前置挡一道
+        return new VisualizationTools(vizService, taskContextService);
     }
 
     @Bean
@@ -133,18 +165,35 @@ public class AgentScopeConfig {
         return new KnowledgeQueryTool(knowledgeService);
     }
 
+    /**
+     * 任务上下文服务：把「用户拖进对话的任务」和「按名字搜任务」两条入口合到一处，
+     * SQL 与文案只有一份（{@code search_tasks} 工具和对话 prompt 用的是同一段实现）。
+     */
+    @Bean
+    public TaskContextService taskContextService(JdbcTemplate jdbcTemplate) {
+        return new TaskContextService(jdbcTemplate);
+    }
+
+    @Bean
+    public TaskLookupTools taskLookupTools(TaskContextService taskContextService) {
+        return new TaskLookupTools(taskContextService);
+    }
+
     @Bean
     public Toolkit reportToolkit(RiskDataTools riskDataTools,
                                  VisualizationTools visualizationTools,
                                  WeatherTools weatherTools,
                                  PdfTools pdfTools,
-                                 KnowledgeQueryTool knowledgeQueryTool) {
+                                 KnowledgeQueryTool knowledgeQueryTool,
+                                 TaskLookupTools taskLookupTools) {
         Toolkit toolkit = new Toolkit();
         toolkit.registerTool(riskDataTools);
         toolkit.registerTool(visualizationTools);
         toolkit.registerTool(weatherTools);
         toolkit.registerTool(pdfTools);
         toolkit.registerTool(knowledgeQueryTool);
+        // 必须注册：它是唯一能把任务名换成 task_id 的工具，缺了它模型只能编 id
+        toolkit.registerTool(taskLookupTools);
         return toolkit;
     }
 

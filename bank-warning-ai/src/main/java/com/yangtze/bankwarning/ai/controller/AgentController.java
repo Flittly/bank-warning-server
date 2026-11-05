@@ -1,11 +1,14 @@
 package com.yangtze.bankwarning.ai.controller;
 
+import com.yangtze.bankwarning.ai.context.AiCaller;
 import com.yangtze.bankwarning.ai.middleware.ReasoningTraceMiddleware;
 import com.yangtze.bankwarning.ai.security.SkillPathGuard;
 import com.yangtze.bankwarning.ai.service.KnowledgeService;
 import com.yangtze.bankwarning.ai.service.ModelService;
+import com.yangtze.bankwarning.ai.service.TaskContextService;
 import com.yangtze.bankwarning.ai.workflow.PlanProgress;
 import com.yangtze.bankwarning.ai.workflow.ReportWorkflowService;
+import com.yangtze.bankwarning.security.security.SecurityUtils;
 import io.agentscope.harness.agent.HarnessAgent;
 import io.agentscope.core.agent.RuntimeContext;
 import io.agentscope.core.event.AgentEvent;
@@ -54,6 +57,7 @@ public class AgentController {
     private final ReportWorkflowService reportWorkflow;
     private final ReasoningTraceMiddleware traceMiddleware;
     private final KnowledgeService knowledgeService;
+    private final TaskContextService taskContextService;
     private final com.fasterxml.jackson.databind.ObjectMapper objectMapper; // 注入 AgentScopeConfig 里那个（Jackson 2）
 
     @Value("${app.ai.visualization.output-dir:visualization/output}")
@@ -64,6 +68,7 @@ public class AgentController {
             ModelService modelService,
             ReportWorkflowService reportWorkflow,
             KnowledgeService knowledgeService,
+            TaskContextService taskContextService,
             @Qualifier("chatTraceMiddleware") ReasoningTraceMiddleware traceMiddleware,
             com.fasterxml.jackson.databind.ObjectMapper objectMapper) {
         this.defaultChatAgent = defaultChatAgent;
@@ -71,6 +76,7 @@ public class AgentController {
         this.reportWorkflow = reportWorkflow;
         this.traceMiddleware = traceMiddleware;
         this.knowledgeService = knowledgeService;
+        this.taskContextService = taskContextService;
         this.objectMapper = objectMapper;
     }
 
@@ -185,13 +191,39 @@ public class AgentController {
         String modelKey = (String) body.getOrDefault("model", "");
         List<String> skills = (List<String>) body.get("skills");
         List<String> reportIds = (List<String>) body.get("reportIds");
+        // 用户从结果页把任务拖进对话时，前端发的是 taskIds（不是任务名）。
+        // 这里必须把它解析成「名称 + task_id + 状态」拼进 prompt：模型手里所有工具都只认
+        // task_id，拿不到就会编一个，最后变成一句查无此任务的「未查询到」。
+        // （历史上这个字段被整体忽略了，前端发了也没人读，见 AgentController 的旧实现。）
+        List<String> taskIds = asStringList(body.get("taskIds"));
         HarnessAgent agent = modelService.getOrCreateAgent(modelKey, defaultChatAgent);
         if (agent == null) agent = defaultChatAgent;
+
+        // 身份必须**在这里**取：prepare() 还在 Tomcat 请求线程上，SecurityContext 有效。
+        // 工具调用跑在模型 ReAct 循环自己的执行线程上，那里 ThreadLocal 是空的 ——
+        // 早先工具层直接读 SecurityContext，读到的 null 被当成「管理员」，于是普通用户
+        // 能搜到别人的任务。现在把身份打包成 AiCaller 放进 RuntimeContext，
+        // 由框架按类型注入到工具方法里（无 @ToolParam ⇒ 不进 Schema、模型改不了）。
+        SecurityUtils.DataScope scope = SecurityUtils.getDataScope();
+        AiCaller caller = AiCaller.of(scope);
         RuntimeContext ctx = RuntimeContext.builder()
                 .sessionId(sessionId)
+                .userId(scope.userId() == null ? null : String.valueOf(scope.userId()))
+                .put(AiCaller.class, caller)
                 .build();
+        if (!caller.isAuthenticated()) {
+            // 不阻断整轮对话（可能只是鉴权配置问题），但工具层会一律拒绝取数，
+            // 模型会把这个原因原样告诉用户，而不是给出「任务不存在」这种误导性结论。
+            log.warn("[chat] 未取到登录身份，本轮工具将全部拒绝取数: sessionId={}", sessionId);
+        }
 
         StringBuilder prompt = new StringBuilder();
+
+        // 锁定任务放最前面：它最短、优先级最高，放在报告全文后面会被淹掉
+        String taskBlock = taskContextService.describeForPrompt(taskIds, caller);
+        if (!taskBlock.isEmpty()) {
+            prompt.append(taskBlock).append('\n');
+        }
 
         // 预检索：自动查知识库，将相关知识拼入 prompt（不等 agent 调用 query_knowledge）
         try {
@@ -473,6 +505,25 @@ public class AgentController {
         StreamAborted() {
             super("SSE client disconnected", null, false, false);
         }
+    }
+
+    /**
+     * 把请求体里的数组字段读成字符串列表。
+     *
+     * <p>null / 非数组一律当空列表（请求体是 Map，字段类型完全由前端决定）。
+     * 元素用 String.valueOf 兜底：前端偶尔会把 id 传成数字，直接强转会 ClassCastException。
+     */
+    private static List<String> asStringList(Object raw) {
+        if (!(raw instanceof List<?> list) || list.isEmpty()) {
+            return List.of();
+        }
+        List<String> out = new ArrayList<>(list.size());
+        for (Object item : list) {
+            if (item != null) {
+                out.add(String.valueOf(item));
+            }
+        }
+        return out;
     }
 
     /**

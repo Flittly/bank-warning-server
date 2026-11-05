@@ -1,11 +1,13 @@
 package com.yangtze.bankwarning.ai.tool;
 
+import com.yangtze.bankwarning.ai.context.AiCaller;
 import io.agentscope.core.tool.Tool;
 import io.agentscope.core.tool.ToolParam;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.jdbc.core.JdbcTemplate;
 
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.stream.Collectors;
@@ -19,33 +21,61 @@ public class RiskDataTools {
         this.jdbcTemplate = jdbcTemplate;
     }
 
+    /**
+     * 查询一个任务的全部断面风险结果。
+     *
+     * <p><b>归属校验在 SQL 里做（{@code EXISTS} 子查询），不额外查一次库</b>：
+     * 早先这条 SQL 只有 {@code WHERE r.task_id = ?}，只要知道 task_id 就能读别人的数据
+     * （{@code search_tasks} 又会把 id 泄露出去），构成完整的越权链。
+     *
+     * <p>为什么用 {@code EXISTS} 而不是 {@code JOIN tasks}：{@code tasks.task_id} 没有唯一约束
+     * （主键是自增 id），JOIN 在存在重复 task_id 时会把结果行数放大，报告里的断面数就虚高了。
+     *
+     * <p>无权与不存在**返回同一句话术**，否则普通用户可以靠回显差异枚举出别人的 task_id。
+     *
+     * @param caller 由 {@code RuntimeContext} 注入的身份（无 {@code @ToolParam} ⇒ 不进 Schema）
+     */
     @Tool(name = "query_risk_data", description = "查询任务的所有断面风险评估数据，包括断面信息、风险等级、指标数据和所属银行")
-    public String queryRiskData(@ToolParam(name = "task_id", description = "任务ID") String taskId) {
-        log.info("[tool] querying risk data, taskId={}", taskId);
+    public String queryRiskData(@ToolParam(name = "task_id", description = "任务ID") String taskId,
+                                AiCaller caller) {
+        AiCaller who = AiCaller.orAnonymous(caller);
+        log.info("[tool] querying risk data, taskId={}, caller={}", taskId, who);
+        if (!who.isAuthenticated()) {
+            return AiCaller.ANONYMOUS_MESSAGE;
+        }
 
         // 坐标必须一并查回：报告要按经纬度分区汇总（与出图同一套分区），
         // 且 Step 4 的天气查询需要 (lng, lat)——此前不带坐标，天气只能拿到 null。
         // 口径与 VisualizationService.queryRiskData 完全一致：
         // 断面端点在 cross_sections.geom 上（banks.geom 不被写入，不要用它）。
-        String sql = "SELECT r.section_id, cs.section_name, r.risk_level, " +
-                "r.indicators->>'result' as risk_value, b.bank_name, " +
-                "ST_X(ST_StartPoint(cs.geom)) as start_lng, " +
-                "ST_Y(ST_StartPoint(cs.geom)) as start_lat, " +
-                "ST_X(ST_EndPoint(cs.geom)) as end_lng, " +
-                "ST_Y(ST_EndPoint(cs.geom)) as end_lat " +
-                "FROM bank_risk_results r " +
-                "LEFT JOIN cross_sections cs ON r.section_id = cs.section_id " +
-                "LEFT JOIN banks b ON COALESCE(cs.bank_id, r.bank_id) = b.bank_id " +
-                "WHERE r.task_id = ? AND r.deleted_at IS NULL " +
+        StringBuilder sql = new StringBuilder("SELECT r.section_id, cs.section_name, r.risk_level, ")
+                .append("r.indicators->>'result' as risk_value, b.bank_name, ")
+                .append("ST_X(ST_StartPoint(cs.geom)) as start_lng, ")
+                .append("ST_Y(ST_StartPoint(cs.geom)) as start_lat, ")
+                .append("ST_X(ST_EndPoint(cs.geom)) as end_lng, ")
+                .append("ST_Y(ST_EndPoint(cs.geom)) as end_lat ")
+                .append("FROM bank_risk_results r ")
+                .append("LEFT JOIN cross_sections cs ON r.section_id = cs.section_id ")
+                .append("LEFT JOIN banks b ON COALESCE(cs.bank_id, r.bank_id) = b.bank_id ")
+                .append("WHERE r.task_id = ? AND r.deleted_at IS NULL ")
                 // 人工标记无效的断面不进报告取数：与前端图面、风险段汇总同一口径，
                 // 否则「我明明藏起来的断面」会重新出现在报告文字里。
-                "AND COALESCE(cs.manual_invalid, false) = false " +
-                "ORDER BY r.risk_level DESC";
+                .append("AND COALESCE(cs.manual_invalid, false) = false ");
+        List<Object> args = new ArrayList<>();
+        args.add(taskId);
+        if (!who.seeAll()) {
+            // 管理员不加这一段（看全部）；普通用户只认自己名下的任务
+            sql.append("AND EXISTS (SELECT 1 FROM tasks t WHERE t.task_id = r.task_id")
+                    .append(" AND t.deleted_at IS NULL AND t.user_id = ?) ");
+            args.add(who.userId());
+        }
+        sql.append("ORDER BY r.risk_level DESC");
 
-        List<Map<String, Object>> rows = jdbcTemplate.queryForList(sql, taskId);
+        List<Map<String, Object>> rows = jdbcTemplate.queryForList(sql.toString(), args.toArray());
 
         if (rows.isEmpty()) {
-            return "未查询到任务ID为 " + taskId + " 的风险评估数据。";
+            // 三种情况共用一句话：任务不存在 / 已删除 / 不属于你 —— 对外不可区分
+            return AiCaller.NOT_FOUND_MESSAGE + "（task_id: " + taskId + "）";
         }
 
         int[] counts = new int[3]; // high, medium, low

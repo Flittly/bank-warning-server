@@ -3,6 +3,7 @@ package com.yangtze.bankwarning.ai.workflow;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.yangtze.bankwarning.ai.context.AiCaller;
 import com.yangtze.bankwarning.ai.middleware.ReasoningTraceMiddleware;
 import com.yangtze.bankwarning.ai.service.MarkdownReportService;
 import com.yangtze.bankwarning.ai.service.PartitionSectionCsvService;
@@ -14,6 +15,7 @@ import com.yangtze.bankwarning.ai.tool.VisualizationTools;
 import com.yangtze.bankwarning.ai.tool.WeatherTools;
 import com.yangtze.bankwarning.security.security.SecurityUtils;
 import io.agentscope.core.ReActAgent;
+import io.agentscope.core.agent.RuntimeContext;
 import io.agentscope.core.message.Msg;
 import io.agentscope.core.message.UserMessage;
 import io.agentscope.core.model.Model;
@@ -179,6 +181,11 @@ public class ReportWorkflowService {
         WorkflowState state = resuming
                 ? WorkflowState.fromJson(json, existing.stepStatesJson(), existing.contextJson())
                 : new WorkflowState();
+        // 身份在请求线程抓一次，随 state 传下去：本工作流每一步都是「让模型去调工具」，
+        // 而工具跑在 ReAct 线程上读不到 SecurityContext。不传的话 Step 1 的
+        // query_risk_data 会因归属校验失败而拿不到数据，报告直接空掉。
+        // 从 DB 恢复的 state 里 caller 为 null，toolContext() 会在当时线程重取一次。
+        state.caller = AiCaller.of(SecurityUtils.getDataScope());
         String runId = resuming ? existing.runId() : UUID.randomUUID().toString();
 
         // 分幅参数写进 context（随 checkpoint 落库）：
@@ -372,6 +379,24 @@ public class ReportWorkflowService {
         };
     }
 
+    /**
+     * 给「让模型去调工具」的那一轮准备运行时上下文。
+     *
+     * <p>为什么要显式传：本工作流每一步都是把指令拼进 prompt、让模型去调
+     * {@code query_risk_data} / {@code generate_*}。工具执行在 ReAct 线程上，
+     * 读不到 SecurityContext（ThreadLocal 不跨线程），而工具层的归属校验会
+     * fail-closed 拒绝 ⇒ 报告会「静默」变成空数据。
+     *
+     * <p>{@code state.caller} 为空（从 DB 恢复的旧 checkpoint）时，在当前线程重新取一次
+     * SecurityContext —— 断点续跑同样发生在 HTTP 请求线程上，取得到。
+     */
+    private RuntimeContext toolContext(WorkflowState state) {
+        AiCaller caller = state.caller != null
+                ? state.caller
+                : AiCaller.of(SecurityUtils.getDataScope());
+        return RuntimeContext.builder().put(AiCaller.class, caller).build();
+    }
+
     private String step1QueryData(String taskId, WorkflowState state) {
         Toolkit toolkit = new Toolkit();
         toolkit.registerTool(riskDataTools);
@@ -382,7 +407,7 @@ public class ReportWorkflowService {
                 返回工具的原始输出，不要做任何加工。
                 """.formatted(taskId));
 
-        Msg out = agent.call(List.of(new UserMessage("user", "开始查询任务数据"))).block();
+        Msg out = agent.call(List.of(new UserMessage("user", "开始查询任务数据")), toolContext(state)).block();
         String result = out.getTextContent();
         state.context.put("riskDataText", result);
         return "已查询任务 " + taskId + " 的断面风险数据";
@@ -411,7 +436,7 @@ public class ReportWorkflowService {
                 返回工具的原始输出（必须原样返回，尤其是其中的「分区明细(JSON)」一行，不要精简）。
                 """.formatted(taskId));
 
-        Msg out = agent.call(List.of(new UserMessage("user", "开始生成风险分布图"))).block();
+        Msg out = agent.call(List.of(new UserMessage("user", "开始生成风险分布图")), toolContext(state)).block();
         String result = out.getTextContent();
         state.context.put("distributionMapText", result);
         // 兜底捕获：模型若没原样回传，appendChartsFromTrace 还会从中间件的工具结果里再取一次
@@ -478,7 +503,7 @@ public class ReportWorkflowService {
                         4. 把所有结果整理成 JSON 格式：{"断面名": "天气摘要", ...}
                         """.formatted(ctx));
 
-        Msg out = agent.call(List.of(new UserMessage("user", "开始批量查询天气"))).block();
+        Msg out = agent.call(List.of(new UserMessage("user", "开始批量查询天气")), toolContext(state)).block();
         String result = out.getTextContent();
         state.context.put("weatherResultsText", result);
         return "已查询 " + highRisk.size() + " 个高风险断面的天气";
@@ -533,7 +558,7 @@ public class ReportWorkflowService {
                         6. 把所有图片路径整理成 JSON 返回；失败的断面在 JSON 里如实标注失败原因
                         """.formatted(sectionList));
 
-        Msg out = agent.call(List.of(new UserMessage("user", "开始生成断面图"))).block();
+        Msg out = agent.call(List.of(new UserMessage("user", "开始生成断面图")), toolContext(state)).block();
         String result = out.getTextContent();
         state.context.put("sectionChartsText", result);
         return "已为 " + withChart + " 个高风险断面发起出图（" + unresolved + " 个因解析不出 section_id 跳过）";
@@ -613,7 +638,7 @@ public class ReportWorkflowService {
 
         ReActAgent agent = buildMiniAgent("step6_synthesize", toolkit, fullPrompt);
 
-        Msg out = agent.call(List.of(new UserMessage("user", "请开始撰写最终报告"))).block();
+        Msg out = agent.call(List.of(new UserMessage("user", "请开始撰写最终报告")), toolContext(state)).block();
         String report = out.getTextContent();
         state.context.put("finalReport", report);
         return report;
@@ -1174,6 +1199,11 @@ public class ReportWorkflowService {
         final StepState[] stepStates;
         final Map<String, Object> context = new LinkedHashMap<>();
         volatile String lastError;
+        /**
+         * 本次执行的发起人，供 {@link #toolContext} 注入到工具调用上。
+         * 从 DB 恢复的 state 为 null（不随 checkpoint 落库），由 toolContext 兜底重取。
+         */
+        AiCaller caller;
 
         WorkflowState() {
             stepStates = new StepState[STEPS.length];
