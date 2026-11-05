@@ -423,7 +423,13 @@ public class MarkdownReportService {
         if (taskOutputDir == null || taskOutputDir.isBlank()) {
             return null;
         }
-        Matcher m = TASK_DIR_TIMESTAMP_PTN.matcher(new File(taskOutputDir).getName());
+        // 不能直接用 new File(dir).getName()：Linux 上 File 只认 '/'，
+        // "C:\...\report_t1_20261015_143000" 会被整串当成文件名、正则匹配不上而返回 null，
+        // 调用方于是退回 now()，与目录名差几秒 ⇒ 导出/删除按文件名反解目录时找不到 CSV。
+        String path = taskOutputDir.replace('\\', '/');
+        int slash = path.lastIndexOf('/');
+        String dirName = slash >= 0 ? path.substring(slash + 1) : path;
+        Matcher m = TASK_DIR_TIMESTAMP_PTN.matcher(dirName);
         return m.matches() ? m.group(1) : null;
     }
 }
