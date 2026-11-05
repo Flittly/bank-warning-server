@@ -4,6 +4,7 @@
 
     <resultMap id="BasicParamResultMap" type="com.yangtze.bankwarning.domain.po.BasicParamPO">
         <id property="id" column="id"/>
+        <result property="taskId" column="task_id"/>
         <result property="paramId" column="param_id"/>
         <result property="paramName" column="param_name"/>
         <result property="benchSegment" column="bench_segment"/>
@@ -27,8 +28,13 @@
         <result property="userId" column="user_id"/>
     </resultMap>
 
+    <!-- 模板库：task_id IS NULL。任务参数（每个任务一份的私有副本）不进这个列表。 -->
     <select id="selectAll" resultMap="BasicParamResultMap">
-        SELECT * FROM basic_params WHERE deleted_at IS NULL AND (user_id = #{userId} OR #{userId, jdbcType=BIGINT} IS NULL) ORDER BY id DESC
+        SELECT * FROM basic_params
+        WHERE deleted_at IS NULL
+          AND task_id IS NULL
+          AND (user_id = #{userId} OR #{userId, jdbcType=BIGINT} IS NULL)
+        ORDER BY id DESC
     </select>
 
     <select id="selectByParamId" resultMap="BasicParamResultMap">
@@ -39,18 +45,33 @@
         SELECT * FROM basic_params WHERE id = #{id} AND deleted_at IS NULL AND (user_id = #{userId} OR #{userId, jdbcType=BIGINT} IS NULL)
     </select>
 
+    <select id="selectByTaskId" resultMap="BasicParamResultMap">
+        SELECT * FROM basic_params
+        WHERE task_id = #{taskId} AND deleted_at IS NULL AND (user_id = #{userId} OR #{userId, jdbcType=BIGINT} IS NULL)
+        ORDER BY id DESC
+        LIMIT 1
+    </select>
+
+    <select id="selectByTaskIdIncludingDeleted" resultMap="BasicParamResultMap">
+        SELECT * FROM basic_params
+        WHERE task_id = #{taskId} AND (user_id = #{userId} OR #{userId, jdbcType=BIGINT} IS NULL)
+        ORDER BY id DESC
+        LIMIT 1
+    </select>
+
     <insert id="insert" parameterType="com.yangtze.bankwarning.domain.po.BasicParamPO" useGeneratedKeys="true" keyProperty="id">
         INSERT INTO basic_params (
             param_id, param_name, bench_segment, current_timepoint, set_name, water_qs, tidal_level,
             bench_id, ref_id, hs, hc, protection_level, control_level,
-            comparison_timepoint, risk_thresholds, weights, other_params, user_id
+            comparison_timepoint, risk_thresholds, weights, other_params, user_id, task_id
         ) VALUES (
             #{paramId}, #{paramName}, #{benchSegment}, #{currentTimepoint}, #{setName}, #{waterQs}, #{tidalLevel},
             #{benchId}, #{refId}, #{hs}, #{hc}, #{protectionLevel}, #{controlLevel},
-            #{comparisonTimepoint}, #{riskThresholds}::jsonb, #{weights}::jsonb, #{otherParams}::jsonb, #{userId}
+            #{comparisonTimepoint}, #{riskThresholds}::jsonb, #{weights}::jsonb, #{otherParams}::jsonb, #{userId}, #{taskId}
         )
     </insert>
 
+    <!-- task_id 刻意不参与 UPDATE：参数集创建后归属不可变，避免一次误操作把任务参数变成模板。 -->
     <update id="update" parameterType="com.yangtze.bankwarning.domain.po.BasicParamPO">
         UPDATE basic_params
         SET param_name = COALESCE(#{paramName}, param_name),
@@ -70,6 +91,16 @@
             weights = COALESCE(#{weights}::jsonb, weights),
             other_params = COALESCE(#{otherParams}::jsonb, other_params)
         WHERE param_id = #{paramId} AND deleted_at IS NULL AND (user_id = #{userId} OR #{userId, jdbcType=BIGINT} IS NULL)
+    </update>
+
+    <update id="softDeleteByTaskId">
+        UPDATE basic_params SET deleted_at = CURRENT_TIMESTAMP
+        WHERE task_id = #{taskId} AND deleted_at IS NULL AND (user_id = #{userId} OR #{userId, jdbcType=BIGINT} IS NULL)
+    </update>
+
+    <update id="reviveByTaskId">
+        UPDATE basic_params SET deleted_at = NULL
+        WHERE task_id = #{taskId} AND (user_id = #{userId} OR #{userId, jdbcType=BIGINT} IS NULL)
     </update>
 
 </mapper>

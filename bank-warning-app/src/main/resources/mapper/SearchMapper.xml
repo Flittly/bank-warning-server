@@ -1,0 +1,233 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
+        "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="com.yangtze.bankwarning.mapper.SearchMapper">
+
+    <resultMap id="searchHitMap" type="com.yangtze.bankwarning.domain.dto.SearchHitResponse">
+        <result property="kind" column="kind"/>
+        <result property="id" column="id"/>
+        <result property="title" column="title"/>
+        <result property="snippet" column="snippet"/>
+        <result property="taskId" column="task_id"/>
+        <result property="sectionId" column="section_id"/>
+        <result property="bankId" column="bank_id"/>
+        <result property="demKey" column="dem_key"/>
+        <result property="score" column="score"/>
+        <result property="lng" column="lng"/>
+        <result property="lat" column="lat"/>
+        <result property="updatedAt" column="updated_at"/>
+        <result property="duplicateCount" column="duplicate_count"/>
+    </resultMap>
+
+    <!--
+      六段 UNION ALL 的列顺序/类型必须严格一致（PostgreSQL 按位置合并）。
+      w_match 是「匹配质量」：等值 3.0 > 前缀 2.0 > 子串 1.0，
+      最终 score = w_field * w_match，字段权重 任务1.0 > 岸段0.9 > 断面0.8 > DEM0.75 > 备注0.7 > 报告0.7。
+
+      为什么每段都带 deleted_at IS NULL：软删表有 5 个，且 clearTaskResults() 会整批软删，
+      漏一处就会把已删结果搜出来。
+
+      为什么 user_id 过滤写成 (x = #{userId} OR #{userId} IS NULL)：
+      admin 的 getCurrentUserIdForDataFilter() 返回 null 表示「不过滤」，
+      但 pgjdbc 对 null 参数推断不出类型，必须显式 jdbcType=BIGINT。
+
+      为什么 window 分区用 (kind, title)：断面名「断面6」在 90 个任务里各有一条，
+      不去重会把整个结果列表淹掉。rn<=3 表示同名最多露 3 条，其余靠 duplicate_count 提示「还有 N 条」。
+    -->
+    <select id="search" resultMap="searchHitMap">
+        WITH hit AS (
+            SELECT 'task'::text AS kind,
+                   t.task_id AS id,
+                   t.task_name AS title,
+                   coalesce(t.description, '') AS snippet,
+                   t.task_id AS task_id,
+                   NULL::text AS section_id,
+                   NULL::text AS bank_id,
+                   NULL::text AS dem_key,
+                   1.0::float8 AS w_field,
+                   t.updated_at AS updated_at,
+                   NULL::float8 AS lng,
+                   NULL::float8 AS lat,
+                   CASE WHEN t.task_name = #{exact,jdbcType=VARCHAR} THEN 3.0
+                        WHEN t.task_name ILIKE #{prefix,jdbcType=VARCHAR} THEN 2.0
+                        ELSE 1.0 END AS w_match
+            FROM tasks t
+            WHERE t.deleted_at IS NULL
+              AND (t.user_id = #{userId,jdbcType=BIGINT} OR #{userId,jdbcType=BIGINT} IS NULL)
+              AND (t.task_name ILIKE #{pattern,jdbcType=VARCHAR}
+                   OR t.description ILIKE #{pattern,jdbcType=VARCHAR})
+
+            UNION ALL
+
+            SELECT 'bank'::text,
+                   b.bank_id,
+                   b.bank_name,
+                   coalesce(b.description, ''),
+                   NULL::text,
+                   NULL::text,
+                   b.bank_id,
+                   NULL::text,
+                   0.9::float8,
+                   b.updated_at,
+                   NULL::float8,
+                   NULL::float8,
+                   CASE WHEN b.bank_name = #{exact,jdbcType=VARCHAR} THEN 3.0
+                        WHEN b.bank_name ILIKE #{prefix,jdbcType=VARCHAR} THEN 2.0
+                        ELSE 1.0 END
+            FROM banks b
+            WHERE b.deleted_at IS NULL
+              AND (b.user_id = #{userId,jdbcType=BIGINT} OR #{userId,jdbcType=BIGINT} IS NULL)
+              AND b.bank_name ILIKE #{pattern,jdbcType=VARCHAR}
+
+            UNION ALL
+
+            SELECT 'section'::text,
+                   s.section_id,
+                   s.section_name,
+                   coalesce(s.param_name, ''),
+                   s.task_id,
+                   s.section_id,
+                   s.bank_id,
+                   NULL::text,
+                   0.8::float8,
+                   s.updated_at,
+                   ST_X(ST_Centroid(s.geom)),
+                   ST_Y(ST_Centroid(s.geom)),
+                   CASE WHEN s.section_name = #{exact,jdbcType=VARCHAR} THEN 3.0
+                        WHEN s.section_name ILIKE #{prefix,jdbcType=VARCHAR} THEN 2.0
+                        ELSE 1.0 END
+            FROM cross_sections s
+            WHERE s.deleted_at IS NULL
+              AND (s.user_id = #{userId,jdbcType=BIGINT} OR #{userId,jdbcType=BIGINT} IS NULL)
+              AND (s.section_name ILIKE #{pattern,jdbcType=VARCHAR}
+                   OR s.param_name ILIKE #{pattern,jdbcType=VARCHAR})
+            <if test="taskId != null and taskId != ''">
+              AND s.task_id = #{taskId}
+            </if>
+            <if test="bankId != null and bankId != ''">
+              AND s.bank_id = #{bankId}
+            </if>
+            <if test="riskLevel != null">
+              AND EXISTS (
+                  SELECT 1 FROM bank_risk_results rr
+                  WHERE rr.section_id = s.section_id
+                    AND rr.deleted_at IS NULL
+                    AND rr.risk_level = #{riskLevel}
+              )
+            </if>
+
+            UNION ALL
+
+            SELECT 'dem'::text,
+                   d.dem_id,
+                   d.dem_title,
+                   'DEM 资源',
+                   d.task_id,
+                   NULL::text,
+                   NULL::text,
+                   d.dem_id,
+                   0.75::float8,
+                   d.updated_at,
+                   NULL::float8,
+                   NULL::float8,
+                   CASE WHEN d.dem_title = #{exact,jdbcType=VARCHAR} THEN 3.0
+                        WHEN d.dem_title ILIKE #{prefix,jdbcType=VARCHAR} THEN 2.0
+                        ELSE 1.0 END
+            FROM (
+                SELECT DISTINCT ON (sp.dem_id)
+                       sp.dem_id,
+                       regexp_replace(sp.dem_id, '^.*/', '') AS dem_title,
+                       sp.task_id,
+                       sp.updated_at
+                FROM section_profiles sp
+                WHERE sp.deleted_at IS NULL
+                  AND (sp.user_id = #{userId,jdbcType=BIGINT} OR #{userId,jdbcType=BIGINT} IS NULL)
+                  AND sp.dem_id ILIKE #{pattern,jdbcType=VARCHAR}
+                ORDER BY sp.dem_id, sp.updated_at DESC
+            ) d
+
+            UNION ALL
+
+            SELECT 'note'::text,
+                   n.section_id,
+                   coalesce(n.section_name, n.section_id),
+                   n.note,
+                   n.task_id,
+                   n.section_id,
+                   NULL::text,
+                   NULL::text,
+                   0.7::float8,
+                   n.updated_at,
+                   NULL::float8,
+                   NULL::float8,
+                   CASE WHEN n.note = #{exact,jdbcType=VARCHAR} THEN 3.0
+                        WHEN n.note ILIKE #{prefix,jdbcType=VARCHAR} THEN 2.0
+                        ELSE 1.0 END
+            FROM (
+                SELECT DISTINCT ON (r.section_id)
+                       r.section_id,
+                       r.section_name,
+                       r.edit_state ->> 'note' AS note,
+                       r.task_id,
+                       r.run_time AS updated_at
+                FROM bank_risk_results r
+                WHERE r.deleted_at IS NULL
+                  AND (r.user_id = #{userId,jdbcType=BIGINT} OR #{userId,jdbcType=BIGINT} IS NULL)
+                  AND coalesce(r.edit_state ->> 'note', '') ILIKE #{pattern,jdbcType=VARCHAR}
+                ORDER BY r.section_id, r.id DESC
+            ) n
+
+            UNION ALL
+
+            SELECT 'report'::text,
+                   rp.run_id,
+                   coalesce(rp.report_file_name, rp.run_id),
+                   coalesce(rp.last_error, ''),
+                   rp.task_id,
+                   NULL::text,
+                   NULL::text,
+                   NULL::text,
+                   0.7::float8,
+                   rp.updated_at,
+                   NULL::float8,
+                   NULL::float8,
+                   CASE WHEN rp.report_file_name = #{exact,jdbcType=VARCHAR} THEN 3.0
+                        WHEN rp.report_file_name ILIKE #{prefix,jdbcType=VARCHAR} THEN 2.0
+                        ELSE 1.0 END
+            FROM ai_report_runs rp
+            WHERE (rp.user_id = #{userId,jdbcType=BIGINT} OR #{userId,jdbcType=BIGINT} IS NULL)
+              AND rp.report_file_name ILIKE #{pattern,jdbcType=VARCHAR}
+        ),
+        ranked AS (
+            SELECT h.*,
+                   ROW_NUMBER() OVER (PARTITION BY h.kind, h.title
+                                      ORDER BY (h.w_field * h.w_match) DESC, h.updated_at DESC) AS rn,
+                   COUNT(*) OVER (PARTITION BY h.kind, h.title) AS dup
+            FROM hit h
+        )
+        SELECT kind,
+               id,
+               title,
+               left(snippet, 160) AS snippet,
+               task_id,
+               section_id,
+               bank_id,
+               dem_key,
+               round((w_field * w_match)::numeric, 4)::float8 AS score,
+               lng,
+               lat,
+               updated_at,
+               dup AS duplicate_count
+        FROM ranked
+        WHERE rn &lt;= 3
+        <if test="types != null and types.size() > 0">
+            AND kind IN
+            <foreach collection="types" item="t" open="(" separator="," close=")">
+                #{t}
+            </foreach>
+        </if>
+        ORDER BY score DESC, updated_at DESC NULLS LAST
+        LIMIT #{limit}
+    </select>
+
+</mapper>

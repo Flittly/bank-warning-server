@@ -28,6 +28,17 @@
         SELECT * FROM banks WHERE bank_id = #{bankId} AND deleted_at IS NULL AND (user_id = #{userId} OR #{userId, jdbcType=BIGINT} IS NULL)
     </select>
 
+    <!-- 只回 bank_id，用于复制任务时清洗 bank_ids（剔除 line-N 占位与已删岸段）。 -->
+    <select id="selectExistingBankIds" resultType="java.lang.String">
+        SELECT bank_id FROM banks
+        WHERE deleted_at IS NULL
+          AND (user_id = #{userId} OR #{userId, jdbcType=BIGINT} IS NULL)
+          AND bank_id IN
+          <foreach collection="bankIds" item="bankId" open="(" separator="," close=")">
+              #{bankId}
+          </foreach>
+    </select>
+
     <insert id="insert" parameterType="com.yangtze.bankwarning.domain.po.BankPO" useGeneratedKeys="true" keyProperty="id">
         INSERT INTO banks (bank_id, bank_name, reach_group, bank_geometry, description, reversed, user_id)
         VALUES (#{bankId}, #{bankName}, #{reachGroup}, #{bankGeometry}::jsonb, #{description}, #{reversed}, #{userId})
@@ -42,6 +53,34 @@
             reversed = #{reversed}
         WHERE bank_id = #{bankId} AND deleted_at IS NULL AND (user_id = #{userId} OR #{userId, jdbcType=BIGINT} IS NULL)
     </update>
+
+    <!--
+      只改几何。折点编辑专用：全字段 update 要求调用方带齐 bank_name / reach_group，
+      而前端拖一次折点只持有几何，漏传就会被写成 null。
+      updated_at 显式刷新：库里的触发器情况不确定，前端要靠它判断「是否被别人改过」。
+    -->
+    <update id="updateGeometry">
+        UPDATE banks
+        SET bank_geometry = #{bankGeometry}::jsonb,
+            updated_at = CURRENT_TIMESTAMP
+        WHERE bank_id = #{bankId}
+          AND deleted_at IS NULL
+          AND (user_id = #{userId} OR #{userId, jdbcType=BIGINT} IS NULL)
+    </update>
+
+    <!-- 影响面：该岸段被多少任务引用、挂了多少条断面。编辑前提示用。 -->
+    <select id="selectUsageByBankId" resultType="java.util.LinkedHashMap">
+        SELECT
+            (SELECT count(DISTINCT c.task_id)
+               FROM cross_sections c
+              WHERE c.bank_id = #{bankId}
+                AND c.deleted_at IS NULL
+                AND c.task_id IS NOT NULL) AS task_count,
+            (SELECT count(*)
+               FROM cross_sections c2
+              WHERE c2.bank_id = #{bankId}
+                AND c2.deleted_at IS NULL) AS section_count
+    </select>
 
     <update id="deleteByBankId">
         UPDATE banks SET deleted_at = CURRENT_TIMESTAMP

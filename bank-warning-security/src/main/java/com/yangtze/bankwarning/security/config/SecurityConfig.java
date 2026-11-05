@@ -14,6 +14,7 @@ import org.springframework.security.crypto.password.PasswordEncoder;
 import org.springframework.security.access.hierarchicalroles.RoleHierarchy;
 import org.springframework.security.access.hierarchicalroles.RoleHierarchyImpl;
 import com.yangtze.bankwarning.security.security.JwtAuthenticationFilter;
+import jakarta.servlet.DispatcherType;
 import org.springframework.security.web.SecurityFilterChain;
 import org.springframework.security.web.authentication.UsernamePasswordAuthenticationFilter;
 
@@ -46,6 +47,12 @@ public class SecurityConfig {
                 // 放行 OPTIONS 本身无副作用（不改变服务端状态），且请求随后仍会经过
                 // CorsConfig 的 CorsFilter：白名单外的 origin 依旧被 403 拦下。
                 .requestMatchers(HttpMethod.OPTIONS, "/**").permitAll()
+                // SSE / 异步响应收尾时，容器会带着 DispatcherType.ASYNC 再走一遍过滤器链。
+                // 此时 STATELESS 的安全上下文已在初始 REQUEST 结束时清空，若不放行，
+                // AuthorizationFilter 会判 403；而响应已经提交，异常无法再写错误页，
+                // 结果是 Tomcat 直接断连 —— 表现为「内容收全了，但 chunked 流没有结束块」。
+                // 放行 ASYNC 不会削弱鉴权：ASYNC 分发只是已授权请求的延续，它本身不改变状态。
+                .dispatcherTypeMatchers(DispatcherType.ASYNC).permitAll()
                 .requestMatchers("/v0/auth/**", "/v0/bank/ai/viz-output/**").permitAll()
                 .requestMatchers("/v0/admin/**").hasRole("ADMIN")
                 .anyRequest().authenticated())

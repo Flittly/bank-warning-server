@@ -37,6 +37,14 @@ public class SectionPO {
     private Boolean isValid;
     private String validationStatus;
     private String validationMessage;
+    /**
+     * 人工标记为无效断面：不参与着色/统计/出图，图上以灰色虚线显示。
+     *
+     * <p>与 {@link #isValid} 是**两件事**：isValid 是几何校验的结论（会被重新校验覆写），
+     * 这里是人的判断，只能由用户显式切换。详见 migration/V15。
+     */
+    private Boolean manualInvalid;
+    private String manualInvalidReason;
     private LocalDateTime createdAt;
     private LocalDateTime updatedAt;
     private LocalDateTime deletedAt;

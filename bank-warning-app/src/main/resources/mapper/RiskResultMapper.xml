@@ -12,6 +12,7 @@
         <result property="bankId" column="bank_id"/>
         <result property="riskLevel" column="risk_level"/>
         <result property="indicators" column="indicators"/>
+        <result property="editState" column="edit_state"/>
         <result property="createdAt" column="created_at"/>
         <result property="updatedAt" column="updated_at"/>
         <result property="deletedAt" column="deleted_at"/>
@@ -52,14 +53,140 @@
         SELECT COUNT(*) FROM bank_risk_results WHERE task_id = #{taskId} AND deleted_at IS NULL AND (user_id = #{userId} OR #{userId, jdbcType=BIGINT} IS NULL)
     </select>
 
+    <!-- 任务列表批量计数：结果表本身带 task_id（复制任务时就是按它改写），
+         不必 join cross_sections，一次分组就能拿到全部任务的条数。
+         软删行不计；admin（userId 为 null）看全量，与其它查询同一套过滤口径。 -->
+    <select id="countGroupedByTask" resultType="java.util.LinkedHashMap">
+        SELECT task_id AS "task_id", COUNT(*) AS "cnt"
+        FROM bank_risk_results
+        WHERE deleted_at IS NULL AND (user_id = #{userId} OR #{userId, jdbcType=BIGINT} IS NULL)
+        GROUP BY task_id
+    </select>
+
     <update id="deleteByTaskId">
         UPDATE bank_risk_results SET deleted_at = CURRENT_TIMESTAMP
         WHERE task_id = #{taskId} AND deleted_at IS NULL AND (user_id = #{userId} OR #{userId, jdbcType=BIGINT} IS NULL)
     </update>
 
-    <select id="existsByRunIdAndSectionId" resultType="boolean">
-        SELECT COUNT(*) > 0 FROM bank_risk_results
+    <!--
+      单断面重算前的「作废旧结果」。
+      不清就会留下两行有效结果（本表是 INSERT 追加，不是 upsert），而
+      selectByTaskIdAndBankIdAndRegionCode 是 ORDER BY id 全量返回 ⇒ 结果页会出现
+      同一个断面两行、且靠前那行是过期等级。软删而不是硬删：人工修改快照
+      （edit_state）与历史轮次都还留在库里，出问题能追溯。
+    -->
+    <update id="deleteBySectionId">
+        UPDATE bank_risk_results SET deleted_at = CURRENT_TIMESTAMP
+        WHERE section_id = #{sectionId} AND deleted_at IS NULL
+          AND (user_id = #{userId} OR #{userId, jdbcType=BIGINT} IS NULL)
+    </update>
+
+    <!-- 该断面当前是否还有有效结果（几何变更时用来判断「需不需要重算覆盖」）。 -->
+    <select id="countActiveBySectionId" resultType="int">
+        SELECT COUNT(*) FROM bank_risk_results
+        WHERE section_id = #{sectionId} AND deleted_at IS NULL
+          AND (user_id = #{userId} OR #{userId, jdbcType=BIGINT} IS NULL)
+    </select>
+
+    <select id="existsByRunIdAndSectionId" resultType="boolean">        SELECT COUNT(*) > 0 FROM bank_risk_results
         WHERE run_id = #{runId} AND section_id = #{sectionId} AND deleted_at IS NULL AND (user_id = #{userId} OR #{userId, jdbcType=BIGINT} IS NULL)
     </select>
+
+    <!--
+      人工修改：只改这一行的 indicators / risk_level / edit_state。
+      刻意原地改写而不是另建覆盖表 —— 出图 SQL（indicators->>'result'）、
+      报告 CSV、AI 工具都直接读这张表，原地改写让它们零改造自动跟随。
+    -->
+    <update id="updateManualOverride">
+        UPDATE bank_risk_results
+        SET indicators = #{indicators}::jsonb,
+            risk_level = #{riskLevel},
+            edit_state = #{editState}::jsonb
+        WHERE id = #{id}
+          AND deleted_at IS NULL
+          AND (user_id = #{userId} OR #{userId, jdbcType=BIGINT} IS NULL)
+    </update>
+
+    <!-- 回滚到模型原值：快照存在 edit_state 里，取回后把 edit_state 置空 -->
+    <update id="revertManualOverride">
+        UPDATE bank_risk_results
+        SET indicators = (edit_state -> 'original_indicators')::jsonb,
+            risk_level = (edit_state ->> 'original_risk_level')::int,
+            edit_state = NULL
+        WHERE id = #{id}
+          AND edit_state IS NOT NULL
+          AND deleted_at IS NULL
+          AND (user_id = #{userId} OR #{userId, jdbcType=BIGINT} IS NULL)
+    </update>
+    <!--
+      人工新建一条结果（该断面本来一行都没有）。
+      与 insert 的差别：带 edit_state，且不写 run_id。
+      run_id 是「模型第几轮」的标识，人工录入没有轮次；留 NULL 让这行的来历在库里可分辨。
+      刻意**不写 geom**：出图/地图取的是 cross_sections 的几何，这一列留给模型写入。
+    -->
+    <insert id="insertManualOverride" parameterType="com.yangtze.bankwarning.domain.po.RiskResultPO" useGeneratedKeys="true" keyProperty="id">
+        INSERT INTO bank_risk_results (
+            task_id, section_id, section_name, region_code, bank_id,
+            risk_level, indicators, user_id, edit_state
+        ) VALUES (
+            #{taskId}, #{sectionId}, #{sectionName}, #{regionCode}, #{bankId},
+            #{riskLevel}, #{indicators}::jsonb, #{userId}, #{editState}::jsonb
+        )
+    </insert>
+
+    <!-- 按 id 软删。人工新建的结果「恢复模型原值」= 撤掉这行（原本就没有原值可恢复）。 -->
+    <update id="softDeleteById">
+        UPDATE bank_risk_results SET deleted_at = CURRENT_TIMESTAMP
+        WHERE id = #{id} AND deleted_at IS NULL
+          AND (user_id = #{userId} OR #{userId, jdbcType=BIGINT} IS NULL)
+    </update>
+
+    <!--
+      取该任务任一结果的 indicators（最新一行），给「无结果断面人工录入」沿用任务级阈值/权重。
+      只挑带 thresholds 的行：2026-06 前后的老结果没有这个键，取到它等于回落默认值，
+      反而会与同任务其它断面口径不一致。
+
+      ⚠ 必须用 jsonb_exists(indicators,'thresholds')，不能写 `indicators ? 'thresholds'`：
+      jsonb 的 `?` 存在运算符会被 MyBatis 当成 #{} 之外的占位符 `?`，
+      参数位置整体错一位，运行期报「未设定参数值 N 的内容」。
+    -->
+    <select id="selectIndicatorsByTaskId" resultType="java.lang.String">
+        SELECT indicators::text FROM bank_risk_results
+        WHERE task_id = #{taskId}
+          AND deleted_at IS NULL
+          AND jsonb_exists(indicators, 'thresholds')
+          AND (user_id = #{userId} OR #{userId, jdbcType=BIGINT} IS NULL)
+        ORDER BY id DESC LIMIT 1
+    </select>
+
+    <!--
+        复制任务的既有结果。section_id 必须按「源 id → 新 id」的映射重写，
+        映射规则与 SectionMapper.copySectionsFromTask 完全一致（同一段 CASE），否则搬过来的
+        结果会挂不上任何断面。
+
+        ORDER BY r.id 不是排版偏好：selectLatestBySectionId 用 `ORDER BY id DESC LIMIT 1`
+        取最新，同一断面存在多行时（单断面重算只 INSERT 不删旧行），插入顺序决定了
+        副本里「最新一行」还是不是原件里的那一行。
+
+        source_task_id 落来源，让「这批结论不是本任务算的」可追溯（不写就只能靠猜）。
+    -->
+    <insert id="copyFromTask">
+        INSERT INTO bank_risk_results (
+            task_id, section_id, section_name, region_code, bank_id,
+            run_time, risk_level, indicators, geom, run_id, user_id, edit_state, source_task_id)
+        SELECT
+            #{newTaskId}, ns.section_id, r.section_name, r.region_code, r.bank_id,
+            r.run_time, r.risk_level, r.indicators, r.geom, r.run_id,
+            #{targetUserId, jdbcType=BIGINT}, r.edit_state, r.task_id
+        FROM bank_risk_results r
+        JOIN cross_sections os ON os.section_id = r.section_id AND os.task_id = #{srcTaskId}
+        JOIN cross_sections ns ON ns.task_id = #{newTaskId}
+             AND ns.section_id = 'sec-' || #{newTaskId} || CASE
+                 WHEN os.section_id LIKE #{srcPrefix} || '%'
+                     THEN substring(os.section_id FROM char_length(#{srcPrefix}) + 1)
+                 ELSE '-copy-' || os.id END
+        WHERE r.task_id = #{srcTaskId} AND r.deleted_at IS NULL
+        ORDER BY r.id
+    </insert>
 
 </mapper>

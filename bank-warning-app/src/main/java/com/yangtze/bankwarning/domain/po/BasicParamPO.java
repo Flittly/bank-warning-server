@@ -8,6 +8,8 @@ import java.time.LocalDateTime;
 public class BasicParamPO {
     private Long id;
     private Long userId;
+    /** NULL = 模板库（主数据）；非 NULL = 该任务专属参数集。 */
+    private String taskId;
     private String paramId;
     private String paramName;
     private String benchSegment;
