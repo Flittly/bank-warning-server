@@ -18,6 +18,14 @@ spring:
     username: ${BANK_DB_USERNAME:postgres}
     password: ${BANK_DB_PASSWORD:123456}
     driver-class-name: org.postgresql.Driver
+    hikari:
+      # 断面并行计算时，同一时刻会有「多路 × (剖面写入 + 结果写入)」同时要连接。
+      # 默认 10 会在 4 路并行下被悄悄占满，表现为并行度打不满、断面耗时变长，
+      # 而日志里只有「等待连接」的沉默——这是并行改造最容易漏掉的一环。
+      # 上限同时受 PG 的 max_connections（默认 100）约束，20 是安全区间。
+      maximum-pool-size: ${DB_POOL_SIZE:20}
+      minimum-idle: ${DB_MIN_IDLE:8}
+      connection-timeout: ${DB_CONNECTION_TIMEOUT_MS:30000}
   # Redis：只给集群模式的「取消标志」用，默认关闭时不会建立连接
   data:
     redis:
@@ -104,6 +112,19 @@ qweather:
 
 # 自定义应用配置
 app:
+  # 任务内断面计算的并行度（有界 worker 池的线程数）。
+  #
+  # 这个数与模型侧的 MAX_RUNNING_MODEL_CASE_NUM 是一对，必须一起调：
+  #   需要的模型槽位 ≈ parallelism × 每断面稳态 case 数（约 7；首个断面 10）
+  #   4 × 7 = 28  ⇒  模型侧设 32（留约 14% 余量给单断面重算与报告出图抢槽）
+  #
+  # 真正的硬上限是 CPU：每个模型 case 是独立子进程、基本单线程。
+  #   28 逻辑核 ÷ 7 ≈ 4 路 —— 再多只是让子进程互相抢核，总时长不会更短。
+  # 内存通常不是瓶颈：40 个槽位里只有 parallelism 个是读整幅 DEM 的重进程，
+  # 其余都是百兆级的数值查表 case。
+  section:
+    parallelism: ${APP_SECTION_PARALLELISM:4}
+
   model-service:
     base-url: http://localhost:8088
     default-model-api: /v0/mi/risk-level
@@ -174,6 +195,15 @@ app:
       # 可视化输出目录
       output-dir: visualization/output
 
+  # CORS 白名单：前端 dev server / 生产站点来源，逗号分隔，支持 Spring origin pattern
+  # （http://localhost:[*] 表示「本机任意端口」）。
+  # ⚠ 生产部署务必用环境变量覆盖为精确域名；白名单不命中时后端在 Controller
+  #   **之前**返回 403 Invalid CORS request，日志不留痕，排查成本极高。
+  # 注意：原先本文件里还有一个重复的顶层 `app:` 只写 cors，YAML 后者覆盖前者，
+  #      会把上面 model-service / kafka / ai / section 全部冲掉，故合并至此。
+  cors:
+    allowed-origins: ${APP_CORS_ALLOWED_ORIGINS:http://localhost:[*],http://127.0.0.1:[*]}
+
 # MyBatis 配置
 mybatis:
   mapper-locations: classpath*:mapper/**/*.xml
@@ -199,11 +229,6 @@ security:
     access-secret: ${SMS_ACCESS_SECRET:}
     sign-name: ${SMS_SIGN_NAME:长江崩岸预警系统}
     template-code: ${SMS_TEMPLATE_CODE:}
-
-# CORS配置
-app:
-  cors:
-    allowed-origins: ${CORS_ALLOWED_ORIGINS:http://localhost:5173}
 
 # 集群模式（多实例部署）开关。
 # false = 内存中断表 + 进程内锁，单实例语义，零外部依赖（默认）；
