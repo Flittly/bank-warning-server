@@ -56,7 +56,7 @@ public class AgentScopeConfig {
     public Model deepseekModel(
             @Value("${agentscope.openai.api-key:${DEEPSEEK_API_KEY:}}") String apiKey,
             @Value("${agentscope.openai.base-url:${DEEPSEEK_BASE_URL:https://api.deepseek.com}}") String baseUrl,
-            @Value("${agentscope.openai.model-name:${DEEPSEEK_MODEL:deepseek-chat}}") String modelName) {
+            @Value("${agentscope.openai.model-name:${DEEPSEEK_MODEL:deepseek-v4-flash}}") String modelName) {
         return OpenAIChatModel.builder()
                 .apiKey(apiKey)
                 .baseUrl(baseUrl + "/v1/")
@@ -68,7 +68,7 @@ public class AgentScopeConfig {
     @Bean
     public EmbeddingModel embeddingModel(
             @Value("${agentscope.dashscope.api-key:}") String apiKey,
-            @Value("${agentscope.dashscope.embedding-model-name:text-embedding-v3}") String modelName,
+            @Value("${agentscope.dashscope.embedding-model-name:text-embedding-v4}") String modelName,
             @Value("${agentscope.dashscope.embedding-dimensions:1024}") int dimensions) {
         log.info("[config] DashScope apiKey={}, modelName={}, dimensions={}",
                 maskSecret(apiKey), modelName, dimensions);

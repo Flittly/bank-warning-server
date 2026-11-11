@@ -65,19 +65,23 @@ spring:
       concurrency: 2
 
 # AgentScope 多智能体配置
+# 知识库检索参数（RAG 阶段 1）见本文件下方 app.ai.rag 段。
+# ⚠ application.yml 被 gitignore，本模板是唯一进 git 的配置清单，
+#   换机要么复制这一段，要么直接用 RAG_* 环境变量覆盖（代码内有安全默认值）。
 agentscope:
   openai:
     # 【必填】DeepSeek API Key
     api-key: ${DEEPSEEK_API_KEY:}
     # DeepSeek API 地址
     base-url: ${DEEPSEEK_BASE_URL:https://api.deepseek.com}
-    # 使用的模型
-    model-name: ${DEEPSEEK_MODEL:deepseek-chat}
+    # 使用的模型（与 application.yml、docker-compose 保持一致）
+    model-name: ${DEEPSEEK_MODEL:deepseek-v4-flash}
   dashscope:
-    # 【选填】DashScope API Key（用于文本嵌入，不填则仅用关键词检索）
+    # 【选填】DashScope API Key（用于文本嵌入）。
+    # 不填时知识库检索会明确返回「未配置」，不会静默降级成关键词检索。
     api-key: ${DASHSCOPE_API_KEY:}
-    # 嵌入模型
-    embedding-model-name: text-embedding-v3
+    # 嵌入模型（与 application.yml 一致；更换模型必须重建全部向量）
+    embedding-model-name: text-embedding-v4
     # 嵌入向量维度
     embedding-dimensions: 1024
   vector:
@@ -140,6 +144,26 @@ app:
 
   # AI 智能体模块配置
   ai:
+    # 知识库检索（RAG 阶段 1 收口 / 阶段 2 公共可见性 + 留痕）：参数集中外置，全部可用 RAG_* 环境变量覆盖。
+    # 阶段 2 需先手动执行 migration/V16__rag_phase2_public_and_traces.sql（加 is_public 列），
+    # 未执行时可临时设 public-knowledge-enabled=false 让代码不引用该列。
+    # 回滚：permission-filter-enabled=false 关闭权限过滤；trace-enabled=false 不写留痕；
+    #       enabled=false 关闭检索（明确报错）。
+    # 主要开关：RAG_ENABLED / RAG_PERMISSION_FILTER / RAG_PUBLIC_KNOWLEDGE / RAG_TRACE_ENABLED /
+    #          RAG_CHAT_TOP_K / RAG_TOOL_TOP_K / RAG_SEARCH_TOP_K /
+    #          RAG_SCORE_THRESHOLD / RAG_RETRIEVE_TIMEOUT_MS / RAG_SSE_TIMEOUT_MS
+    rag:
+      enabled: ${RAG_ENABLED:true}
+      permission-filter-enabled: ${RAG_PERMISSION_FILTER:true}
+      public-knowledge-enabled: ${RAG_PUBLIC_KNOWLEDGE:true}
+      trace-enabled: ${RAG_TRACE_ENABLED:true}
+      chat-top-k: ${RAG_CHAT_TOP_K:3}
+      tool-top-k: ${RAG_TOOL_TOP_K:5}
+      search-top-k: ${RAG_SEARCH_TOP_K:5}
+      score-threshold: ${RAG_SCORE_THRESHOLD:0.4}
+      candidate-expansion: ${RAG_CANDIDATE_EXPANSION:5}
+      retrieve-timeout-ms: ${RAG_RETRIEVE_TIMEOUT_MS:15000}
+      sse-timeout-ms: ${RAG_SSE_TIMEOUT_MS:600000}
     skill:
       # Skill 脚本物化缓存根目录（启动时把所有 skill 的 resources 物化到这里）
       # <cache-dir>/<skill-name>/scripts/<file>

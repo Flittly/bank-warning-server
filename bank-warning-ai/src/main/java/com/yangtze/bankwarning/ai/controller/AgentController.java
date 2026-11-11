@@ -1,9 +1,11 @@
 package com.yangtze.bankwarning.ai.controller;
 
+import com.yangtze.bankwarning.ai.config.RagProperties;
 import com.yangtze.bankwarning.ai.context.AiCaller;
 import com.yangtze.bankwarning.ai.middleware.ReasoningTraceMiddleware;
 import com.yangtze.bankwarning.ai.security.SkillPathGuard;
 import com.yangtze.bankwarning.ai.service.KnowledgeService;
+import com.yangtze.bankwarning.ai.service.KnowledgeUnavailableException;
 import com.yangtze.bankwarning.ai.service.ModelService;
 import com.yangtze.bankwarning.ai.service.TaskContextService;
 import com.yangtze.bankwarning.ai.workflow.PlanProgress;
@@ -58,6 +60,7 @@ public class AgentController {
     private final ReasoningTraceMiddleware traceMiddleware;
     private final KnowledgeService knowledgeService;
     private final TaskContextService taskContextService;
+    private final RagProperties ragProperties;
     private final com.fasterxml.jackson.databind.ObjectMapper objectMapper; // 注入 AgentScopeConfig 里那个（Jackson 2）
 
     @Value("${app.ai.visualization.output-dir:visualization/output}")
@@ -70,6 +73,7 @@ public class AgentController {
             KnowledgeService knowledgeService,
             TaskContextService taskContextService,
             @Qualifier("chatTraceMiddleware") ReasoningTraceMiddleware traceMiddleware,
+            RagProperties ragProperties,
             com.fasterxml.jackson.databind.ObjectMapper objectMapper) {
         this.defaultChatAgent = defaultChatAgent;
         this.modelService = modelService;
@@ -77,6 +81,7 @@ public class AgentController {
         this.traceMiddleware = traceMiddleware;
         this.knowledgeService = knowledgeService;
         this.taskContextService = taskContextService;
+        this.ragProperties = ragProperties;
         this.objectMapper = objectMapper;
     }
 
@@ -227,16 +232,26 @@ public class AgentController {
 
         // 预检索：自动查知识库，将相关知识拼入 prompt（不等 agent 调用 query_knowledge）
         try {
-            List<Document> docs = knowledgeService.retrieve(question, 3, 0.4).block();
-            if (docs != null && !docs.isEmpty()) {
+            // 阶段 2：把 sessionId 作为 trace_id 传下去，一次聊天请求里的检索留痕可按它串起来。
+            List<Document> docs = knowledgeService.retrieve(
+                    question, KnowledgeService.Scenario.CHAT, caller, null, sessionId);
+            if (!docs.isEmpty()) {
                 prompt.append("以下是与用户问题相关的专业知识（系统自动检索，已为你准备好）：\n");
                 for (Document doc : docs) {
                     prompt.append("- ").append(doc.getMetadata().getContent()).append("\n");
                 }
                 prompt.append("\n");
             }
+        } catch (KnowledgeUnavailableException e) {
+            // 阶段 1：不再静默跳过。把原因写进 prompt，模型会明确告知用户无法查证，
+            // 而不是在完全没有资料的情况下照常编一段听起来很像的答案。
+            log.warn("[chat] 知识库不可用（{}）: {}", e.reason(), e.getMessage());
+            prompt.append("系统提示：本次未能检索到知识库（原因：")
+                    .append(e.getMessage())
+                    .append("）。若问题涉及规范条文或专业指标，请明确告知用户当前无法查证，不得编造依据。\n\n");
         } catch (Exception e) {
-            log.warn("[chat] 预检索失败，跳过: {}", e.getMessage());
+            log.error("[chat] 预检索异常", e);
+            prompt.append("系统提示：知识库检索发生异常，本次回答不得编造规范依据。\n\n");
         }
 
         // 把请求体传入的 reportIds 解析为 reports 目录内的真实文件。
@@ -318,8 +333,9 @@ public class AgentController {
      */
     @PostMapping(value = "/chat/stream", produces = MediaType.TEXT_EVENT_STREAM_VALUE)
     public SseEmitter chatStream(@RequestBody Map<String, Object> body, HttpServletResponse response) {
-        // 0 = 永不超时：LLM + 多轮工具可能跑几分钟，默认 30s 会从中间掐断
-        SseEmitter emitter = new SseEmitter(0L);
+        // 阶段 1：不再「永不超时」。默认 10 分钟，可由 app.ai.rag.sse-timeout-ms 调整；
+        // 超时会触发 onTimeout 取消订阅，避免模型侧继续烧 token。
+        SseEmitter emitter = new SseEmitter(ragProperties.sseTimeoutMs);
         // 反向代理默认会攒包，必须显式关掉，否则前端仍是一次性收到
         response.setHeader("Cache-Control", "no-cache");
         response.setHeader("X-Accel-Buffering", "no");

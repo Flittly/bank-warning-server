@@ -1,81 +1,289 @@
 package com.yangtze.bankwarning.ai.service;
 
+import com.yangtze.bankwarning.ai.config.RagProperties;
+import com.yangtze.bankwarning.ai.config.UnconfiguredEmbeddingModel;
+import com.yangtze.bankwarning.ai.context.AiCaller;
+import com.yangtze.bankwarning.ai.service.KnowledgeUnavailableException.Reason;
+import com.yangtze.bankwarning.ai.store.JdbcRagTraceStore;
+import com.yangtze.bankwarning.ai.store.RagTrace;
 import io.agentscope.core.embedding.EmbeddingModel;
+import io.agentscope.core.message.TextBlock;
 import io.agentscope.core.rag.model.Document;
 import io.agentscope.core.rag.store.VDBStoreBase;
 import io.agentscope.core.rag.store.dto.SearchDocumentDto;
-import io.agentscope.core.message.TextBlock;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Service;
 import reactor.core.publisher.Mono;
 
+import java.time.Duration;
+import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Set;
+import java.util.UUID;
 
 /**
- * 知识库服务 - 直接使用 VDBStoreBase + EmbeddingModel
+ * 知识库服务 —— 全系统唯一的检索入口（阶段 1 收口，阶段 2 加公共可见性与留痕）。
+ *
+ * <p>改造前三个调用点各自写死 {@code retrieve(query, 3|5, 0.4)}，任何规则
+ * （权限、超时、阈值、降级）都要改三遍；而且所有异常被吞成空列表，
+ * 造成「看起来在跑、其实没有 RAG」。现在统一负责：
+ * <ol>
+ *   <li>总开关与「未配置 / 无身份」的显式报错，不再静默降级；</li>
+ *   <li>按场景取 topK 与阈值，参数全部来自 {@link RagProperties}；</li>
+ *   <li>粗召回放大候选，按 user_id <b>或 is_public</b> 过滤后再截到 topK；</li>
+ *   <li>所有外部调用带超时；</li>
+ *   <li>每次检索（成功或明确不可用）写一行 {@link RagTrace}。</li>
+ * </ol>
+ *
+ * <p><b>当前过滤发生在召回之后</b>：SDK 的 {@code SearchDocumentDto} 没有 filter 字段，
+ * 无法在向量 SQL 内裁剪。无权内容不会被返回给模型或用户，但服务端确实短暂读到过。
+ * 阶段 5 改为 SQL 内过滤（security trimming）时，只需替换本方法内部，调用方不动。
  */
 @Service
 @SuppressWarnings({"deprecation", "removal"})
 public class KnowledgeService {
 
+    /** 检索场景：决定默认 topK，也写进留痕便于区分来源。 */
+    public enum Scenario { CHAT, TOOL, SEARCH }
+
     private static final Logger log = LoggerFactory.getLogger(KnowledgeService.class);
+    private static final int MAX_CANDIDATES = 100;
+
+    /** 与 KnowledgeController 的增删改查同口径：普通用户只看自己名下的 doc_id。 */
+    private static final String VISIBLE_DOC_IDS_SQL =
+            "SELECT DISTINCT doc_id FROM ai_knowledge_store WHERE user_id = CAST(? AS BIGINT)";
+
+    /** 阶段 2：额外纳入显式标记为公共的规范/规程资料。 */
+    private static final String VISIBLE_DOC_IDS_WITH_PUBLIC_SQL =
+            "SELECT DISTINCT doc_id FROM ai_knowledge_store "
+                    + "WHERE (user_id = CAST(? AS BIGINT) OR is_public = TRUE)";
 
     private final EmbeddingModel embeddingModel;
     private final VDBStoreBase vectorStore;
+    private final JdbcTemplate jdbcTemplate;
+    private final JdbcRagTraceStore traceStore;
+    private final RagProperties props;
 
-    public KnowledgeService(EmbeddingModel embeddingModel, VDBStoreBase vectorStore) {
+    public KnowledgeService(EmbeddingModel embeddingModel,
+                            VDBStoreBase vectorStore,
+                            JdbcTemplate jdbcTemplate,
+                            JdbcRagTraceStore traceStore,
+                            RagProperties props) {
         this.embeddingModel = embeddingModel;
         this.vectorStore = vectorStore;
+        this.jdbcTemplate = jdbcTemplate;
+        this.traceStore = traceStore;
+        this.props = props;
+    }
+
+    /** 兼容既有调用点；trace_id 由本方法生成。 */
+    public List<Document> retrieve(String query, Scenario scenario, AiCaller caller) {
+        return retrieve(query, scenario, caller, null);
+    }
+
+    /** REST 检索测试允许前端临时指定 topK；其余场景走配置。 */
+    public List<Document> retrieve(String query, Scenario scenario, AiCaller caller, Integer limitOverride) {
+        return retrieve(query, scenario, caller, limitOverride, null);
     }
 
     /**
-     * 添加文档到知识库，为每个文档生成嵌入向量
+     * 全量入口：{@code traceId} 传一次请求的编号（聊天侧传 sessionId），
+     * 不传则为这次检索生成独立 UUID。留痕写入失败不影响返回值。
      */
-    @SuppressWarnings("deprecation")
+    public List<Document> retrieve(String query, Scenario scenario, AiCaller caller,
+                                   Integer limitOverride, String traceId) {
+        String tid = (traceId == null || traceId.isBlank()) ? UUID.randomUUID().toString() : traceId;
+        AiCaller who = AiCaller.orAnonymous(caller);
+        int limit = (limitOverride != null && limitOverride > 0) ? limitOverride : topKFor(scenario);
+        long start = System.currentTimeMillis();
+
+        try {
+            Outcome outcome = doRetrieve(query, scenario, who, limit, tid);
+            traceStore.record(RagTrace.success(tid, scenario.name(), query, who.userId(),
+                    limit, props.scoreThreshold, outcome.hits(), outcome.visible(),
+                    outcome.hitDetails(), System.currentTimeMillis() - start));
+            return outcome.docs();
+        } catch (KnowledgeUnavailableException e) {
+            traceStore.record(RagTrace.failure(tid, scenario.name(), query, who.userId(),
+                    limit, props.scoreThreshold, e.reason().name(), e.getMessage(),
+                    System.currentTimeMillis() - start));
+            throw e;
+        } catch (RuntimeException e) {
+            traceStore.record(RagTrace.failure(tid, scenario.name(), query, who.userId(),
+                    limit, props.scoreThreshold, RagTrace.STATUS_UNEXPECTED, rootMessage(e),
+                    System.currentTimeMillis() - start));
+            throw e;
+        }
+    }
+
+    /** 真正的检索过程；三段计数用于留痕，不用成员变量以免并发串数据。 */
+    private Outcome doRetrieve(String query, Scenario scenario, AiCaller who, int limit, String traceId) {
+        if (!props.enabled) {
+            throw new KnowledgeUnavailableException(Reason.DISABLED,
+                    "知识库检索已在配置中关闭（app.ai.rag.enabled=false）。");
+        }
+
+        // 工具跑在 ReAct 线程上，SecurityContext 为空；身份必须由调用方从 RuntimeContext 带进来。
+        // 取不到就一律拒绝，绝不能退化成「看全部」。
+        if (props.permissionFilterEnabled && !who.isAuthenticated()) {
+            throw new KnowledgeUnavailableException(Reason.UNAUTHENTICATED,
+                    "当前对话没有携带有效的登录身份，无法检索知识库。请重新登录后再试。");
+        }
+
+        Duration timeout = Duration.ofMillis(props.retrieveTimeoutMs);
+
+        // 占位模型在 build 期不报错（否则应用起不来），但调用期一定失败。
+        // 直接按模型名识别，比依赖 Mono.error 的异常包装方式更可靠。
+        if (UnconfiguredEmbeddingModel.MODEL_NAME.equals(embeddingModel.getModelName())) {
+            throw new KnowledgeUnavailableException(Reason.UNCONFIGURED,
+                    "DashScope API Key 未配置，知识库（向量嵌入/检索）不可用；"
+                            + "请在部署环境设置 DASHSCOPE_API_KEY 后重启服务。");
+        }
+
+        double[] queryEmbedding;
+        try {
+            queryEmbedding = embeddingModel
+                    .embed(TextBlock.builder().text(query).build())
+                    .block(timeout);
+        } catch (Exception e) {
+            throw new KnowledgeUnavailableException(Reason.EMBED_FAILED,
+                    "生成查询向量失败：" + rootMessage(e), e);
+        }
+        if (queryEmbedding == null) {
+            throw new KnowledgeUnavailableException(Reason.EMBED_FAILED,
+                    "生成查询向量失败：嵌入模型返回空结果。");
+        }
+
+        // 过滤在召回之后，所以粗召回要比 topK 多取几倍，避免过滤完剩不下几条。
+        int expansion = Math.max(1, props.candidateExpansion);
+        int candidates = Math.min(MAX_CANDIDATES, Math.max(limit, limit * expansion));
+        SearchDocumentDto searchDto = SearchDocumentDto.builder()
+                .queryEmbedding(queryEmbedding)
+                .limit(candidates)
+                .scoreThreshold(props.scoreThreshold)
+                .build();
+
+        List<Document> hits;
+        try {
+            hits = vectorStore.search(searchDto).block(timeout);
+        } catch (Exception e) {
+            throw new KnowledgeUnavailableException(Reason.SEARCH_FAILED,
+                    "知识库检索失败：" + rootMessage(e), e);
+        }
+        if (hits == null || hits.isEmpty()) {
+            return new Outcome(List.of(), 0, 0, List.of());
+        }
+
+        List<Document> visible = applyPermissionFilter(hits, who);
+        List<Document> result = visible.stream().limit(limit).toList();
+        log.info("[rag] traceId={}, scenario={}, hits={}, visible={}, returned={}, topK={}",
+                traceId, scenario, hits.size(), visible.size(), result.size(), limit);
+        return new Outcome(result, hits.size(), visible.size(), toHits(result));
+    }
+
+    private static List<RagTrace.Hit> toHits(List<Document> docs) {
+        List<RagTrace.Hit> details = new ArrayList<>(docs.size());
+        for (Document doc : docs) {
+            Object rawScore = doc.getScore();
+            Double score = rawScore instanceof Number n ? n.doubleValue() : null;
+            details.add(new RagTrace.Hit(
+                    String.valueOf(doc.getMetadata().getDocId()),
+                    String.valueOf(doc.getId()),
+                    score));
+        }
+        return details;
+    }
+
+    /**
+     * 权限裁剪：管理员看全部；普通用户保留「自己名下 + 显式标记公共」的 doc_id。
+     * 查不出可见集合时一律抛异常（fail-closed），绝不返回未过滤结果。
+     *
+     * <p>{@code is_public} 列由 V16 脚本添加；关掉
+     * {@code app.ai.rag.public-knowledge-enabled} 就退回阶段 1 的严格私有口径，
+     * 也可用于「列还没加」时的应急回滚。
+     */
+    private List<Document> applyPermissionFilter(List<Document> hits, AiCaller who) {
+        if (!props.permissionFilterEnabled || who.seeAll()) {
+            return hits;
+        }
+        Long userId = who.userId();
+        if (userId == null) {
+            log.warn("[rag] 已认证但 userId 为空，按无权处理");
+            return List.of();
+        }
+        String sql = props.publicKnowledgeEnabled
+                ? VISIBLE_DOC_IDS_WITH_PUBLIC_SQL : VISIBLE_DOC_IDS_SQL;
+        Set<String> visibleDocIds;
+        try {
+            visibleDocIds = new HashSet<>(
+                    jdbcTemplate.queryForList(sql, String.class, userId));
+        } catch (Exception e) {
+            throw new KnowledgeUnavailableException(Reason.SEARCH_FAILED,
+                    "知识库权限校验失败：" + rootMessage(e), e);
+        }
+        return hits.stream()
+                .filter(doc -> visibleDocIds.contains(doc.getMetadata().getDocId()))
+                .toList();
+    }
+
+    private int topKFor(Scenario scenario) {
+        return switch (scenario) {
+            case CHAT -> props.chatTopK;
+            case TOOL -> props.toolTopK;
+            case SEARCH -> props.searchTopK;
+        };
+    }
+
+    private record Outcome(List<Document> docs, int hits, int visible,
+                           List<RagTrace.Hit> hitDetails) {}
+
+    private static String rootMessage(Throwable e) {
+        Throwable cur = e;
+        while (cur.getCause() != null && cur.getCause() != cur) {
+            cur = cur.getCause();
+        }
+        return cur.getMessage() == null ? e.toString() : cur.getMessage();
+    }
+
+    /**
+     * 逐段生成向量，失败的那一段跳过，只把成功的段写进库。
+     *
+     * <p>改造前 catch 里只打日志，最后仍无条件 {@code vectorStore.add(docs)}，
+     * 会把没有向量的段也写进去（或整批失败），且无法区分成功与失败。
+     */
     public Mono<Void> addDocuments(List<Document> docs) {
         return Mono.fromRunnable(() -> {
+            Duration timeout = Duration.ofMillis(props.retrieveTimeoutMs);
+            List<Document> ready = new ArrayList<>();
+            int failed = 0;
             for (Document doc : docs) {
                 try {
-                    double[] embedding = embeddingModel.embed(doc.getMetadata().getContent()).block();
-                    if (embedding != null) {
-                        doc.setEmbedding(embedding);
+                    double[] embedding = embeddingModel
+                            .embed(doc.getMetadata().getContent())
+                            .block(timeout);
+                    if (embedding == null) {
+                        failed++;
+                        log.warn("[rag] 嵌入结果为空，跳过该段: docId={}, id={}",
+                                doc.getMetadata().getDocId(), doc.getId());
+                        continue;
                     }
+                    doc.setEmbedding(embedding);
+                    ready.add(doc);
                 } catch (Exception e) {
-                    log.error("Failed to generate embedding for document: {}", doc.getId(), e);
+                    failed++;
+                    log.error("[rag] 单段嵌入失败，跳过: docId={}, id={}",
+                            doc.getMetadata().getDocId(), doc.getId(), e);
                 }
             }
-            vectorStore.add(docs).block();
-            log.info("Added {} documents to knowledge base", docs.size());
-        });
-    }
-
-    /**
-     * 检索相关文档
-     */
-    @SuppressWarnings("deprecation")
-    public Mono<List<Document>> retrieve(String query, int limit, double scoreThreshold) {
-        return Mono.fromCallable(() -> {
-            try {
-                var queryBlock = TextBlock.builder().text(query).build();
-                double[] queryEmbedding = embeddingModel.embed(queryBlock).block();
-                if (queryEmbedding == null) {
-                    return List.of();
-                }
-
-                SearchDocumentDto searchDto = SearchDocumentDto.builder()
-                        .queryEmbedding(queryEmbedding)
-                        .limit(limit)
-                        .scoreThreshold(scoreThreshold)
-                        .build();
-
-                List<Document> results = vectorStore.search(searchDto).block();
-                return results != null ? results : List.of();
-
-            } catch (Exception e) {
-                log.error("Failed to search knowledge: {}", query, e);
-                return List.of();
+            if (ready.isEmpty()) {
+                log.warn("[rag] 全部 {} 段嵌入失败，未写入向量库", failed);
+                return;
             }
+            vectorStore.add(ready).block(timeout);
+            log.info("[rag] 写入 {} 段，跳过失败 {} 段", ready.size(), failed);
         });
     }
 }

@@ -1,6 +1,9 @@
 package com.yangtze.bankwarning.ai.controller;
 
+import com.yangtze.bankwarning.ai.config.RagProperties;
+import com.yangtze.bankwarning.ai.context.AiCaller;
 import com.yangtze.bankwarning.ai.service.KnowledgeService;
+import com.yangtze.bankwarning.ai.service.KnowledgeUnavailableException;
 import com.yangtze.bankwarning.ai.service.PdfService;
 import com.yangtze.bankwarning.security.security.SecurityUtils;
 import io.agentscope.core.message.TextBlock;
@@ -8,6 +11,8 @@ import io.agentscope.core.rag.model.Document;
 import io.agentscope.core.rag.model.DocumentMetadata;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.http.HttpStatus;
+import org.springframework.http.ResponseEntity;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.web.bind.annotation.*;
 import org.springframework.web.multipart.MultipartFile;
@@ -26,13 +31,27 @@ public class KnowledgeController {
     private final KnowledgeService knowledgeService;
     private final PdfService pdfService;
     private final JdbcTemplate jdbcTemplate;
+    private final RagProperties ragProps;
 
     private static final int MAX_CHUNK_SIZE = 500;
 
-    public KnowledgeController(KnowledgeService knowledgeService, PdfService pdfService, JdbcTemplate jdbcTemplate) {
+    public KnowledgeController(KnowledgeService knowledgeService, PdfService pdfService,
+                               JdbcTemplate jdbcTemplate, RagProperties ragProps) {
         this.knowledgeService = knowledgeService;
         this.pdfService = pdfService;
         this.jdbcTemplate = jdbcTemplate;
+        this.ragProps = ragProps;
+    }
+
+    /**
+     * 列表/详情的可见口径必须与检索一致：管理员看全部、普通用户看「自己 + 公共」。
+     * 关掉 public-knowledge-enabled 就退回阶段 1 的严格私有口径（也可用于列未就绪时应急）。
+     * 删除操作刻意不套用这个条件：公共规范只有归属者或管理员能删。
+     */
+    private String visibilityClause() {
+        return ragProps.publicKnowledgeEnabled
+                ? "(user_id = ? OR ?::bigint IS NULL OR is_public = TRUE)"
+                : "(user_id = ? OR ?::bigint IS NULL)";
     }
 
     @PostMapping("/knowledge")
@@ -51,18 +70,25 @@ public class KnowledgeController {
 
         Document doc = new Document(metadata);
         knowledgeService.addDocuments(List.of(doc)).block();
+        // 阶段 2：默认私有；规范/规程类资料由灌库脚本显式传 isPublic=true。
+        boolean isPublic = parseBoolean(body.get("isPublic"));
         Long userId = SecurityUtils.getCurrentUserId();
         if (userId != null) {
-            jdbcTemplate.update("UPDATE ai_knowledge_store SET user_id = ? WHERE doc_id = ?", userId, title);
+            jdbcTemplate.update("UPDATE ai_knowledge_store SET user_id = ?, is_public = ? WHERE doc_id = ?",
+                    userId, isPublic, title);
+        } else {
+            jdbcTemplate.update("UPDATE ai_knowledge_store SET is_public = ? WHERE doc_id = ?",
+                    isPublic, title);
         }
-        return Map.of("success", true, "docId", title);
+        return Map.of("success", true, "docId", title, "isPublic", isPublic);
     }
 
     @PostMapping("/knowledge/upload")
     public Map<String, Object> uploadPdf(
             @RequestParam("file") MultipartFile file,
             @RequestParam(name = "type", defaultValue = "文档") String type,
-            @RequestParam(name = "title", required = false) String title) {
+            @RequestParam(name = "title", required = false) String title,
+            @RequestParam(name = "isPublic", defaultValue = "false") boolean isPublic) {
         log.info("[api] upload knowledge file, fileName={}, size={}, type={}", file.getOriginalFilename(), file.getSize(), type);
 
         if (file.isEmpty()) {
@@ -121,13 +147,20 @@ public class KnowledgeController {
             }
 
             knowledgeService.addDocuments(docs).block();
+            // 阶段 2：公共标记与归属分开写，未登录时也要能把公共标记落库。
             Long userId = SecurityUtils.getCurrentUserId();
             if (userId != null) {
-                jdbcTemplate.update("UPDATE ai_knowledge_store SET user_id = ? WHERE doc_id = ?", userId, docTitle);
+                jdbcTemplate.update("UPDATE ai_knowledge_store SET user_id = ?, is_public = ? WHERE doc_id = ?",
+                        userId, isPublic, docTitle);
+            } else {
+                jdbcTemplate.update("UPDATE ai_knowledge_store SET is_public = ? WHERE doc_id = ?",
+                        isPublic, docTitle);
             }
-            log.info("[api] knowledge imported, title={}, chunks={}, file={}", docTitle, chunks.size(), fileName);
+            log.info("[api] knowledge imported, title={}, chunks={}, file={}, isPublic={}",
+                    docTitle, chunks.size(), fileName, isPublic);
 
-            return Map.of("success", true, "docId", docTitle, "chunks", chunks.size(), "type", type);
+            return Map.of("success", true, "docId", docTitle, "chunks", chunks.size(),
+                    "type", type, "isPublic", isPublic);
 
         } catch (Exception e) {
             log.error("[api] upload failed", e);
@@ -149,7 +182,8 @@ public class KnowledgeController {
     @GetMapping("/knowledge/list")
     public List<Map<String, Object>> listDocuments() {
         Long userId = SecurityUtils.getCurrentUserIdForDataFilter();
-        String sql = "SELECT DISTINCT doc_id, payload FROM ai_knowledge_store WHERE (user_id = ? OR ?::bigint IS NULL) ORDER BY doc_id";
+        String sql = "SELECT DISTINCT doc_id, payload FROM ai_knowledge_store WHERE "
+                + visibilityClause() + " ORDER BY doc_id";
         List<Map<String, Object>> rows = jdbcTemplate.queryForList(sql, userId, userId);
         Map<String, Map<String, Object>> grouped = new LinkedHashMap<>();
         for (Map<String, Object> row : rows) {
@@ -164,7 +198,8 @@ public class KnowledgeController {
                 meta.putIfAbsent("fileName", p.getOrDefault("fileName", docId));
             }
             Integer chunks = jdbcTemplate.queryForObject(
-                    "SELECT COUNT(*) FROM ai_knowledge_store WHERE doc_id = ? AND (user_id = ? OR ?::bigint IS NULL)", Integer.class, docId, userId, userId);
+                    "SELECT COUNT(*) FROM ai_knowledge_store WHERE doc_id = ? AND "
+                            + visibilityClause(), Integer.class, docId, userId, userId);
             meta.put("chunks", chunks != null ? chunks : 0);
         }
         return new ArrayList<>(grouped.values());
@@ -174,7 +209,8 @@ public class KnowledgeController {
     public Map<String, Object> getDocument(@PathVariable("id") String id) {
         Long userId = SecurityUtils.getCurrentUserIdForDataFilter();
         List<Map<String, Object>> rows = jdbcTemplate.queryForList(
-                "SELECT content, chunk_id, payload FROM ai_knowledge_store WHERE doc_id = ? AND (user_id = ? OR ?::bigint IS NULL) ORDER BY chunk_id", id, userId, userId);
+                "SELECT content, chunk_id, payload FROM ai_knowledge_store WHERE doc_id = ? AND "
+                        + visibilityClause() + " ORDER BY chunk_id", id, userId, userId);
         if (rows.isEmpty()) {
             return Map.of("success", false, "error", "文档不存在");
         }
@@ -212,14 +248,32 @@ public class KnowledgeController {
     public List<Map<String, Object>> search(
             @RequestParam("query") String query,
             @RequestParam(name = "type", required = false) String type,
-            @RequestParam(name = "topK", defaultValue = "5") int topK) {
-        List<Document> results = knowledgeService.retrieve(query, topK, 0.4).block();
-        if (results == null) return List.of();
+            @RequestParam(name = "topK", required = false) Integer topK) {
+        // 这里仍在 Tomcat 请求线程上，SecurityContext 有效，可以直接取身份。
+        AiCaller caller = AiCaller.of(SecurityUtils.getDataScope());
+        List<Document> results = knowledgeService.retrieve(query, KnowledgeService.Scenario.SEARCH, caller, topK);
         return results.stream().map(doc -> Map.<String, Object>of(
                 "content", doc.getMetadata().getContent().toString(),
                 "score", doc.getScore(),
                 "docId", doc.getMetadata().getDocId()
         )).collect(Collectors.toList());
+    }
+
+    /**
+     * 「检索不到」和「知识库坏了」必须分开：前者返回空数组，后者返回 503 + 明确原因。
+     * 局部 handler 优先于全局 advice，避免被通用 500 / 404 兜底吞掉。
+     */
+    @ExceptionHandler(KnowledgeUnavailableException.class)
+    public ResponseEntity<Map<String, Object>> onKnowledgeUnavailable(KnowledgeUnavailableException e) {
+        log.warn("[api] knowledge unavailable ({}): {}", e.reason(), e.getMessage());
+        return ResponseEntity.status(HttpStatus.SERVICE_UNAVAILABLE)
+                .body(Map.of("success", false, "code", e.reason().name(), "error", e.getMessage()));
+    }
+
+    /** 兼容 JSON 里 Boolean 与字符串两种写法；缺省或非法值一律按私有处理（安全默认）。 */
+    private static boolean parseBoolean(Object raw) {
+        if (raw instanceof Boolean b) return b;
+        return raw != null && "true".equalsIgnoreCase(String.valueOf(raw).trim());
     }
 
     private List<String> chunkText(String text) {
