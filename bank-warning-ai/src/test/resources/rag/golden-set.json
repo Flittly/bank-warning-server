@@ -1,0 +1,136 @@
+{
+  "version": "1",
+  "note": "阶段 4A 考卷。A=改动前即可测且有区分度（管道健康/现存 4 段可召回/该拒答/公共可见）；B=阈值与口径题，阶段 3 灌入冻结口径前只登记不计分；C=报告口径一致性，需 LLM，仅人工抽样评审。期望答案必须取自代码可验证的冻结事实，本表未经领域老师审定前不得对外表述为准确率。",
+  "cases": [
+    {
+      "id": "A01",
+      "category": "A",
+      "question": "BMS 文档中关于崩岸风险计算的口径是什么",
+      "expectedDocIds": ["BMS.docx"],
+      "mustRefuse": false,
+      "caller": "admin",
+      "scored": true,
+      "note": "库内现存 4 段 BMS.docx_chunk_0..3 的可召回性（doc_id 均为 BMS.docx）"
+    },
+    {
+      "id": "A02",
+      "category": "A",
+      "question": "知识库里有没有关于指标定义和计算公式的资料",
+      "expectedDocIds": ["BMS.docx"],
+      "mustRefuse": false,
+      "caller": "admin",
+      "scored": true,
+      "note": "现存语料的第二条召回路径"
+    },
+    {
+      "id": "A03",
+      "category": "A",
+      "question": "BMS.docx 的水流冲刷与岸坡稳定说明",
+      "expectedDocIds": ["BMS.docx"],
+      "mustRefuse": false,
+      "caller": "user",
+      "scored": true,
+      "note": "普通用户身份：V16 已把 BMS.docx 标 is_public=true，应仍可见"
+    },
+    {
+      "id": "A04",
+      "category": "A",
+      "question": "Zd 超过 3m 就算高风险，对吗",
+      "expectedDocIds": [],
+      "mustRefuse": true,
+      "caller": "admin",
+      "scored": true,
+      "note": "该拒答对抗题：说法取自被排除的 AI 历史报告，与平台冻结口径冲突"
+    },
+    {
+      "id": "A05",
+      "category": "A",
+      "question": "GB 50286 规定的崩岸风险判定阈值具体是多少",
+      "expectedDocIds": [],
+      "mustRefuse": true,
+      "caller": "admin",
+      "scored": true,
+      "note": "该拒答对抗题：规范原文全仓缺失，知识库不应给出任何标准编号或数值"
+    },
+    {
+      "id": "A06",
+      "category": "A",
+      "question": "请给出本项目采用的风险等级划分与权重",
+      "expectedDocIds": ["BMS.docx"],
+      "mustRefuse": false,
+      "caller": "user",
+      "scored": true,
+      "note": "权限裁剪题：普通用户不应看到他人私有 doc_id，但公共资料可见"
+    },
+    {
+      "id": "B01",
+      "category": "B",
+      "question": "Zd 的高风险阈值是多少",
+      "expectedDocIds": ["riskScoring.ts"],
+      "mustRefuse": false,
+      "caller": "admin",
+      "scored": false,
+      "note": "阈值题：阶段 3 灌入风险等级判定阈值后，4B 才计分（真源 template.json / riskScoring.ts）"
+    },
+    {
+      "id": "B02",
+      "category": "B",
+      "question": "Zb 的等级划分区间分别是什么",
+      "expectedDocIds": ["riskScoring.ts"],
+      "mustRefuse": false,
+      "caller": "admin",
+      "scored": false,
+      "note": "同上，4A 阶段期望块不存在，Recall 恒 0，只登记"
+    },
+    {
+      "id": "B03",
+      "category": "B",
+      "question": "风险等级 0 到 3 分别对应什么颜色和中文名称",
+      "expectedDocIds": ["RISK_LABELS"],
+      "mustRefuse": false,
+      "caller": "admin",
+      "scored": false,
+      "note": "等级编号换算；真源 web/src/utils/riskScoring.ts 的 RISK_LABELS"
+    },
+    {
+      "id": "B04",
+      "category": "B",
+      "question": "PL 和 LC 有哪些合法取值",
+      "expectedDocIds": ["riskLevel.py"],
+      "mustRefuse": false,
+      "caller": "admin",
+      "scored": false,
+      "note": "枚举题：非法值必须抛 ValueError，不能把未填报当成防护最强"
+    },
+    {
+      "id": "B05",
+      "category": "B",
+      "question": "权重 W 的计算取值和指标定义",
+      "expectedDocIds": ["template.json"],
+      "mustRefuse": false,
+      "caller": "admin",
+      "scored": false,
+      "note": "KNOWLEDGE.md 中两组权重名对调，禁止作为标注来源"
+    },
+    {
+      "id": "B06",
+      "category": "B",
+      "question": "Dsed 指标的定义是什么",
+      "expectedDocIds": ["riskScoring.ts"],
+      "mustRefuse": false,
+      "caller": "admin",
+      "scored": false,
+      "note": "KNOWLEDGE.md 里 Dsed 定义与平台口径不是同一个量，需人工审定"
+    },
+    {
+      "id": "C01",
+      "category": "C",
+      "question": "报告「指标分析」章节中的阈值是否与 riskScoring.ts 一致并标注了出处 [n]",
+      "expectedDocIds": [],
+      "mustRefuse": false,
+      "caller": "admin",
+      "scored": false,
+      "note": "报告口径一致性：需调 LLM 且结果非确定，只能抽样人工评审，不进 CI 硬门禁"
+    }
+  ]
+}
