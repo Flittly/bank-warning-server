@@ -3,8 +3,11 @@ package com.yangtze.bankwarning.ai.workflow;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.yangtze.bankwarning.ai.config.ReportRagProperties;
 import com.yangtze.bankwarning.ai.context.AiCaller;
 import com.yangtze.bankwarning.ai.middleware.ReasoningTraceMiddleware;
+import com.yangtze.bankwarning.ai.service.KnowledgeService;
+import com.yangtze.bankwarning.ai.service.KnowledgeUnavailableException;
 import com.yangtze.bankwarning.ai.service.MarkdownReportService;
 import com.yangtze.bankwarning.ai.service.PartitionSectionCsvService;
 import com.yangtze.bankwarning.ai.service.VisualizationService;
@@ -19,11 +22,13 @@ import io.agentscope.core.agent.RuntimeContext;
 import io.agentscope.core.message.Msg;
 import io.agentscope.core.message.UserMessage;
 import io.agentscope.core.model.Model;
+import io.agentscope.core.rag.model.Document;
 import io.agentscope.core.skill.repository.AgentSkillRepository;
 import io.agentscope.core.tool.Toolkit;
 import jakarta.annotation.PostConstruct;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.dao.DuplicateKeyException;
 import org.springframework.stereotype.Service;
@@ -103,6 +108,18 @@ public class ReportWorkflowService {
     private final PartitionSectionCsvService partitionSectionCsvService;
     private final ReportRunStore reportRunStore;
     private final ObjectMapper json = new ObjectMapper();
+
+    /**
+     * 报告轨 RAG 的可选依赖：用字段注入而不是加进 10 参构造器 ——
+     * {@code ReportWorkflowPartitionTest:42/282} 直接 {@code new ...(null × 10)}，
+     * 改签名会让两处测试同时编译失败。未注入（或开关关闭）时 Step 6 走原始模板，
+     * 提示词逐字不变，行为零回归。
+     */
+    @Autowired(required = false)
+    private KnowledgeService knowledgeService;
+
+    @Autowired(required = false)
+    private ReportRagProperties reportRagProperties;
 
     public ReportWorkflowService(Model model,
                                  RiskDataTools riskDataTools,
@@ -187,6 +204,8 @@ public class ReportWorkflowService {
         // 从 DB 恢复的 state 里 caller 为 null，toolContext() 会在当时线程重取一次。
         state.caller = AiCaller.of(SecurityUtils.getDataScope());
         String runId = resuming ? existing.runId() : UUID.randomUUID().toString();
+        // 让 ai_rag_traces.trace_id 能与 ai_report_runs.run_id 对上（报告轨留痕可按一次运行串起来）。
+        state.context.put("runId", runId);
 
         // 分幅参数写进 context（随 checkpoint 落库）：
         // - 续跑时不带参数也仍能沿用首次触发时的分幅，保证 Step 2 的图与报告分区不换口径；
@@ -585,6 +604,170 @@ public class ReportWorkflowService {
         return visualizationService.resolveSectionId(taskId, sectionName);
     }
 
+    // ========== Step 6：报告轨 RAG 注入（开关默认关闭） ==========
+
+    /**
+     * 关闭开关时使用的原始模板 —— 与改造前逐字一致。
+     * 两个模板分开是为了让 {@code report-enabled=false} 时提示词、进而报告正文零回归；
+     * 若只用一个模板塞空字符串，输出里会多出空行和一条新规则，正文就不再逐字相同。
+     */
+    private static final String STEP6_PROMPT_BASE = """
+            你正在执行 Step 6：综合所有数据，撰写最终风险评估报告。
+
+            === 任务信息 ===
+            任务 ID：%s
+
+            === Step 1：断面风险数据 ===
+            %s
+
+            === Step 2：风险分布图 ===
+            %s
+
+            === Step 4：天气数据 ===
+            %s
+
+            === Step 5：断面图（热力图+对比图） ===
+            %s
+
+            === 按经纬度分区汇总（分区边界与 Step 2 出图完全一致） ===
+            %s
+
+            === 输出要求 ===
+            1. 用中文撰写完整报告
+            2. 结构：概述 → 指标分析 → 风险评估 → 叠加天气影响 → 建议措施
+            3. 对专业指标做通俗解释
+            4. 给出明确的风险等级判定依据
+            5. 若天气数据显示未来 24h 累计降水 ≥ 25mm 或 72h 内任一日 ≥ 50mm 或有暴雨/台风/大风预警，必须新增"叠加天气风险"章节
+            6. 若 24h 降水 ≥ 50mm 或有红色/橙色预警，必须新增"应急建议"章节
+            7. 输出报告正文，不要加任何"以下是报告"之类的开场白
+            8. **若上面给出了分区汇总**：正文必须按分区组织——每个分区一个二级章节，标题写明
+               「分区 N（第 r 行第 c 列，经度 x~y，纬度 u~v）」，在该章节内汇总**该分区自己的**
+               断面数量、风险等级分布、高风险断面清单与天气影响，并指向附录中该分区对应的地图；
+               分区章节之后，再写一个「跨分区总体研判」章节做横向对比（哪个分区风险最高、为什么）。
+               分区的经纬度范围与数量**只能引用上面给出的数字**，不要自行划分或改写。
+               若只有 1 个分区，可略过分区章节，按原结构撰写。
+            """;
+
+    /** 打开开关时的模板：多一段知识库输入 + 一条输出约束（第 7 个 %s）。 */
+    private static final String STEP6_PROMPT_WITH_RAG = """
+            你正在执行 Step 6：综合所有数据，撰写最终风险评估报告。
+
+            === 任务信息 ===
+            任务 ID：%s
+
+            === Step 1：断面风险数据 ===
+            %s
+
+            === Step 2：风险分布图 ===
+            %s
+
+            === Step 4：天气数据 ===
+            %s
+
+            === Step 5：断面图（热力图+对比图） ===
+            %s
+
+            === 按经纬度分区汇总（分区边界与 Step 2 出图完全一致） ===
+            %s
+
+            === 规范口径（知识库，系统自动检索） ===
+            %s
+
+            === 输出要求 ===
+            1. 用中文撰写完整报告
+            2. 结构：概述 → 指标分析 → 风险评估 → 叠加天气影响 → 建议措施
+            3. 对专业指标做通俗解释
+            4. 给出明确的风险等级判定依据
+            5. 若天气数据显示未来 24h 累计降水 ≥ 25mm 或 72h 内任一日 ≥ 50mm 或有暴雨/台风/大风预警，必须新增"叠加天气风险"章节
+            6. 若 24h 降水 ≥ 50mm 或有红色/橙色预警，必须新增"应急建议"章节
+            7. 输出报告正文，不要加任何"以下是报告"之类的开场白
+            8. **若上面给出了分区汇总**：正文必须按分区组织——每个分区一个二级章节，标题写明
+               「分区 N（第 r 行第 c 列，经度 x~y，纬度 u~v）」，在该章节内汇总**该分区自己的**
+               断面数量、风险等级分布、高风险断面清单与天气影响，并指向附录中该分区对应的地图；
+               分区章节之后，再写一个「跨分区总体研判」章节做横向对比（哪个分区风险最高、为什么）。
+               分区的经纬度范围与数量**只能引用上面给出的数字**，不要自行划分或改写。
+               若只有 1 个分区，可略过分区章节，按原结构撰写。
+            9. 「指标分析」与「风险评估」两章中，凡涉及风险等级阈值、指标定义、权重、
+               等级划分与判定依据的表述，只能引用上面「规范口径（知识库）」一节的内容，
+               并在该句末尾标注 [n] 对应序号；该节未覆盖的内容写「知识库未提供」，
+               不得依据自身记忆补写数字或标准编号。若该节提示知识库不可用或未启用，
+               必须在报告「概述」中单列一句说明本次判定依据受限。
+               其余章节（断面数量、里程、天气、图表、分区边界）仍以 Step 1~5 的数据为准，
+               不受本节约束。
+            """;
+
+    private static final String CRITERIA_NOT_ENABLED =
+            "知识库参考未启用（app.ai.rag.report-enabled=false）。";
+    private static final String CRITERIA_NO_KB =
+            "知识库未提供判定口径：本次不得编造阈值或指标定义。";
+
+    /** 包级可见的纯函数：单元测试可直接验证两个模板的契约，不必跑整条工作流。 */
+    static String buildStep6Prompt(boolean ragEnabled, String taskId, String riskData,
+                                   String dist, String weather, String charts,
+                                   String partitionBlock, String criteriaContext) {
+        return ragEnabled
+                ? STEP6_PROMPT_WITH_RAG.formatted(taskId, riskData, dist, weather, charts,
+                        partitionBlock, criteriaContext == null ? "" : criteriaContext)
+                : STEP6_PROMPT_BASE.formatted(taskId, riskData, dist, weather, charts,
+                        partitionBlock);
+    }
+
+    /**
+     * 报告轨固定预检索：走 {@link KnowledgeService#retrieve} 唯一入口，
+     * 把命中的 {@code Document} 渲染成带 [n] 序号的纯文本，作为 Step 6 的一个输入段落。
+     *
+     * <p>包级可见 + 显式传依赖，是为了让测试能纯 POJO 驱动；实例方法只是薄封装。
+     * 快照只放纯 {@code String/Map/List}——{@code Document} 含 {@code double[] embedding}，
+     * 放进 {@code state.context} 会污染 checkpoint 序列化。
+     */
+    static String renderCriteriaContext(WorkflowState state, KnowledgeService service,
+                                        ReportRagProperties props) {
+        if (service == null || props == null || !props.enabled) {
+            return CRITERIA_NOT_ENABLED;
+        }
+        AiCaller caller = state.caller != null
+                ? state.caller
+                : AiCaller.of(SecurityUtils.getDataScope());
+        String traceId = "report-" + state.context.getOrDefault("runId", "unknown") + "-step6";
+        try {
+            List<Document> docs = service.retrieve(
+                    props.query, KnowledgeService.Scenario.REPORT,
+                    caller, props.topK, traceId);
+            if (docs.isEmpty()) {
+                return CRITERIA_NO_KB;
+            }
+            List<Map<String, Object>> snapshot = new ArrayList<>();
+            StringBuilder sb = new StringBuilder("以下内容来自平台知识库，按相关度排序：\n");
+            for (int i = 0; i < docs.size(); i++) {
+                Document d = docs.get(i);
+                String docId = String.valueOf(d.getMetadata().getDocId());
+                String chunkId = String.valueOf(d.getId());
+                String text = String.valueOf(d.getMetadata().getContent());
+                sb.append("[").append(i + 1).append("] 来源 ").append(docId)
+                        .append("/").append(chunkId).append("\n").append(text).append("\n\n");
+                // score 可能为 null，不能用 Map.of（会 NPE）。
+                Map<String, Object> hit = new LinkedHashMap<>();
+                hit.put("docId", docId);
+                hit.put("chunkId", chunkId);
+                hit.put("score", d.getScore() instanceof Number n ? n.doubleValue() : null);
+                snapshot.add(hit);
+            }
+            state.context.put("criteriaSnapshot", snapshot);
+            state.context.put("criteriaTraceId", traceId);
+            return sb.toString();
+        } catch (KnowledgeUnavailableException e) {
+            // 不抛：任一步抛异常会让整份报告 FAILED（executeOneStep 的异常处理）。
+            // 但绝不静默当成「没资料」——把受限原因写进提示词，让报告显式标注。
+            log.warn("[report-rag] 知识库不可用（{}）: {}", e.reason(), e.getMessage());
+            return "知识库不可用（" + e.reason() + "）：" + e.getMessage()
+                    + "。本次不得编造判定依据，请在报告中标注该限制。";
+        }
+    }
+
+    private String loadCriteriaContext(WorkflowState state) {
+        return renderCriteriaContext(state, knowledgeService, reportRagProperties);
+    }
+
     private String step6Synthesize(String taskId, WorkflowState state) {
         Toolkit toolkit = new Toolkit();
 
@@ -599,42 +782,18 @@ public class ReportWorkflowService {
                 ? partitionSummary
                 : "本次未按经纬度分幅（未提供分幅参数）。请按原结构撰写，不要虚构分区。";
 
-        String fullPrompt = """
-                你正在执行 Step 6：综合所有数据，撰写最终风险评估报告。
-
-                === 任务信息 ===
-                任务 ID：%s
-
-                === Step 1：断面风险数据 ===
-                %s
-
-                === Step 2：风险分布图 ===
-                %s
-
-                === Step 4：天气数据 ===
-                %s
-
-                === Step 5：断面图（热力图+对比图） ===
-                %s
-
-                === 按经纬度分区汇总（分区边界与 Step 2 出图完全一致） ===
-                %s
-
-                === 输出要求 ===
-                1. 用中文撰写完整报告
-                2. 结构：概述 → 指标分析 → 风险评估 → 叠加天气影响 → 建议措施
-                3. 对专业指标做通俗解释
-                4. 给出明确的风险等级判定依据
-                5. 若天气数据显示未来 24h 累计降水 ≥ 25mm 或 72h 内任一日 ≥ 50mm 或有暴雨/台风/大风预警，必须新增"叠加天气风险"章节
-                6. 若 24h 降水 ≥ 50mm 或有红色/橙色预警，必须新增"应急建议"章节
-                7. 输出报告正文，不要加任何"以下是报告"之类的开场白
-                8. **若上面给出了分区汇总**：正文必须按分区组织——每个分区一个二级章节，标题写明
-                   「分区 N（第 r 行第 c 列，经度 x~y，纬度 u~v）」，在该章节内汇总**该分区自己的**
-                   断面数量、风险等级分布、高风险断面清单与天气影响，并指向附录中该分区对应的地图；
-                   分区章节之后，再写一个「跨分区总体研判」章节做横向对比（哪个分区风险最高、为什么）。
-                   分区的经纬度范围与数量**只能引用上面给出的数字**，不要自行划分或改写。
-                   若只有 1 个分区，可略过分区章节，按原结构撰写。
-                """.formatted(taskId, riskData, dist, weather, charts, partitionBlock);
+        // 报告轨 RAG：服务端固定预检索一次，不让 Agent 自己决定查不查。
+        // 开关关闭（或依赖未注入）时走原始模板，提示词逐字不变。
+        boolean ragEnabled = knowledgeService != null
+                && reportRagProperties != null
+                && reportRagProperties.enabled;
+        String criteriaContext = ragEnabled ? loadCriteriaContext(state) : null;
+        if (ragEnabled) {
+            // 文本同样落 checkpoint，便于断点续跑和事后解释依据的是哪一版口径。
+            state.context.put("criteriaContext", criteriaContext);
+        }
+        String fullPrompt = buildStep6Prompt(ragEnabled, taskId, riskData, dist, weather,
+                charts, partitionBlock, criteriaContext);
 
         ReActAgent agent = buildMiniAgent("step6_synthesize", toolkit, fullPrompt);
 

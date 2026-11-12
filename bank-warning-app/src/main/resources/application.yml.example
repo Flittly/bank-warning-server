@@ -164,6 +164,13 @@ app:
       candidate-expansion: ${RAG_CANDIDATE_EXPANSION:5}
       retrieve-timeout-ms: ${RAG_RETRIEVE_TIMEOUT_MS:15000}
       sse-timeout-ms: ${RAG_SSE_TIMEOUT_MS:600000}
+      # 报告轨 RAG：Step 6 撰写前固定预检索一次，把命中的口径作为提示词的一段输入。
+      # 默认关闭 —— 库里目前只有 4 段 BMS.docx（内部算法说明，不是判定标准），
+      # 打开会把不可信文本注入正式交付物。阶段 3 灌入可信冻结口径后再置 true。
+      report-enabled: ${RAG_REPORT_ENABLED:false}
+      report-top-k: ${RAG_REPORT_TOP_K:3}
+      # 固定 query 常量：不要按任务动态拼，否则同任务两次生成的检索结果可能不同。
+      report-query: ${RAG_REPORT_QUERY:崩岸风险等级判定阈值 指标定义 权重 等级划分 风险等级}
     skill:
       # Skill 脚本物化缓存根目录（启动时把所有 skill 的 resources 物化到这里）
       # <cache-dir>/<skill-name>/scripts/<file>

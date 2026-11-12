@@ -46,11 +46,18 @@ import java.util.UUID;
 @SuppressWarnings({"deprecation", "removal"})
 public class KnowledgeService {
 
-    /** 检索场景：决定默认 topK，也写进留痕便于区分来源。 */
-    public enum Scenario { CHAT, TOOL, SEARCH }
+    /** 检索场景：决定默认 topK，也写进留痕便于区分来源。REPORT = 报告轨固定预检索。 */
+    public enum Scenario { CHAT, TOOL, SEARCH, REPORT }
 
     private static final Logger log = LoggerFactory.getLogger(KnowledgeService.class);
     private static final int MAX_CANDIDATES = 100;
+
+    /**
+     * REPORT 场景的兜底 topK。报告侧会显式传 {@code limitOverride}（优先级见 :100），
+     * 这里的值实际不会被走到；但 topKFor 是穷举 switch 表达式，缺 case 会编译失败，
+     * 所以必须给一个合法分支，避免报告轨配置泄漏到 RagProperties 的 11 参构造器里。
+     */
+    private static final int REPORT_FALLBACK_TOP_K = 3;
 
     /** 与 KnowledgeController 的增删改查同口径：普通用户只看自己名下的 doc_id。 */
     private static final String VISIBLE_DOC_IDS_SQL =
@@ -234,6 +241,7 @@ public class KnowledgeService {
             case CHAT -> props.chatTopK;
             case TOOL -> props.toolTopK;
             case SEARCH -> props.searchTopK;
+            case REPORT -> REPORT_FALLBACK_TOP_K;
         };
     }
 
