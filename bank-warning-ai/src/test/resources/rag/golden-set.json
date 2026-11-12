@@ -1,6 +1,6 @@
 {
-  "version": "1",
-  "note": "阶段 4A 考卷。A=改动前即可测且有区分度（管道健康/现存 4 段可召回/该拒答/公共可见）；B=阈值与口径题，阶段 3 灌入冻结口径前只登记不计分；C=报告口径一致性，需 LLM，仅人工抽样评审。期望答案必须取自代码可验证的冻结事实，本表未经领域老师审定前不得对外表述为准确率。",
+  "version": "2",
+  "note": "阶段 4A 考卷 + 阶段 5 准备包。A=改动前即可测且有区分度（管道健康/现存 4 段可召回/该拒答/公共可见）；B=阈值与口径题，阶段 3 灌入冻结口径前只登记不计分；C=报告口径一致性，需 LLM，仅人工抽样评审；D=阶段 5 混合检索专用题（精确关键词/编号/数值，用来对比 dense-only 与 RRF），在阶段 5 上线并完成阶段 3 灌库前一律只登记不计分，否则会把 4A 基线污染成一堆 0。期望答案必须取自代码可验证的冻结事实，本表未经领域老师审定前不得对外表述为准确率。",
   "cases": [
     {
       "id": "A01",
@@ -131,6 +131,46 @@
       "caller": "admin",
       "scored": false,
       "note": "报告口径一致性：需调 LLM 且结果非确定，只能抽样人工评审，不进 CI 硬门禁"
+    },
+    {
+      "id": "D01",
+      "category": "D",
+      "question": "Zb 的三级阈值 20 30 40 分别对应哪个风险等级",
+      "expectedDocIds": ["template.json"],
+      "mustRefuse": false,
+      "caller": "admin",
+      "scored": false,
+      "note": "精确数值串：dense 对孤立数字不敏感，trigram/ILIKE 可精确命中。阶段 5 的 before/after 对照题，灌库前只登记"
+    },
+    {
+      "id": "D02",
+      "category": "D",
+      "question": "wNM wRE wGE wRL 四组权重的取值是多少",
+      "expectedDocIds": ["template.json"],
+      "mustRefuse": false,
+      "caller": "admin",
+      "scored": false,
+      "note": "英文缩写代号：KNOWLEDGE.md 曾把 wNM 与 wRE 对调，稀疏精确匹配可用于核对代号不串味"
+    },
+    {
+      "id": "D03",
+      "category": "D",
+      "question": "PL 和 LC 传入非法值时会抛 ValueError 吗",
+      "expectedDocIds": ["riskLevel.py"],
+      "mustRefuse": false,
+      "caller": "admin",
+      "scored": false,
+      "note": "标识符 + 异常名混排题：dense 易被「枚举取值」语义带偏，关键词路可锁定 ValueError"
+    },
+    {
+      "id": "D04",
+      "category": "D",
+      "question": "Dsed 算例中 hs 42 除以 hc 13.5 得到的具体数值",
+      "expectedDocIds": ["BMS.docx"],
+      "mustRefuse": false,
+      "caller": "admin",
+      "scored": false,
+      "note": "唯一在现存 4 段语料中已有答案的 D 类题；保留 scored=false 以免改变 4A 基线计分题数"
     }
   ]
 }

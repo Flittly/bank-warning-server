@@ -40,7 +40,8 @@ public final class RagProperties {
 
     /**
      * 权限过滤发生在向量检索之后，因此粗召回要多取几倍，过滤完再截到 topK。
-     * 阶段 5 若改成 SQL 内过滤（security trimming），这个系数就可以去掉。
+     * <b>阶段 6</b> 若改成 SQL 内过滤（security trimming），这个系数就可以去掉；
+     * <b>阶段 5</b> 的混合检索（dense + sparse → RRF）不改变本系数的语义。
      */
     public final int candidateExpansion;
 

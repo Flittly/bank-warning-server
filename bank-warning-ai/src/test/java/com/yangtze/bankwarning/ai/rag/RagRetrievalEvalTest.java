@@ -51,10 +51,54 @@ class RagRetrievalEvalTest {
         assertTrue(golden.cases.stream().anyMatch(c -> "A".equals(c.category)));
         assertTrue(golden.cases.stream().anyMatch(c -> "B".equals(c.category)));
         assertTrue(golden.cases.stream().anyMatch(c -> "C".equals(c.category)));
+        assertTrue(golden.cases.stream().anyMatch(c -> "D".equals(c.category)),
+                "阶段 5 准备包应登记 D 类关键词/编号题");
         assertTrue(golden.cases.stream().anyMatch(c -> !c.scored),
-                "B/C 类在灌库前必须只登记不计分，否则 Recall 恒 0 会污染基线");
+                "B/C/D 类在灌库与阶段 5 上线前必须只登记不计分，否则 Recall 恒 0 会污染基线");
+        assertTrue(golden.cases.stream().filter(c -> "D".equals(c.category))
+                        .allMatch(c -> !c.scored),
+                "D 类计分会改变 4A 基线的计分题数，破坏 before/after 可比性");
         assertEquals(golden.cases.size(),
                 golden.cases.stream().map(c -> c.id).distinct().count());
+    }
+
+    @Test
+    @DisplayName("阶段 5 前置：把 4A 基线刻度固化成不退化断言，且能抓到真实退化")
+    void gatePinsBaselineThresholdsAndDetectsRegression() {
+        // 这是「指标计算 + 检索判据」的逻辑门禁，不是线上效果门禁：
+        // 固定小库的 1.0 只证明算法与判据没被改坏，线上召回质量看 RagEvalCli 的对照报告。
+        RagGoldenSet golden = RagGoldenSet.fromJsonForTest("""
+                {"version":"gate","cases":[
+                  {"id":"G1","category":"A","question":"g1","expectedDocIds":["d1"],"scored":true},
+                  {"id":"G2","category":"A","question":"g2","expectedDocIds":["d2"],"scored":true},
+                  {"id":"G3","category":"A","question":"g3","expectedDocIds":[],"mustRefuse":true,"scored":true},
+                  {"id":"G4","category":"D","question":"g4","expectedDocIds":["d4"],"scored":false}
+                ]}
+                """);
+
+        RagRetrievalEvaluator.RetrievalFn healthy = (q, k, caller, tid) -> switch (q) {
+            case "g1" -> List.of("d1");
+            case "g2" -> List.of("d2");
+            case "g3" -> List.of();
+            default -> List.of("d4");
+        };
+        RagEvalReport report = new RagRetrievalEvaluator().run(golden, healthy);
+
+        assertEquals(0, report.errorCount(), "检索失败不得被吞成空列表");
+        assertEquals(2, report.countedCases());
+        assertEquals(1.0, report.meanRecall(), 1e-9);
+        assertEquals(1.0, report.meanPrecision(), 1e-9);
+        assertEquals(1.0, report.refusalPassRate(), 1e-9,
+                "该拒答的题必须真空返回；4A 真库基线此项为 0.0000，是当前最该修的问题");
+        assertEquals(1, report.registeredCount(), "登记题不得混入计分均值");
+
+        // 模拟阶段 5 改坏 doRetrieve()：所有题都返回同一篇（正是 4A 基线 A04/A05 的实际表现）。
+        // 门禁必须能抓到，否则「不退化」只是写在注释里。
+        RagEvalReport regressed = new RagRetrievalEvaluator().run(golden,
+                (q, k, caller, tid) -> List.of("d1"));
+        assertEquals(0.0, regressed.refusalPassRate(), 1e-9);
+        assertTrue(regressed.meanPrecision() < 1.0);
+        assertEquals(0, regressed.errorCount(), "退化是效果变差，不是检索异常，两者要区分");
     }
 
     @Test

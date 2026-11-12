@@ -40,7 +40,11 @@ import java.util.UUID;
  *
  * <p><b>当前过滤发生在召回之后</b>：SDK 的 {@code SearchDocumentDto} 没有 filter 字段，
  * 无法在向量 SQL 内裁剪。无权内容不会被返回给模型或用户，但服务端确实短暂读到过。
- * 阶段 5 改为 SQL 内过滤（security trimming）时，只需替换本方法内部，调用方不动。
+ * <b>阶段 6</b> 改为 SQL 内过滤（security trimming）时，只需替换本方法内部，调用方不动。
+ *
+ * <p><b>阶段编号（勿按旧注释理解）</b>：阶段 5 = 混合检索（dense + sparse → RRF），
+ * 挂点在 {@code doRetrieve()}；阶段 6 = SQL 内权限过滤，挂点在 {@code applyPermissionFilter()}。
+ * 两者都是增强项，前提是阶段 4 的考卷与基线就位。
  */
 @Service
 @SuppressWarnings({"deprecation", "removal"})

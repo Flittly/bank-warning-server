@@ -44,7 +44,8 @@ public final class RagGoldenSet {
 
     private static final ObjectMapper JSON = new ObjectMapper();
     private static final Set<String> CALLERS = Set.of("admin", "user", "anonymous");
-    private static final Set<String> CATEGORIES = Set.of("A", "B", "C");
+    /** D = 阶段 5 混合检索专用题：精确关键词/编号/数值，用来体现稀疏召回相对纯 dense 的增益。 */
+    private static final Set<String> CATEGORIES = Set.of("A", "B", "C", "D");
 
     public final String version;
     public final String note;

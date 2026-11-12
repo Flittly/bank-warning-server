@@ -45,12 +45,19 @@ import java.util.Map;
  *     -Dexec.args="--self-check"
  * </pre>
  * 连真实服务：{@code --base-url http://localhost:8080 --token <JWT>}。
+ * 连真库跑效果基线：{@code --jdbc}（key 取环境变量 DASHSCOPE_API_KEY，
+ * 缺失时回落读 application-local.yml，也可用 {@code --key-file} 显式指定）。
  * 报告默认落到 {@code reports/rag-eval-<时间戳>.md}。
  */
 public final class RagEvalCli {
 
     private static final ObjectMapper JSON = new ObjectMapper();
     private static final DateTimeFormatter TS = DateTimeFormatter.ofPattern("yyyyMMdd-HHmmss");
+
+    /** 本机 key 文件（gitignore，只在开发机存在）：server 根视角与 ai 模块视角各试一次。 */
+    private static final String DEFAULT_LOCAL_CONFIG =
+            "bank-warning-app/src/main/resources/application-local.yml";
+    private static final String DEFAULT_LOCAL_CONFIG_FROM_MODULE = "../" + DEFAULT_LOCAL_CONFIG;
 
     private RagEvalCli() {
     }
@@ -170,10 +177,7 @@ public final class RagEvalCli {
      * 密钥从环境变量读，不落命令行、不写报告。
      */
     private static RetrievalSource jdbc(Map<String, String> opts) throws Exception {
-        String key = System.getenv("DASHSCOPE_API_KEY");
-        if (key == null || key.isBlank()) {
-            throw new IllegalStateException("jdbc 模式需要环境变量 DASHSCOPE_API_KEY");
-        }
+        String key = resolveDashScopeKey(opts);
         String url = opts.getOrDefault("jdbc-url",
                 "jdbc:postgresql://localhost:5432/bank_risk_db");
         String user = opts.getOrDefault("db-user", "postgres");
@@ -216,6 +220,56 @@ public final class RagEvalCli {
         };
         return new RetrievalSource(
                 "jdbc 真库直连 + text-embedding-v4（trace 关闭，未写 ai_rag_traces）", fn);
+    }
+
+    /**
+     * DashScope key 的两条来源：环境变量优先，否则读 {@code application-local.yml} 的
+     * {@code agentscope.dashscope.api-key}（该文件被 gitignore，只在本机存在）。
+     *
+     * <p>为什么需要回落：项目实际把本地 key 放在 application-local.yml，而 4A 首次基线
+     * 只认环境变量，换一个 shell 就跑不了，破坏了「重跑结果是否一致」这一评测前提。
+     * key 绝不写入报告、命令行参数或日志；{@code ${...}} 占位符不算有效值。
+     */
+    private static String resolveDashScopeKey(Map<String, String> opts) throws IOException {
+        String fromEnv = System.getenv("DASHSCOPE_API_KEY");
+        if (fromEnv != null && !fromEnv.isBlank()) {
+            return fromEnv.trim();
+        }
+        List<String> candidates = opts.containsKey("key-file")
+                ? List.of(opts.get("key-file"))
+                : List.of(DEFAULT_LOCAL_CONFIG, DEFAULT_LOCAL_CONFIG_FROM_MODULE);
+        for (String candidate : candidates) {
+            Path path = Path.of(candidate);
+            if (!Files.isRegularFile(path)) {
+                continue;
+            }
+            String section = "";
+            for (String line : Files.readAllLines(path, StandardCharsets.UTF_8)) {
+                String trimmed = line.trim();
+                if (trimmed.isEmpty() || trimmed.startsWith("#")) {
+                    continue;
+                }
+                int indent = line.length() - line.stripLeading().length();
+                if (indent <= 2 && trimmed.endsWith(":")) {
+                    section = trimmed.substring(0, trimmed.length() - 1).trim();
+                    continue;
+                }
+                if ("dashscope".equals(section) && trimmed.startsWith("api-key")) {
+                    int colon = trimmed.indexOf(':');
+                    if (colon < 0) {
+                        continue;
+                    }
+                    String value = trimmed.substring(colon + 1).trim()
+                            .replaceAll("^['\"]|['\"]$", "");
+                    if (!value.isBlank() && !value.startsWith("${")) {
+                        return value;
+                    }
+                }
+            }
+        }
+        throw new IllegalStateException(
+                "jdbc 模式需要 DashScope key：设置环境变量 DASHSCOPE_API_KEY，或用 --key-file "
+                        + "指向 application-local.yml（默认查找 " + DEFAULT_LOCAL_CONFIG + "）");
     }
 
     private record RetrievalSource(String name, RagRetrievalEvaluator.RetrievalFn fn) {
