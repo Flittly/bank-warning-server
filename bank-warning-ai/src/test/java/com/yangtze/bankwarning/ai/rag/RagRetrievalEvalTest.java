@@ -22,6 +22,7 @@ import java.util.List;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
@@ -137,7 +138,61 @@ class RagRetrievalEvalTest {
         String md = report.toMarkdown();
         assertTrue(md.contains("平均 Recall@k"));
         assertTrue(md.contains("不是领域认证"));
+        assertTrue(md.contains("top1分"), "报告必须保留分数列，否则没法观察拒答题的相似度");
         assertTrue(md.contains("T3"));
+    }
+
+    @Test
+    @DisplayName("拒答口径分层：答案层题不进检索层拒答率，全口径指标仍与 4A 基线可比")
+    void refusalLayersAreCountedSeparately() {
+        RagGoldenSet golden = RagGoldenSet.fromJsonForTest("""
+                {"version":"layer","cases":[
+                  {"id":"L1","category":"A","question":"说法不被支持","expectedDocIds":[],"mustRefuse":true,"refusalLayer":"ANSWER","scored":true},
+                  {"id":"L2","category":"A","question":"规范不存在","expectedDocIds":[],"mustRefuse":true,"scored":true}
+                ]}
+                """);
+        RagRetrievalEvaluator.RetrievalFn fn = (q, k, caller, tid) ->
+                "规范不存在".equals(q) ? List.of() : List.of("BMS.docx");
+
+        RagEvalReport report = new RagRetrievalEvaluator().run(golden, fn);
+
+        assertEquals(1, report.answerLayerRefusalCount());
+        assertEquals(1.0, report.retrievalRefusalPassRate(), 1e-9,
+                "检索层只该为 L2 负责；L1 是资料存在但说法不被支持，属生成层");
+        assertEquals(0.5, report.refusalPassRate(), 1e-9,
+                "全口径仍按原定义统计两题，保持与 4A 基线逐字可比");
+        assertTrue(report.toMarkdown().contains("检索层拒答通过率"));
+    }
+
+    @Test
+    @DisplayName("真库路径把 top1 相似度带进报告，不提供分数的数据源显示 —")
+    void topScoreIsReportedWhenSourceProvidesIt() {
+        RagGoldenSet golden = RagGoldenSet.fromJsonForTest("""
+                {"version":"score","cases":[
+                  {"id":"S1","category":"A","question":"q","expectedDocIds":["d1"],"scored":true}
+                ]}
+                """);
+        RagRetrievalEvaluator.RetrievalFn scored = new RagRetrievalEvaluator.RetrievalFn() {
+            @Override
+            public List<String> fetch(String q, int k, String caller, String tid) {
+                return List.of("d1");
+            }
+
+            @Override
+            public List<RagRetrievalEvaluator.RetrievalFn.Scored> fetchScored(
+                    String q, int k, String caller, String tid) {
+                return List.of(new RagRetrievalEvaluator.RetrievalFn.Scored("d1", 0.8123));
+            }
+        };
+
+        RagEvalReport report = new RagRetrievalEvaluator().run(golden, scored);
+        assertEquals(0.8123, report.results().get(0).topScore(), 1e-9);
+        assertTrue(report.toMarkdown().contains("0.8123"));
+
+        RagEvalReport noScore = new RagRetrievalEvaluator().run(golden,
+                (q, k, caller, tid) -> List.of("d1"));
+        assertNull(noScore.results().get(0).topScore());
+        assertTrue(noScore.toMarkdown().contains("—"));
     }
 
     @Test

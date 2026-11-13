@@ -24,6 +24,21 @@ public final class RagRetrievalEvaluator {
     @FunctionalInterface
     public interface RetrievalFn {
         List<String> fetch(String question, int topK, String caller, String traceId) throws Exception;
+
+        /** 一条带分数的命中；score 为 null 表示该数据源不提供相似度。 */
+        record Scored(String docId, Double score) {}
+
+        /**
+         * 默认把 fetch() 的结果包装成「无分数」，所以既有 lambda / REST / self-check
+         * 实现零改动。只有 jdbc 真库路径覆盖此方法，把 Document.getScore() 带进报告，
+         * 用于观察「该拒答的题到底拿了多高的分」，避免拍脑袋定阈值。
+         */
+        default List<Scored> fetchScored(String question, int topK, String caller, String traceId)
+                throws Exception {
+            List<String> ids = fetch(question, topK, caller, traceId);
+            return ids == null ? List.of()
+                    : ids.stream().map(id -> new Scored(id, null)).toList();
+        }
     }
 
     public static final int DEFAULT_TOP_K = 5;
@@ -52,9 +67,18 @@ public final class RagRetrievalEvaluator {
         for (RagGoldenSet.GoldenCase c : golden.cases) {
             List<String> expected = List.copyOf(c.expectedDocIdsOrEmpty());
             String caller = (c.caller == null || c.caller.isBlank()) ? "admin" : c.caller;
+            String refusalLayer = (c.refusalLayer == null || c.refusalLayer.isBlank())
+                    ? RagGoldenSet.RETRIEVAL_LAYER : c.refusalLayer;
             String traceId = runId + "-" + c.id;
             try {
-                List<String> returned = retrieval.fetch(c.question, topK, caller, traceId);
+                List<RetrievalFn.Scored> scored =
+                        retrieval.fetchScored(c.question, topK, caller, traceId);
+                List<String> returned = scored == null ? List.of()
+                        : scored.stream().map(RetrievalFn.Scored::docId).toList();
+                Double topScore = scored == null ? null : scored.stream()
+                        .map(RetrievalFn.Scored::score)
+                        .filter(java.util.Objects::nonNull)
+                        .findFirst().orElse(null);
                 // 按唯一 docId 去重：同一篇文档的 4 个 chunk 归一化后是同一个 id，
                 // 不去重会让 Precision 被重复计数压低（实测 1.0 被算成 0.25）。
                 List<String> safeReturned = returned == null
@@ -69,16 +93,16 @@ public final class RagRetrievalEvaluator {
                 double precision = safeReturned.isEmpty() ? 0.0 : hit.size() / (double) safeReturned.size();
                 boolean refuseOk = !c.mustRefuse || safeReturned.isEmpty();
                 results.add(new RagEvalReport.CaseResult(
-                        c.id, c.category, c.scored, c.mustRefuse,
+                        c.id, c.category, c.scored, c.mustRefuse, refusalLayer,
                         expected, safeReturned, hit, recall, precision,
-                        refuseOk, "OK", null));
+                        refuseOk, "OK", null, topScore));
             } catch (Exception e) {
                 // 不吞成空列表：失败必须留在报告里，且计入 errorCount。
                 String msg = rootMessage(e);
                 results.add(new RagEvalReport.CaseResult(
-                        c.id, c.category, c.scored, c.mustRefuse,
+                        c.id, c.category, c.scored, c.mustRefuse, refusalLayer,
                         expected, List.of(), List.of(), 0.0, 0.0,
-                        false, "ERROR", msg));
+                        false, "ERROR", msg, null));
             }
         }
         return new RagEvalReport(meta, results);

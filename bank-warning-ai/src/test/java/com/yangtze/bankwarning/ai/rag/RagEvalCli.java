@@ -205,18 +205,32 @@ public final class RagEvalCli {
                         .build(),
                 store, jdbcTemplate, new JdbcRagTraceStore(jdbcTemplate, props), props);
 
-        RagRetrievalEvaluator.RetrievalFn fn = (question, topK, caller, traceId) -> {
-            AiCaller who = switch (caller) {
-                case "admin" -> AiCaller.forAdmin();
-                case "anonymous" -> AiCaller.anonymous();
-                // 考卷里的 user 是普通用户视角；BMS.docx 已被 V16 标为公共，应仍可见。
-                default -> AiCaller.forUser(7L);
-            };
-            return service.retrieve(question, KnowledgeService.Scenario.SEARCH,
-                            who, topK, traceId)
-                    .stream()
-                    .map(d -> String.valueOf(d.getMetadata().getDocId()))
-                    .toList();
+        // 真库路径覆盖 fetchScored()：把 Document.getScore() 一并带进报告，
+        // 这样「该拒答的题」才能看到它到底拿了多高的相似度，而不是只有 0/1 的空/非空。
+        RagRetrievalEvaluator.RetrievalFn fn = new RagRetrievalEvaluator.RetrievalFn() {
+            @Override
+            public List<String> fetch(String question, int topK, String caller, String traceId) {
+                return fetchScored(question, topK, caller, traceId).stream()
+                        .map(RagRetrievalEvaluator.RetrievalFn.Scored::docId)
+                        .toList();
+            }
+
+            @Override
+            public List<RagRetrievalEvaluator.RetrievalFn.Scored> fetchScored(
+                    String question, int topK, String caller, String traceId) {
+                AiCaller who = switch (caller) {
+                    case "admin" -> AiCaller.forAdmin();
+                    case "anonymous" -> AiCaller.anonymous();
+                    // 考卷里的 user 是普通用户视角；BMS.docx 已被 V16 标为公共，应仍可见。
+                    default -> AiCaller.forUser(7L);
+                };
+                return service.retrieve(question, KnowledgeService.Scenario.SEARCH,
+                                who, topK, traceId)
+                        .stream()
+                        .map(d -> new RagRetrievalEvaluator.RetrievalFn.Scored(
+                                String.valueOf(d.getMetadata().getDocId()), d.getScore()))
+                        .toList();
+            }
         };
         return new RetrievalSource(
                 "jdbc 真库直连 + text-embedding-v4（trace 关闭，未写 ai_rag_traces）", fn);

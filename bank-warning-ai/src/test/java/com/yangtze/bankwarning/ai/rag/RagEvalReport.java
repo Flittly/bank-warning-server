@@ -19,6 +19,7 @@ public final class RagEvalReport {
             String category,
             boolean scored,
             boolean mustRefuse,
+            String refusalLayer,
             List<String> expected,
             List<String> returned,
             List<String> hit,
@@ -26,9 +27,15 @@ public final class RagEvalReport {
             double precision,
             boolean mustRefuseOk,
             String status,
-            String error) {
+            String error,
+            Double topScore) {
         public boolean countedInRecall() {
             return scored && "OK".equals(status) && !mustRefuse && !expected.isEmpty();
+        }
+
+        public boolean retrievalLayerRefusal() {
+            return mustRefuse && RagGoldenSet.RETRIEVAL_LAYER.equals(refusalLayer)
+                    && "OK".equals(status);
         }
     }
 
@@ -59,6 +66,7 @@ public final class RagEvalReport {
                 .mapToDouble(CaseResult::precision));
     }
 
+    /** 全口径拒答通过率：分母与 4A 基线完全一致，禁止改定义，否则历史快照失去可比性。 */
     public double refusalPassRate() {
         var refusals = results.stream()
                 .filter(r -> r.mustRefuse() && "OK".equals(r.status())).toList();
@@ -66,6 +74,21 @@ public final class RagEvalReport {
             return 0.0;
         }
         return refusals.stream().filter(CaseResult::mustRefuseOk).count() / (double) refusals.size();
+    }
+
+    /** 只统计「检索层就该空返回」的题；答案层题不背检索层的锅。 */
+    public double retrievalRefusalPassRate() {
+        var refusals = results.stream().filter(CaseResult::retrievalLayerRefusal).toList();
+        if (refusals.isEmpty()) {
+            return 0.0;
+        }
+        return refusals.stream().filter(CaseResult::mustRefuseOk).count() / (double) refusals.size();
+    }
+
+    /** 资料存在但说法不被支持、需要 LLM 作答阶段拒答的题数（不进 CI 硬门禁）。 */
+    public long answerLayerRefusalCount() {
+        return results.stream().filter(r -> r.mustRefuse()
+                && RagGoldenSet.ANSWER_LAYER.equals(r.refusalLayer())).count();
     }
 
     public long errorCount() {
@@ -94,15 +117,19 @@ public final class RagEvalReport {
         sb.append("| 平均 Recall@k | ").append(fmt(meanRecall())).append(" |\n");
         sb.append("| 平均 Context Precision | ").append(fmt(meanPrecision())).append(" |\n");
         sb.append("| 该拒答题通过率 | ").append(fmt(refusalPassRate())).append(" |\n");
+        sb.append("| 检索层拒答通过率 | ").append(fmt(retrievalRefusalPassRate())).append(" |\n");
+        sb.append("| 答案层拒答题数（需 LLM 评审） | ").append(answerLayerRefusalCount()).append(" |\n");
         sb.append("| 只登记不计分题数 | ").append(registeredCount()).append(" |\n");
         sb.append("| 异常题数 | ").append(errorCount()).append(" |\n");
         sb.append("\n## 逐题明细\n\n");
-        sb.append("| id | 类别 | 计分 | 期望 | 返回 | 命中 | Recall | Precision | 拒答OK | 状态 |\n");
-        sb.append("|---|---|---|---|---|---|---|---|---|---|\n");
+        sb.append("| id | 类别 | 计分 | 拒答层 | top1分 | 期望 | 返回 | 命中 | Recall | Precision | 拒答OK | 状态 |\n");
+        sb.append("|---|---|---|---|---|---|---|---|---|---|---|---|\n");
         for (CaseResult r : results) {
             sb.append("| ").append(r.id())
                     .append(" | ").append(r.category())
                     .append(" | ").append(r.scored() ? "是" : "否")
+                    .append(" | ").append(r.mustRefuse() ? r.refusalLayer() : "—")
+                    .append(" | ").append(fmtScore(r.topScore()))
                     .append(" | ").append(join(r.expected()))
                     .append(" | ").append(join(r.returned()))
                     .append(" | ").append(join(r.hit()))
@@ -112,7 +139,8 @@ public final class RagEvalReport {
                     .append(" | ").append(r.status())
                     .append(" |\n");
             if (r.error() != null && !r.error().isBlank()) {
-                sb.append("| | | | ↳ ").append(r.error().replace("|", "\\|")).append(" | | | | | | | |\n");
+                sb.append("| | | | | | ↳ ").append(r.error().replace("|", "\\|"))
+                        .append(" | | | | | | | |\n");
             }
         }
         sb.append("\n## 边界\n\n");
@@ -120,11 +148,17 @@ public final class RagEvalReport {
         sb.append("- 返回列表按唯一 docId 去重：同一文档多个 chunk 不重复计入 Precision。\n");
         sb.append("- Recall 只管「检索有没有命中」，不管 LLM 最终答案；检索全命中也可能答错。\n");
         sb.append("- 分数只用于自己跟自己比，禁止对外表述为「准确率 X%」。\n");
+        sb.append("- `refusalLayer=ANSWER` 的题（如 A04）是「资料存在但说法不被支持」，应由生成层拒答，检索层返回相关片段不算错；它仍计入全口径拒答率以保持与 4A 基线可比，但不作为调检索阈值的依据。\n");
+        sb.append("- `top1分` 是返回结果中第 1 个 chunk 的相似度分数（PgVectorStore 把余弦距离换算后的值）；REST / self-check 数据源不提供分数时显示 —。\n");
         return sb.toString();
     }
 
     private static String fmt(double v) {
         return String.format("%.4f", v);
+    }
+
+    private static String fmtScore(Double v) {
+        return v == null ? "—" : String.format("%.4f", v);
     }
 
     private static String join(List<String> xs) {

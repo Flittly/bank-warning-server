@@ -38,9 +38,10 @@
       "question": "Zd 超过 3m 就算高风险，对吗",
       "expectedDocIds": [],
       "mustRefuse": true,
+      "refusalLayer": "ANSWER",
       "caller": "admin",
       "scored": true,
-      "note": "该拒答对抗题：说法取自被排除的 AI 历史报告，与平台冻结口径冲突"
+      "note": "答案层拒答：资料存在但说法取自被排除的 AI 历史报告、与平台冻结口径冲突，检索层返回相关片段不算错"
     },
     {
       "id": "A05",
@@ -48,9 +49,10 @@
       "question": "GB 50286 规定的崩岸风险判定阈值具体是多少",
       "expectedDocIds": [],
       "mustRefuse": true,
+      "refusalLayer": "RETRIEVAL",
       "caller": "admin",
       "scored": true,
-      "note": "该拒答对抗题：规范原文全仓缺失，知识库不应给出任何标准编号或数值"
+      "note": "检索层拒答：规范原文全仓缺失，知识库不应给出任何标准编号或数值"
     },
     {
       "id": "A06",

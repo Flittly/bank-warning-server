@@ -19,6 +19,11 @@ import java.util.Set;
  */
 public final class RagGoldenSet {
 
+    /** 检索层就该空返回：库里根本没有可依据的资料。 */
+    public static final String RETRIEVAL_LAYER = "RETRIEVAL";
+    /** 资料存在但说法不被支持，应由生成层拒答，不该算检索层的错。 */
+    public static final String ANSWER_LAYER = "ANSWER";
+
     @JsonIgnoreProperties(ignoreUnknown = true)
     public static final class GoldenCase {
         public String id;
@@ -28,6 +33,8 @@ public final class RagGoldenSet {
         public boolean mustRefuse;
         public String caller = "admin";
         public boolean scored = true;
+        /** 仅对 mustRefuse 题有意义；缺省 = RETRIEVAL，旧考卷无需改动。 */
+        public String refusalLayer = RETRIEVAL_LAYER;
         public String note = "";
 
         public List<String> expectedDocIdsOrEmpty() {
@@ -46,6 +53,7 @@ public final class RagGoldenSet {
     private static final Set<String> CALLERS = Set.of("admin", "user", "anonymous");
     /** D = 阶段 5 混合检索专用题：精确关键词/编号/数值，用来体现稀疏召回相对纯 dense 的增益。 */
     private static final Set<String> CATEGORIES = Set.of("A", "B", "C", "D");
+    private static final Set<String> REFUSAL_LAYERS = Set.of(RETRIEVAL_LAYER, ANSWER_LAYER);
 
     public final String version;
     public final String note;
@@ -102,6 +110,10 @@ public final class RagGoldenSet {
             String caller = isBlank(c.caller) ? "admin" : c.caller;
             if (!CALLERS.contains(caller)) {
                 throw new IllegalStateException("考卷 caller 非法: " + c.id + " / " + c.caller);
+            }
+            String layer = isBlank(c.refusalLayer) ? RETRIEVAL_LAYER : c.refusalLayer;
+            if (!REFUSAL_LAYERS.contains(layer)) {
+                throw new IllegalStateException("考卷 refusalLayer 非法: " + c.id + " / " + c.refusalLayer);
             }
             boolean hasExpected = !c.expectedDocIdsOrEmpty().isEmpty();
             if (c.scored && !hasExpected && !c.mustRefuse) {
