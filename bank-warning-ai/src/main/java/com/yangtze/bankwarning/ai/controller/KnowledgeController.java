@@ -59,18 +59,28 @@ public class KnowledgeController {
         String type = (String) body.get("type");
         String title = (String) body.get("title");
         String content = (String) body.get("content");
+        if (title == null || title.isBlank() || content == null || content.isBlank()) {
+            return Map.of("success", false, "error", "标题或内容为空");
+        }
         log.info("[api] import knowledge type={}, title={}", type, title);
 
-        DocumentMetadata metadata = DocumentMetadata.builder()
-                .content(TextBlock.builder().text(content).build())
-                .docId(title)
-                .chunkId(title + "_chunk_0")
-                .addPayload("type", type)
-                .build();
-
-        Document doc = new Document(metadata);
-        knowledgeService.addDocuments(List.of(doc)).block();
-        // 阶段 2：默认私有；规范/规程类资料由灌库脚本显式传 isPublic=true。
+        // 与 /knowledge/upload 走同一套切分。文本直传曾把整篇写成一个 chunk_0，
+        // 长文件（如 riskLevel.py）会退化成单段，检索粒度与 PDF 路径不一致。
+        List<String> chunks = chunkText(content);
+        List<Document> docs = new ArrayList<>();
+        for (int i = 0; i < chunks.size(); i++) {
+            DocumentMetadata metadata = DocumentMetadata.builder()
+                    .content(TextBlock.builder().text(chunks.get(i)).build())
+                    .docId(title)
+                    .chunkId(title + "_chunk_" + i)
+                    .addPayload("type", type)
+                    .addPayload("chunkIndex", String.valueOf(i))
+                    .addPayload("totalChunks", String.valueOf(chunks.size()))
+                    .build();
+            docs.add(new Document(metadata));
+        }
+        knowledgeService.addDocuments(docs).block();
+        // 默认私有；公共资料由上传界面显式勾选 isPublic=true。
         boolean isPublic = parseBoolean(body.get("isPublic"));
         Long userId = SecurityUtils.getCurrentUserId();
         if (userId != null) {
@@ -80,7 +90,7 @@ public class KnowledgeController {
             jdbcTemplate.update("UPDATE ai_knowledge_store SET is_public = ? WHERE doc_id = ?",
                     isPublic, title);
         }
-        return Map.of("success", true, "docId", title, "isPublic", isPublic);
+        return Map.of("success", true, "docId", title, "chunks", chunks.size(), "isPublic", isPublic);
     }
 
     @PostMapping("/knowledge/upload")
