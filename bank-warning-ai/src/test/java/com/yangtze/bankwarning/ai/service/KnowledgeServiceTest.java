@@ -1,5 +1,6 @@
 package com.yangtze.bankwarning.ai.service;
 
+import com.yangtze.bankwarning.ai.config.HybridRagProperties;
 import com.yangtze.bankwarning.ai.config.RagProperties;
 import com.yangtze.bankwarning.ai.config.UnconfiguredEmbeddingModel;
 import com.yangtze.bankwarning.ai.context.AiCaller;
@@ -16,9 +17,12 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
+import org.springframework.dao.DataAccessResourceFailureException;
 import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.jdbc.core.RowMapper;
 import reactor.core.publisher.Mono;
 
+import java.sql.ResultSet;
 import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.*;
@@ -288,5 +292,64 @@ class KnowledgeServiceTest {
         verify(traceStore).record(captor.capture());
         assertNotNull(captor.getValue().traceId());
         assertFalse(captor.getValue().traceId().isBlank());
+    }
+
+    // ---------------- 阶段 5：混合检索 ----------------
+
+    /** 5 参构造器 = 混合检索关闭，这条测试守住「关着就真的没多跑一条 SQL」。 */
+    @Test
+    @DisplayName("阶段 5 零回归：hybrid 关闭时一条 sparse SQL 都不发")
+    void hybridDisabledIssuesNoSparseQuery() {
+        when(vectorStore.search(any())).thenReturn(Mono.just(List.of(doc("a", "A"))));
+
+        List<Document> result = service(RagProperties.defaults())
+                .retrieve("Zb 的阈值 20 30 40", KnowledgeService.Scenario.SEARCH, AiCaller.forAdmin());
+
+        assertEquals(1, result.size());
+        verify(jdbcTemplate, never()).query(anyString(), any(RowMapper.class), any(Object[].class));
+    }
+
+    @Test
+    @DisplayName("阶段 5 开启：关键词路命中的段进入最终结果")
+    void hybridEnabledFusesSparseHits() {
+        when(vectorStore.search(any())).thenReturn(Mono.just(List.of(doc("BMS.docx", "总则"))));
+        when(jdbcTemplate.query(anyString(), any(RowMapper.class), any(Object[].class)))
+                .thenAnswer(inv -> {
+                    RowMapper<Document> mapper = inv.getArgument(1);
+                    ResultSet rs = mock(ResultSet.class);
+                    when(rs.getString("body")).thenReturn("Zb 阈值 20 30 40");
+                    when(rs.getString("doc_id")).thenReturn("template.json");
+                    when(rs.getString("chunk_id")).thenReturn("template.json_chunk_0");
+                    return List.of(mapper.mapRow(rs, 0));
+                });
+
+        KnowledgeService svc = new KnowledgeService(embeddingModel, vectorStore, jdbcTemplate,
+                traceStore, RagProperties.defaults(), HybridRagProperties.enabledWithDefaults());
+
+        List<Document> result = svc.retrieve("Zb 的阈值 20 30 40",
+                KnowledgeService.Scenario.SEARCH, AiCaller.forAdmin());
+
+        assertEquals(2, result.size(), "两路各 1 条，融合后应为 2 条");
+        assertTrue(result.stream().anyMatch(
+                        d -> "template.json".equals(d.getMetadata().getDocId())),
+                "关键词路命中的文档必须出现在最终结果里");
+        verify(jdbcTemplate).query(anyString(), any(RowMapper.class), any(Object[].class));
+    }
+
+    @Test
+    @DisplayName("阶段 5 降级：关键词路抛异常时向量结果照常返回，不打死检索")
+    void hybridDegradesWhenSparseFails() {
+        when(vectorStore.search(any())).thenReturn(Mono.just(List.of(doc("BMS.docx", "总则"))));
+        when(jdbcTemplate.query(anyString(), any(RowMapper.class), any(Object[].class)))
+                .thenThrow(new DataAccessResourceFailureException("content 不是合法 JSON"));
+
+        KnowledgeService svc = new KnowledgeService(embeddingModel, vectorStore, jdbcTemplate,
+                traceStore, RagProperties.defaults(), HybridRagProperties.enabledWithDefaults());
+
+        List<Document> result = svc.retrieve("Zb 20",
+                KnowledgeService.Scenario.SEARCH, AiCaller.forAdmin());
+
+        assertEquals(1, result.size());
+        assertEquals("BMS.docx", result.get(0).getMetadata().getDocId());
     }
 }

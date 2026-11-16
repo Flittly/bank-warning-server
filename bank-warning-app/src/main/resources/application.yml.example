@@ -151,7 +151,8 @@ app:
     #       enabled=false 关闭检索（明确报错）。
     # 主要开关：RAG_ENABLED / RAG_PERMISSION_FILTER / RAG_PUBLIC_KNOWLEDGE / RAG_TRACE_ENABLED /
     #          RAG_CHAT_TOP_K / RAG_TOOL_TOP_K / RAG_SEARCH_TOP_K /
-    #          RAG_SCORE_THRESHOLD / RAG_RETRIEVE_TIMEOUT_MS / RAG_SSE_TIMEOUT_MS
+    #          RAG_SCORE_THRESHOLD / RAG_RETRIEVE_TIMEOUT_MS / RAG_SSE_TIMEOUT_MS /
+    #          RAG_HYBRID_ENABLED（阶段 5，默认 false）
     rag:
       enabled: ${RAG_ENABLED:true}
       permission-filter-enabled: ${RAG_PERMISSION_FILTER:true}
@@ -164,6 +165,18 @@ app:
       candidate-expansion: ${RAG_CANDIDATE_EXPANSION:5}
       retrieve-timeout-ms: ${RAG_RETRIEVE_TIMEOUT_MS:15000}
       sse-timeout-ms: ${RAG_SSE_TIMEOUT_MS:600000}
+      # 阶段 5 混合检索（dense 向量 + sparse 关键词 → RRF）。默认关闭：
+      # 关闭时 doRetrieve 执行路径与阶段 4 完全一致，第二路 SQL 一条都不发。
+      # 打开前需要：① 手动执行 migration/V17__rag_hybrid_content_trgm.sql；
+      #            ② 知识库已有足够多的不同 doc_id（只有一篇时两路只能召回同一份，
+      #               融合结果与 dense-only 无差别，测不出收益）；
+      #            ③ 用 RagEvalCli --jdbc 跑过 off / --hybrid 的对照报告。
+      # 说明：sparse 只抓 ASCII 标识符与数字（Zb / PL / 20 / 13.5 这类），
+      #      提不出锚点时自动退回 dense-only，纯中文语义问题不受影响。
+      hybrid-enabled: ${RAG_HYBRID_ENABLED:false}
+      hybrid-sparse-top-k: ${RAG_HYBRID_SPARSE_TOP_K:20}
+      hybrid-rrf-k: ${RAG_HYBRID_RRF_K:60}
+      hybrid-max-anchors: ${RAG_HYBRID_MAX_ANCHORS:8}
       # 报告轨 RAG：Step 6 撰写前固定预检索一次，把命中的口径作为提示词的一段输入。
       # 默认关闭 —— 库里目前只有 4 段 BMS.docx（内部算法说明，不是判定标准），
       # 打开会把不可信文本注入正式交付物。阶段 3 灌入可信冻结口径后再置 true。

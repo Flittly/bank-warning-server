@@ -5,7 +5,7 @@
 
 ## 1. 一句话结论
 
-阶段 4 的尺子已经量出结论：**当前瓶颈是语料只有 1 篇文档，不是检索算法不够好**。因此阶段 5（混合检索）暂不开工，继续加检索层代码属于空转；后续动作应先补权威语料，再复测、再谈增强。
+阶段 4 的尺子已经量出结论：**当前瓶颈是语料只有 1 篇文档，不是检索算法不够好**。阶段 5（混合检索）代码已实施并验证机制可用，但**默认关闭**——空库下开/关两轮汇总指标完全相同，收益要等语料入库才测得出来。详见 `docs/rag-hybrid-phase5-design.md`。
 
 ## 2. 已完成
 
@@ -61,16 +61,18 @@
 | 拒答 0.0000 | 未修，且已证明不能靠检索阈值修 |
 | 权限过滤 | 仍是召回后过滤（阶段 6 范围）；4 行全为公共，实际影响有限 |
 
-## 6. 阶段 5 的可判定开工门槛
+## 6. 阶段 5 的启用门槛（代码已实施，默认关闭）
 
-四条**全部满足**才写混合检索代码，否则收益测不出来：
+代码与设计见 `docs/rag-hybrid-phase5-design.md`。**写代码不需要门槛，把它打开需要**——四条全部满足才置 `RAG_HYBRID_ENABLED=true`，否则收益测不出来：
 
 1. `ai_knowledge_store` ≥ 5 个不同 `doc_id`（当前 1）；
-2. D 类题期望文档已入库且标记可检索（当前 0）；
-3. `V17` 的 `gin (content gin_trgm_ops)` 索引已手动执行（当前 0 根；`migration/V*.sql` 只留档、不在 Flyway 内）；
+2. D 类题期望文档已入库且标记可检索（当前缺 `template.json` / `riskLevel.py`）；
+3. `V17__rag_hybrid_content_trgm.sql` 已手动执行（当前 0 根；`migration/V*.sql` 只留档、不在 Flyway 内）；
 4. 4B 复测完成，门禁阈值由实测固化。
 
-阶段 5 的设计要点已定：独立 `HybridRagProperties`（默认 false，不碰 `RagProperties` 11 参构造器）、`KnowledgeService` 6 参重载 + 保留 5 参（不碰 5 处直接 `new`）、sparse SQL 自带权限条件、RRF `k=60`、sparse 失败显式降级 dense-only。开工时按此实施即可。
+已落地的设计：独立 `HybridRagProperties`（默认 false，不碰 `RagProperties` 11 参构造器）、`KnowledgeService` 6 参 `@Autowired` + 保留 5 参重载（5 处直接 `new` 不改）、sparse SQL 自带权限条件、RRF `k=60`、sparse 失败显式降级 dense-only。
+
+2026-11-16 真库实测：`--jdbc` 与 `--jdbc --hybrid` 两轮汇总指标相同（计分 4 题，Recall/Precision 1.0000，拒答 0.0000，异常 0），但 B04、D03 两道不计分题从「空返回」变成命中 `BMS.docx` —— 这两题带 `PL` / `LC` / `ValueError` 短代号，向量路为空而关键词路独立捞回，机制已验证。命中的不是期望的 `riskLevel.py`，所以计分上仍不算命中。
 
 ## 7. 备选方向（不依赖语料）
 

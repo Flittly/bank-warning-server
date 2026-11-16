@@ -1,5 +1,6 @@
 package com.yangtze.bankwarning.ai.service;
 
+import com.yangtze.bankwarning.ai.config.HybridRagProperties;
 import com.yangtze.bankwarning.ai.config.RagProperties;
 import com.yangtze.bankwarning.ai.config.UnconfiguredEmbeddingModel;
 import com.yangtze.bankwarning.ai.context.AiCaller;
@@ -13,6 +14,7 @@ import io.agentscope.core.rag.store.VDBStoreBase;
 import io.agentscope.core.rag.store.dto.SearchDocumentDto;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Service;
 import reactor.core.publisher.Mono;
@@ -42,9 +44,10 @@ import java.util.UUID;
  * 无法在向量 SQL 内裁剪。无权内容不会被返回给模型或用户，但服务端确实短暂读到过。
  * <b>阶段 6</b> 改为 SQL 内过滤（security trimming）时，只需替换本方法内部，调用方不动。
  *
- * <p><b>阶段编号（勿按旧注释理解）</b>：阶段 5 = 混合检索（dense + sparse → RRF），
- * 挂点在 {@code doRetrieve()}；阶段 6 = SQL 内权限过滤，挂点在 {@code applyPermissionFilter()}。
- * 两者都是增强项，前提是阶段 4 的考卷与基线就位。
+ * <p><b>阶段编号</b>：阶段 5 = 混合检索（dense + sparse → RRF），已实现于
+ * {@link #hybridOutcome}，由 {@code app.ai.rag.hybrid-enabled} 控制，<b>默认关闭</b>：
+ * 关闭时本类的执行路径、SQL 条数、日志字段与阶段 4 完全一致。
+ * 阶段 6 = SQL 内权限过滤，挂点仍在 {@link #applyPermissionFilter}。
  */
 @Service
 @SuppressWarnings({"deprecation", "removal"})
@@ -77,17 +80,40 @@ public class KnowledgeService {
     private final JdbcTemplate jdbcTemplate;
     private final JdbcRagTraceStore traceStore;
     private final RagProperties props;
+    private final HybridRagProperties hybrid;
+    private final SparseRetriever sparseRetriever;
 
+    /**
+     * 兼容既有调用点（5 处单元测试 + 离线评测 CLI 直接 {@code new}）：一律按
+     * 「混合检索关闭」构造，行为与阶段 4 完全一致，这些调用点一个字都不用改。
+     */
     public KnowledgeService(EmbeddingModel embeddingModel,
                             VDBStoreBase vectorStore,
                             JdbcTemplate jdbcTemplate,
                             JdbcRagTraceStore traceStore,
                             RagProperties props) {
+        this(embeddingModel, vectorStore, jdbcTemplate, traceStore, props,
+                HybridRagProperties.disabled());
+    }
+
+    /**
+     * Spring 实际使用的构造器。混合检索配置独立成 {@link HybridRagProperties}，
+     * {@link RagProperties} 的 11 参构造器一字未动。
+     */
+    @Autowired
+    public KnowledgeService(EmbeddingModel embeddingModel,
+                            VDBStoreBase vectorStore,
+                            JdbcTemplate jdbcTemplate,
+                            JdbcRagTraceStore traceStore,
+                            RagProperties props,
+                            HybridRagProperties hybrid) {
         this.embeddingModel = embeddingModel;
         this.vectorStore = vectorStore;
         this.jdbcTemplate = jdbcTemplate;
         this.traceStore = traceStore;
         this.props = props;
+        this.hybrid = hybrid;
+        this.sparseRetriever = new SparseRetriever(jdbcTemplate, props, hybrid);
     }
 
     /** 兼容既有调用点；trace_id 由本方法生成。 */
@@ -184,15 +210,58 @@ public class KnowledgeService {
             throw new KnowledgeUnavailableException(Reason.SEARCH_FAILED,
                     "知识库检索失败：" + rootMessage(e), e);
         }
-        if (hits == null || hits.isEmpty()) {
-            return new Outcome(List.of(), 0, 0, List.of());
+        List<Document> dense = hits == null ? List.of() : hits;
+
+        if (hybrid.enabled) {
+            return hybridOutcome(query, scenario, who, limit, traceId, dense);
         }
 
-        List<Document> visible = applyPermissionFilter(hits, who);
+        // 关闭态：与阶段 4 逐字一致（含空结果提前返回与日志字段），保证「零回归」可验证。
+        if (dense.isEmpty()) {
+            return new Outcome(List.of(), 0, 0, List.of());
+        }
+        List<Document> visible = applyPermissionFilter(dense, who);
         List<Document> result = visible.stream().limit(limit).toList();
         log.info("[rag] traceId={}, scenario={}, hits={}, visible={}, returned={}, topK={}",
-                traceId, scenario, hits.size(), visible.size(), result.size(), limit);
-        return new Outcome(result, hits.size(), visible.size(), toHits(result));
+                traceId, scenario, dense.size(), visible.size(), result.size(), limit);
+        return new Outcome(result, dense.size(), visible.size(), toHits(result));
+    }
+
+    /**
+     * 阶段 5：向量路 + 关键词路 → RRF 融合。
+     *
+     * <p>三条行为约定：
+     * <ol>
+     *   <li>关键词路<b>自带权限条件</b>，这里仍再过滤一次（幂等），保证即使 SQL 拼装出错
+     *       也不会把无权正文交给模型；</li>
+     *   <li>关键词路抛异常时<b>降级为 dense-only 并打 warn</b>，不打死原本可用的检索；
+     *       降级痕迹同时出现在日志里，避免重演阶段 1 之前的静默失败；</li>
+     *   <li>融合后 {@code Document.getScore()} 的语义从余弦相似度变成无量纲 RRF 分，
+     *       留痕表结构与列不变，口径见 {@code docs/rag-hybrid-phase5-design.md}。</li>
+     * </ol>
+     */
+    private Outcome hybridOutcome(String query, Scenario scenario, AiCaller who, int limit,
+                                  String traceId, List<Document> denseHits) {
+        List<Document> denseVisible = applyPermissionFilter(denseHits, who);
+
+        List<Document> sparseHits;
+        try {
+            sparseHits = sparseRetriever.retrieve(query, who, hybrid.sparseTopK);
+        } catch (Exception e) {
+            log.warn("[rag] traceId={}, sparse 路失败，本次降级为 dense-only: {}",
+                    traceId, rootMessage(e));
+            sparseHits = List.of();
+        }
+        List<Document> sparseVisible = sparseHits.isEmpty()
+                ? List.of() : applyPermissionFilter(sparseHits, who);
+
+        List<Document> fused = RrfFusion.fuse(denseVisible, sparseVisible, hybrid.rrfK, limit);
+        log.info("[rag] traceId={}, scenario={}, hybrid=on, dense={}, denseVisible={}, "
+                        + "sparse={}, sparseVisible={}, fused={}, topK={}",
+                traceId, scenario, denseHits.size(), denseVisible.size(),
+                sparseHits.size(), sparseVisible.size(), fused.size(), limit);
+        return new Outcome(fused, denseHits.size() + sparseHits.size(),
+                denseVisible.size() + sparseVisible.size(), toHits(fused));
     }
 
     private static List<RagTrace.Hit> toHits(List<Document> docs) {

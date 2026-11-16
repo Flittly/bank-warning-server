@@ -2,6 +2,7 @@ package com.yangtze.bankwarning.ai.rag;
 
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.yangtze.bankwarning.ai.config.HybridRagProperties;
 import com.yangtze.bankwarning.ai.config.RagProperties;
 import com.yangtze.bankwarning.ai.context.AiCaller;
 import com.yangtze.bankwarning.ai.service.KnowledgeService;
@@ -47,6 +48,8 @@ import java.util.Map;
  * 连真实服务：{@code --base-url http://localhost:8080 --token <JWT>}。
  * 连真库跑效果基线：{@code --jdbc}（key 取环境变量 DASHSCOPE_API_KEY，
  * 缺失时回落读 application-local.yml，也可用 {@code --key-file} 显式指定）。
+ * <b>阶段 5</b>：再加 {@code --hybrid} 即打开混合检索，与不加该参数的 {@code --jdbc}
+ * 形成 off / on 对照；http 模式的开关由服务端配置决定，命令行改不了。
  * 报告默认落到 {@code reports/rag-eval-<时间戳>.md}。
  */
 public final class RagEvalCli {
@@ -197,13 +200,17 @@ public final class RagEvalCli {
         // 与线上默认一致，但关掉留痕：评测不该往生产表里写观测数据。
         RagProperties props = new RagProperties(
                 true, true, true, false, 5, 5, 5, 0.4, 5, 15_000L, 600_000L);
+        // 阶段 5：--hybrid 打开第二路；不加该参数即「关闭态」，与 4A 基线口径一致。
+        HybridRagProperties hybrid = opts.containsKey("hybrid")
+                ? HybridRagProperties.enabledWithDefaults()
+                : HybridRagProperties.disabled();
         KnowledgeService service = new KnowledgeService(
                 DashScopeTextEmbedding.builder()
                         .apiKey(key)
                         .modelName("text-embedding-v4")
                         .dimensions(1024)
                         .build(),
-                store, jdbcTemplate, new JdbcRagTraceStore(jdbcTemplate, props), props);
+                store, jdbcTemplate, new JdbcRagTraceStore(jdbcTemplate, props), props, hybrid);
 
         // 真库路径覆盖 fetchScored()：把 Document.getScore() 一并带进报告，
         // 这样「该拒答的题」才能看到它到底拿了多高的相似度，而不是只有 0/1 的空/非空。
@@ -233,7 +240,8 @@ public final class RagEvalCli {
             }
         };
         return new RetrievalSource(
-                "jdbc 真库直连 + text-embedding-v4（trace 关闭，未写 ai_rag_traces）", fn);
+                "jdbc 真库直连 + text-embedding-v4（trace 关闭，未写 ai_rag_traces，hybrid="
+                        + (hybrid.enabled ? "on" : "off") + "）", fn);
     }
 
     /**
