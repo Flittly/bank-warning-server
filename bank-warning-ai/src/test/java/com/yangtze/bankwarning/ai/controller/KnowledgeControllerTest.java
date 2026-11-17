@@ -1,5 +1,6 @@
 package com.yangtze.bankwarning.ai.controller;
 
+import com.yangtze.bankwarning.ai.config.EmbeddingBatchProperties;
 import com.yangtze.bankwarning.ai.context.AiCaller;
 import com.yangtze.bankwarning.ai.service.KnowledgeService;
 import io.agentscope.core.message.TextBlock;
@@ -44,7 +45,8 @@ class KnowledgeControllerTest {
         KnowledgeService service = mock(KnowledgeService.class);
         when(service.retrieve(anyString(), any(KnowledgeService.Scenario.class),
                 any(AiCaller.class), any())).thenReturn(hits);
-        return new KnowledgeController(service, null, null, null);
+        return new KnowledgeController(service, null, null, null,
+                EmbeddingBatchProperties.disabled());
     }
 
     @Test

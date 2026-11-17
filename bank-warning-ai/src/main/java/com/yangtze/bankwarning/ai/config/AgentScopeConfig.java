@@ -3,6 +3,7 @@ package com.yangtze.bankwarning.ai.config;
 import com.fasterxml.jackson.core.JsonParser;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.yangtze.bankwarning.ai.middleware.ReasoningTraceMiddleware;
+import com.yangtze.bankwarning.ai.service.BatchEmbeddingClient;
 import com.yangtze.bankwarning.ai.service.KnowledgeService;
 import com.yangtze.bankwarning.ai.service.NacosSkillRepositoryHolder;
 import com.yangtze.bankwarning.ai.service.PdfService;
@@ -88,6 +89,40 @@ public class AgentScopeConfig {
                 .modelName(modelName)
                 .dimensions(dimensions)
                 .build();
+    }
+
+    /**
+     * 阶段 7：入库批量嵌入客户端。
+     *
+     * <p>与 {@link #embeddingModel} 是两个独立 Bean，刻意不复用：
+     * {@code EmbeddingModel} 的接口只有单条 {@code embed(ContentBlock)}，
+     * 而本 Bean 直接持有 DashScope SDK，一次能送 10 条。检索侧（一条 query）
+     * 继续用 {@code EmbeddingModel}，只有入库（一段上传 N 段）走这里。
+     *
+     * <p>三条「不启用」的分支都返回 {@code disabled} 实例，而不是不注册 Bean：
+     * 后者会让 {@code KnowledgeService} 的构造器注入失败、应用起不来。
+     * 关闭态同样保证 {@code addDocuments} 退回改造前的逐段循环。
+     */
+    @Bean
+    public BatchEmbeddingClient batchEmbeddingClient(
+            @Value("${agentscope.dashscope.api-key:}") String apiKey,
+            @Value("${agentscope.dashscope.embedding-model-name:text-embedding-v4}") String modelName,
+            @Value("${agentscope.dashscope.embedding-dimensions:1024}") int dimensions,
+            @Value("${agentscope.dashscope.base-url:}") String baseUrl,
+            EmbeddingBatchProperties batchProps) {
+        if (apiKey == null || apiKey.isBlank()) {
+            log.warn("[config] DashScope apiKey 未配置，批量嵌入同样不可用（与 embeddingModel 同一原因）");
+            return BatchEmbeddingClient.disabled(batchProps);
+        }
+        if (!batchProps.enabled) {
+            log.info("[config] 批量嵌入未启用（app.ai.rag.batch-embedding-enabled=false），"
+                    + "入库仍走逐段串行");
+            return BatchEmbeddingClient.disabled(batchProps);
+        }
+        log.info("[config] 批量嵌入已启用：{} 条/批，{} 并发，单批 {}ms，总预算 {}ms",
+                batchProps.batchSize, batchProps.concurrency,
+                batchProps.batchTimeoutMs, batchProps.ingestBudgetMs);
+        return BatchEmbeddingClient.dashscope(apiKey, modelName, dimensions, baseUrl, batchProps);
     }
 
     /**

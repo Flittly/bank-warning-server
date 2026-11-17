@@ -1,5 +1,6 @@
 package com.yangtze.bankwarning.ai.service;
 
+import com.yangtze.bankwarning.ai.config.EmbeddingBatchProperties;
 import com.yangtze.bankwarning.ai.config.HybridRagProperties;
 import com.yangtze.bankwarning.ai.config.RagProperties;
 import com.yangtze.bankwarning.ai.config.UnconfiguredEmbeddingModel;
@@ -8,6 +9,7 @@ import com.yangtze.bankwarning.ai.service.KnowledgeUnavailableException.Reason;
 import com.yangtze.bankwarning.ai.store.JdbcRagTraceStore;
 import com.yangtze.bankwarning.ai.store.RagTrace;
 import io.agentscope.core.embedding.EmbeddingModel;
+import io.agentscope.core.message.ContentBlock;
 import io.agentscope.core.message.TextBlock;
 import io.agentscope.core.rag.model.Document;
 import io.agentscope.core.rag.store.VDBStoreBase;
@@ -21,10 +23,15 @@ import reactor.core.publisher.Mono;
 
 import java.time.Duration;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
 import java.util.UUID;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 
 /**
  * 知识库服务 —— 全系统唯一的检索入口（阶段 1 收口，阶段 2 加公共可见性与留痕）。
@@ -90,6 +97,7 @@ public class KnowledgeService {
     private final HybridRagProperties hybrid;
     private final SparseRetriever sparseRetriever;
     private final SqlPermissionVectorSearch sqlSearch;
+    private final BatchEmbeddingClient batchClient;
 
     /**
      * 兼容既有调用点（5 处单元测试 + 离线评测 CLI 直接 {@code new}）：一律按
@@ -119,9 +127,25 @@ public class KnowledgeService {
     }
 
     /**
+     * 阶段 6 及之前的调用点：等价于「入库批量嵌入关闭」，{@code addDocuments}
+     * 走逐段串行循环，行为与改造前逐字一致。
+     */
+    public KnowledgeService(EmbeddingModel embeddingModel,
+                            VDBStoreBase vectorStore,
+                            JdbcTemplate jdbcTemplate,
+                            JdbcRagTraceStore traceStore,
+                            RagProperties props,
+                            HybridRagProperties hybrid,
+                            SqlPermissionVectorSearch sqlSearch) {
+        this(embeddingModel, vectorStore, jdbcTemplate, traceStore, props,
+                hybrid, sqlSearch, BatchEmbeddingClient.disabled(EmbeddingBatchProperties.disabled()));
+    }
+
+    /**
      * Spring 实际使用的构造器。混合检索配置独立成 {@link HybridRagProperties}、
-     * 阶段 6 的 SQL 内过滤独立成 {@link SqlPermissionVectorSearch}，
-     * 两者的开关都不进 {@link RagProperties} 的 11 参构造器。
+     * 阶段 6 的 SQL 内过滤独立成 {@link SqlPermissionVectorSearch}、
+     * 阶段 7 的入库批量嵌入独立成 {@link BatchEmbeddingClient}，
+     * 三者的开关都不进 {@link RagProperties} 的 11 参构造器。
      */
     @Autowired
     public KnowledgeService(EmbeddingModel embeddingModel,
@@ -130,7 +154,8 @@ public class KnowledgeService {
                             JdbcRagTraceStore traceStore,
                             RagProperties props,
                             HybridRagProperties hybrid,
-                            SqlPermissionVectorSearch sqlSearch) {
+                            SqlPermissionVectorSearch sqlSearch,
+                            BatchEmbeddingClient batchClient) {
         this.embeddingModel = embeddingModel;
         this.vectorStore = vectorStore;
         this.jdbcTemplate = jdbcTemplate;
@@ -138,6 +163,7 @@ public class KnowledgeService {
         this.props = props;
         this.hybrid = hybrid;
         this.sqlSearch = sqlSearch;
+        this.batchClient = batchClient;
         this.sparseRetriever = new SparseRetriever(jdbcTemplate, props, hybrid);
     }
 
@@ -371,41 +397,188 @@ public class KnowledgeService {
     }
 
     /**
-     * 逐段生成向量，失败的那一段跳过，只把成功的段写进库。
+     * 入库结果。存在的理由：原 {@code addDocuments} 返回 {@code Mono<Void>}，
+     * 调用方只能报 {@code success:true}——「全部段嵌入失败」也被报成成功。
+     * 现在把成功/失败段数交回 Controller，前端才可能看见真实状态。
+     */
+    public record IngestResult(int total, int ok, int failed) {
+        public boolean allOk() {
+            return failed == 0;
+        }
+    }
+
+    /**
+     * 生成向量并写库；失败的那一段跳过，只把成功的段写进库。
      *
-     * <p>改造前 catch 里只打日志，最后仍无条件 {@code vectorStore.add(docs)}，
-     * 会把没有向量的段也写进去（或整批失败），且无法区分成功与失败。
+     * <p>保留该签名不动（Controller 与实际调用点共 2 处、测试 2 处），
+     * 需要失败明细的调用方改用 {@link #addDocumentsWithResult}。
      */
     public Mono<Void> addDocuments(List<Document> docs) {
-        return Mono.fromRunnable(() -> {
-            Duration timeout = Duration.ofMillis(props.retrieveTimeoutMs);
-            List<Document> ready = new ArrayList<>();
-            int failed = 0;
-            for (Document doc : docs) {
-                try {
-                    double[] embedding = embeddingModel
-                            .embed(doc.getMetadata().getContent())
-                            .block(timeout);
-                    if (embedding == null) {
-                        failed++;
-                        log.warn("[rag] 嵌入结果为空，跳过该段: docId={}, id={}",
-                                doc.getMetadata().getDocId(), doc.getId());
-                        continue;
-                    }
-                    doc.setEmbedding(embedding);
-                    ready.add(doc);
-                } catch (Exception e) {
+        return addDocumentsWithResult(docs).then();
+    }
+
+    /**
+     * 阶段 7：入库路径的批量版本。
+     *
+     * <p>两条互斥路径，由 {@code app.ai.rag.batch-embedding-enabled} 决定：
+     * <ul>
+     *   <li><b>关闭</b> ⇒ {@link #ingestSequentially}，逐段 {@code embed().block()}，
+     *       与改造前逐字一致，用于回滚；</li>
+     *   <li><b>打开</b> ⇒ {@link #ingestBatched}，10 条一批、4 路并发。
+     *       原来是「100 段 = 100 次请求 × 串行等」，现在「100 段 = 10 批 ÷ 4 并发 ≈ 3 轮」。</li>
+     * </ul>
+     */
+    public Mono<IngestResult> addDocumentsWithResult(List<Document> docs) {
+        return Mono.fromCallable(() -> batchClient.isEnabled()
+                ? ingestBatched(docs)
+                : ingestSequentially(docs));
+    }
+
+    /** 改造前的逐段串行循环，逻辑与日志一字未改，只多返回一个计数。 */
+    private IngestResult ingestSequentially(List<Document> docs) {
+        Duration timeout = Duration.ofMillis(props.retrieveTimeoutMs);
+        List<Document> ready = new ArrayList<>();
+        int failed = 0;
+        for (Document doc : docs) {
+            try {
+                double[] embedding = embeddingModel
+                        .embed(doc.getMetadata().getContent())
+                        .block(timeout);
+                if (embedding == null) {
                     failed++;
+                    log.warn("[rag] 嵌入结果为空，跳过该段: docId={}, id={}",
+                            doc.getMetadata().getDocId(), doc.getId());
+                    continue;
+                }
+                doc.setEmbedding(embedding);
+                ready.add(doc);
+            } catch (Exception e) {
+                failed++;
+                log.error("[rag] 单段嵌入失败，跳过: docId={}, id={}",
+                        doc.getMetadata().getDocId(), doc.getId(), e);
+            }
+        }
+        if (ready.isEmpty()) {
+            log.warn("[rag] 全部 {} 段嵌入失败，未写入向量库", failed);
+            return new IngestResult(docs.size(), 0, docs.size());
+        }
+        vectorStore.add(ready).block(timeout);
+        log.info("[rag] 写入 {} 段，跳过失败 {} 段", ready.size(), failed);
+        return new IngestResult(docs.size(), ready.size(), docs.size() - ready.size());
+    }
+
+    /**
+     * 批量入库：按 {@code batchSize} 切片 → 线程池并发 → 汇总 → 一次性写向量库。
+     *
+     * <p>两层时间约束必须同时存在，缺一个都会重演「一个上传卡 25 分钟」：
+     * <ul>
+     *   <li>单批：{@link BatchEmbeddingClient#batchTimeoutMs()}，等一批最多多久；</li>
+     *   <li>总预算：{@link BatchEmbeddingClient#ingestBudgetMs()}，一次上传所有批加起来的上限。
+     *       只设单批不设总预算是没用的——100 批每批都「没超时」，加起来照样爆掉。</li>
+     * </ul>
+     */
+    private IngestResult ingestBatched(List<Document> docs) {
+        int total = docs.size();
+        if (total == 0) {
+            return new IngestResult(0, 0, 0);
+        }
+
+        int size = Math.max(1, batchClient.batchSize());
+        List<List<Document>> batches = new ArrayList<>((total + size - 1) / size);
+        for (int i = 0; i < total; i += size) {
+            batches.add(docs.subList(i, Math.min(total, i + size)));
+        }
+
+        long deadline = System.currentTimeMillis() + batchClient.ingestBudgetMs();
+        List<Document> ready = Collections.synchronizedList(new ArrayList<>(total));
+
+        List<Future<?>> futures = new ArrayList<>(batches.size());
+        for (List<Document> batch : batches) {
+            futures.add(batchClient.pool().submit(() -> embedBatchInto(batch, ready)));
+        }
+
+        boolean budgetExhausted = false;
+        for (Future<?> f : futures) {
+            long remain = deadline - System.currentTimeMillis();
+            if (remain <= 0) {
+                budgetExhausted = true;
+                f.cancel(true);
+                continue;
+            }
+            try {
+                f.get(remain, TimeUnit.MILLISECONDS);
+            } catch (TimeoutException e) {
+                budgetExhausted = true;
+                f.cancel(true);
+            } catch (ExecutionException e) {
+                // embedBatchInto 自己吞掉业务异常并逐条降级，走到这里说明是 Error 级别
+                log.error("[rag] 嵌入批次任务异常", e.getCause());
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                f.cancel(true);
+                break;
+            }
+        }
+        if (budgetExhausted) {
+            log.error("[rag] 入库总预算 {}ms 用尽，剩余批次已放弃", batchClient.ingestBudgetMs());
+        }
+
+        int ok = ready.size();
+        if (ok == 0) {
+            log.warn("[rag] 全部 {} 段嵌入失败，未写入向量库", total);
+            return new IngestResult(total, 0, total);
+        }
+        try {
+            vectorStore.add(ready).block(Duration.ofMillis(batchClient.batchTimeoutMs()));
+        } catch (Exception e) {
+            log.error("[rag] 写入向量库失败，本次入库未生效", e);
+            return new IngestResult(total, 0, total);
+        }
+        log.info("[rag] 批量入库 {} 段：成功 {}，失败 {}（{} 条/批，{} 并发，{} 批）",
+                total, ok, total - ok, size, batchClient.concurrency(), batches.size());
+        return new IngestResult(total, ok, total - ok);
+    }
+
+    /**
+     * 嵌入一批。整批失败时<b>降级为逐条重试</b>，只丢真正有问题的那一条。
+     *
+     * <p>这不是可选项：批量把「10 条文本」绑成了一个请求，只要其中一条超过
+     * 8192 token 或命中内容审核，整批就 400。不降级的话，一条坏文本能让另外 9 条
+     * 正常段落一起入库失败——可用性比批量之前更差。
+     */
+    private void embedBatchInto(List<Document> batch, List<Document> ready) {
+        List<String> texts = new ArrayList<>(batch.size());
+        for (Document d : batch) {
+            texts.add(textOf(d));
+        }
+        try {
+            List<double[]> vectors = batchClient.embedBatch(texts);
+            for (int i = 0; i < batch.size(); i++) {
+                Document doc = batch.get(i);
+                doc.setEmbedding(vectors.get(i));
+                ready.add(doc);
+            }
+        } catch (Exception e) {
+            log.warn("[rag] {} 条一批嵌入失败，降级逐条重试：{}", batch.size(), rootMessage(e));
+            for (int i = 0; i < batch.size(); i++) {
+                Document doc = batch.get(i);
+                try {
+                    List<double[]> one = batchClient.embedBatch(List.of(texts.get(i)));
+                    doc.setEmbedding(one.get(0));
+                    ready.add(doc);
+                } catch (Exception e2) {
                     log.error("[rag] 单段嵌入失败，跳过: docId={}, id={}",
-                            doc.getMetadata().getDocId(), doc.getId(), e);
+                            doc.getMetadata().getDocId(), doc.getId(), e2);
                 }
             }
-            if (ready.isEmpty()) {
-                log.warn("[rag] 全部 {} 段嵌入失败，未写入向量库", failed);
-                return;
-            }
-            vectorStore.add(ready).block(timeout);
-            log.info("[rag] 写入 {} 段，跳过失败 {} 段", ready.size(), failed);
-        });
+        }
+    }
+
+    private static String textOf(Document doc) {
+        ContentBlock block = doc.getMetadata().getContent();
+        if (block instanceof TextBlock tb) {
+            return tb.getText();
+        }
+        return block == null ? "" : String.valueOf(block);
     }
 }

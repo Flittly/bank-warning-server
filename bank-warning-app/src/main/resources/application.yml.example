@@ -183,6 +183,21 @@ app:
       # 管理员视角两种模式结果应完全相同：RagEvalCli --jdbc（关）与 --sql-filter（开）对照。
       # 注意：WHERE 加在 ANN 查询上会触发 filtered ANN，数据量上来后需 EXPLAIN 复核计划形状。
       sql-permission-filter-enabled: ${RAG_SQL_PERMISSION_FILTER:true}
+      # 阶段 7：入库侧批量嵌入。默认关闭 —— 关闭时 addDocuments 走原来的「逐段 embed + block」
+      # 循环，线上行为逐字不变。打开后按 batch-size 切片、batch-concurrency 路并发。
+      # 对拍实测（text-embedding-v4，BatchEmbeddingParityTest）：
+      #   同路径重复调用差 0.0e+00；embed() vs texts[1] 差 0.0e+00；
+      #   texts[1] vs texts[4] 差 1.5e-4~4.8e-4、余弦 0.9999987。
+      #   ⇒ 数值差只来自「同批有邻居」，与走哪个接口无关。于是两档配置即可切换：
+      #   · 零差异档：batch-size=1 + batch-concurrency=4（请求数不变，耗时约 1/4）
+      #   · 高吞吐档：batch-size=10 + batch-concurrency=4（请求数 100→10，接受 1e-4 数值差）
+      # batch-size 上限 10 是 DashScope text-embedding-v4 的硬限制，配大了直接 400，代码里会硬夹。
+      # ingest-budget-ms 是「一次上传所有批加起来」的上限，防止每批都没超时、总和却超掉反代超时。
+      batch-embedding-enabled: ${RAG_BATCH_EMBEDDING_ENABLED:false}
+      batch-size: ${RAG_BATCH_SIZE:10}
+      batch-concurrency: ${RAG_BATCH_CONCURRENCY:4}
+      batch-timeout-ms: ${RAG_BATCH_TIMEOUT_MS:30000}
+      ingest-budget-ms: ${RAG_INGEST_BUDGET_MS:180000}
       # 报告轨 RAG：Step 6 撰写前固定预检索一次，把命中的口径作为提示词的一段输入。
       # 默认关闭 —— 库里目前只有 4 段 BMS.docx（内部算法说明，不是判定标准），
       # 打开会把不可信文本注入正式交付物。阶段 3 灌入可信冻结口径后再置 true。

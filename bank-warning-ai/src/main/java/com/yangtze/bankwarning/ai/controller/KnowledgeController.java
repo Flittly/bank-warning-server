@@ -1,5 +1,6 @@
 package com.yangtze.bankwarning.ai.controller;
 
+import com.yangtze.bankwarning.ai.config.EmbeddingBatchProperties;
 import com.yangtze.bankwarning.ai.config.RagProperties;
 import com.yangtze.bankwarning.ai.context.AiCaller;
 import com.yangtze.bankwarning.ai.service.KnowledgeService;
@@ -19,6 +20,7 @@ import org.springframework.web.multipart.MultipartFile;
 
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.time.Duration;
 import java.util.*;
 import java.util.stream.Collectors;
 
@@ -32,15 +34,33 @@ public class KnowledgeController {
     private final PdfService pdfService;
     private final JdbcTemplate jdbcTemplate;
     private final RagProperties ragProps;
+    private final EmbeddingBatchProperties batchProps;
 
     private static final int MAX_CHUNK_SIZE = 500;
 
     public KnowledgeController(KnowledgeService knowledgeService, PdfService pdfService,
-                               JdbcTemplate jdbcTemplate, RagProperties ragProps) {
+                               JdbcTemplate jdbcTemplate, RagProperties ragProps,
+                               EmbeddingBatchProperties batchProps) {
         this.knowledgeService = knowledgeService;
         this.pdfService = pdfService;
         this.jdbcTemplate = jdbcTemplate;
         this.ragProps = ragProps;
+        this.batchProps = batchProps;
+    }
+
+    /**
+     * 入库并等结果，<b>必须带超时</b>。
+     *
+     * <p>改造前是 {@code addDocuments(docs).block()}——无参 {@code block()} 是「永远等」，
+     * 100 段的请求就靠 nginx 的 900s 去砍。现在按批量嵌入的总预算兜一层，
+     * 超时抛出明确异常由下方 catch 转成 {@code success:false}。
+     *
+     * <p>关闭批量嵌入时这个上限也生效（{@code ingestBudgetMs} 默认 180s）：
+     * 逐段串行超过 3 分钟就不该继续占着 Tomcat 线程，让它失败比让它挂着好。
+     */
+    private KnowledgeService.IngestResult ingest(List<Document> docs) {
+        long waitMs = batchProps.ingestBudgetMs + 15_000L;
+        return knowledgeService.addDocumentsWithResult(docs).block(Duration.ofMillis(waitMs));
     }
 
     /**
@@ -79,7 +99,7 @@ public class KnowledgeController {
                     .build();
             docs.add(new Document(metadata));
         }
-        knowledgeService.addDocuments(docs).block();
+        KnowledgeService.IngestResult ingest = ingest(docs);
         // 默认私有；公共资料由上传界面显式勾选 isPublic=true。
         boolean isPublic = parseBoolean(body.get("isPublic"));
         Long userId = SecurityUtils.getCurrentUserId();
@@ -90,7 +110,9 @@ public class KnowledgeController {
             jdbcTemplate.update("UPDATE ai_knowledge_store SET is_public = ? WHERE doc_id = ?",
                     isPublic, title);
         }
-        return Map.of("success", true, "docId", title, "chunks", chunks.size(), "isPublic", isPublic);
+        // success 不再恒为 true：全部段嵌入失败时前端必须能看见，而不是只看到 chunks>0。
+        return Map.of("success", ingest.ok() > 0, "docId", title, "chunks", chunks.size(),
+                "embedded", ingest.ok(), "failed", ingest.failed(), "isPublic", isPublic);
     }
 
     @PostMapping("/knowledge/upload")
@@ -156,7 +178,7 @@ public class KnowledgeController {
                 docs.add(new Document(metadata));
             }
 
-            knowledgeService.addDocuments(docs).block();
+            KnowledgeService.IngestResult ingest = ingest(docs);
             // 阶段 2：公共标记与归属分开写，未登录时也要能把公共标记落库。
             Long userId = SecurityUtils.getCurrentUserId();
             if (userId != null) {
@@ -166,10 +188,11 @@ public class KnowledgeController {
                 jdbcTemplate.update("UPDATE ai_knowledge_store SET is_public = ? WHERE doc_id = ?",
                         isPublic, docTitle);
             }
-            log.info("[api] knowledge imported, title={}, chunks={}, file={}, isPublic={}",
-                    docTitle, chunks.size(), fileName, isPublic);
+            log.info("[api] knowledge imported, title={}, chunks={}, embedded={}, failed={}, file={}, isPublic={}",
+                    docTitle, chunks.size(), ingest.ok(), ingest.failed(), fileName, isPublic);
 
-            return Map.of("success", true, "docId", docTitle, "chunks", chunks.size(),
+            return Map.of("success", ingest.ok() > 0, "docId", docTitle, "chunks", chunks.size(),
+                    "embedded", ingest.ok(), "failed", ingest.failed(),
                     "type", type, "isPublic", isPublic);
 
         } catch (Exception e) {
