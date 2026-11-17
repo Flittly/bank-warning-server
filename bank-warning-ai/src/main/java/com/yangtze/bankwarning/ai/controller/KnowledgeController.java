@@ -262,11 +262,28 @@ public class KnowledgeController {
         // 这里仍在 Tomcat 请求线程上，SecurityContext 有效，可以直接取身份。
         AiCaller caller = AiCaller.of(SecurityUtils.getDataScope());
         List<Document> results = knowledgeService.retrieve(query, KnowledgeService.Scenario.SEARCH, caller, topK);
-        return results.stream().map(doc -> Map.<String, Object>of(
-                "content", doc.getMetadata().getContent().toString(),
-                "score", doc.getScore(),
-                "docId", doc.getMetadata().getDocId()
-        )).collect(Collectors.toList());
+        return results.stream().map(KnowledgeController::toHitMap).collect(Collectors.toList());
+    }
+
+    /**
+     * 命中项 → 返回给前端的 JSON 对象。
+     *
+     * <p><b>这里不能用 {@code Map.of}</b>：它拒绝 null 值，遇到 null 直接抛 NPE。
+     * 而 {@code Document.score} 是可空的 {@code Double}——混合检索打开后，
+     * 「向量路 0 条 + 关键词路命中」时 {@code RrfFusion} 会原样返回 sparse 文档，
+     * 这些文档从头到尾没有设过分。旧实现把 {@code doc.getScore()} 直接塞进
+     * {@code Map.of}，于是这条路径以 500 结束，而不是返回「没有相似度」。
+     *
+     * <p>另外一个附带信息是 {@code scored}：前端必须能区分「相似度 0.000」与
+     * 「这条没有分数」。前者是向量路真算了分，后者是关键词命中，显示成相似度就是误导。
+     */
+    static Map<String, Object> toHitMap(Document doc) {
+        Map<String, Object> hit = new LinkedHashMap<>(4);
+        hit.put("content", doc.getMetadata().getContent().toString());
+        hit.put("score", doc.getScore());
+        hit.put("scored", doc.getScore() != null);
+        hit.put("docId", doc.getMetadata().getDocId());
+        return hit;
     }
 
     /**
