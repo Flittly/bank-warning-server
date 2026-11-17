@@ -6,6 +6,7 @@ import com.yangtze.bankwarning.ai.config.HybridRagProperties;
 import com.yangtze.bankwarning.ai.config.RagProperties;
 import com.yangtze.bankwarning.ai.context.AiCaller;
 import com.yangtze.bankwarning.ai.service.KnowledgeService;
+import com.yangtze.bankwarning.ai.service.SqlPermissionVectorSearch;
 import com.yangtze.bankwarning.ai.store.JdbcRagTraceStore;
 import io.agentscope.core.embedding.dashscope.DashScopeTextEmbedding;
 import io.agentscope.core.rag.store.PgVectorStore;
@@ -50,6 +51,8 @@ import java.util.Map;
  * 缺失时回落读 application-local.yml，也可用 {@code --key-file} 显式指定）。
  * <b>阶段 5</b>：再加 {@code --hybrid} 即打开混合检索，与不加该参数的 {@code --jdbc}
  * 形成 off / on 对照；http 模式的开关由服务端配置决定，命令行改不了。
+ * <b>阶段 6</b>：加 {@code --sql-filter} 即让权限条件进向量 SQL（默认关闭，走 SDK 路径），
+ * 管理员视角下 off / on 的每题结果必须完全一致——不一致就是实现有 bug。
  * 报告默认落到 {@code reports/rag-eval-<时间戳>.md}。
  */
 public final class RagEvalCli {
@@ -210,7 +213,12 @@ public final class RagEvalCli {
                         .modelName("text-embedding-v4")
                         .dimensions(1024)
                         .build(),
-                store, jdbcTemplate, new JdbcRagTraceStore(jdbcTemplate, props), props, hybrid);
+                store, jdbcTemplate, new JdbcRagTraceStore(jdbcTemplate, props), props, hybrid,
+                // 阶段 6：--sql-filter 打开「权限进 SQL」的新路径，不加则该路径关闭，
+                // 与 4A 基线口径逐字一致。两者都跑一遍即可做 off/on 对照。
+                opts.containsKey("sql-filter")
+                        ? new SqlPermissionVectorSearch(jdbcTemplate, true)
+                        : SqlPermissionVectorSearch.disabled());
 
         // 真库路径覆盖 fetchScored()：把 Document.getScore() 一并带进报告，
         // 这样「该拒答的题」才能看到它到底拿了多高的相似度，而不是只有 0/1 的空/非空。

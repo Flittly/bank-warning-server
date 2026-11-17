@@ -40,14 +40,21 @@ import java.util.UUID;
  *   <li>每次检索（成功或明确不可用）写一行 {@link RagTrace}。</li>
  * </ol>
  *
- * <p><b>当前过滤发生在召回之后</b>：SDK 的 {@code SearchDocumentDto} 没有 filter 字段，
- * 无法在向量 SQL 内裁剪。无权内容不会被返回给模型或用户，但服务端确实短暂读到过。
- * <b>阶段 6</b> 改为 SQL 内过滤（security trimming）时，只需替换本方法内部，调用方不动。
+ * <p><b>权限过滤现在有两个位置，由开关决定走哪一个</b>：
+ * <ul>
+ *   <li>{@code app.ai.rag.sql-permission-filter-enabled=true}（默认）⇒ 由
+ *       {@link SqlPermissionVectorSearch} 把条件写进向量 SQL 的 {@code WHERE}，
+ *       无权正文根本不会进入 JVM；</li>
+ *   <li>{@code false} ⇒ 退回 SDK {@code vectorStore.search()} + {@link #applyPermissionFilter}
+ *       的「先召回后过滤」，用于应急回滚，行为与阶段 4 逐字一致。</li>
+ * </ul>
+ * 注意 {@link #applyPermissionFilter} <b>没有删除</b>：关键词路仍自带条件后在此兜一次底，
+ * 且关闭态依赖它。
  *
  * <p><b>阶段编号</b>：阶段 5 = 混合检索（dense + sparse → RRF），已实现于
  * {@link #hybridOutcome}，由 {@code app.ai.rag.hybrid-enabled} 控制，<b>默认关闭</b>：
  * 关闭时本类的执行路径、SQL 条数、日志字段与阶段 4 完全一致。
- * 阶段 6 = SQL 内权限过滤，挂点仍在 {@link #applyPermissionFilter}。
+ * 阶段 6 = SQL 内权限过滤，实现在 {@link SqlPermissionVectorSearch}。
  */
 @Service
 @SuppressWarnings({"deprecation", "removal"})
@@ -82,6 +89,7 @@ public class KnowledgeService {
     private final RagProperties props;
     private final HybridRagProperties hybrid;
     private final SparseRetriever sparseRetriever;
+    private final SqlPermissionVectorSearch sqlSearch;
 
     /**
      * 兼容既有调用点（5 处单元测试 + 离线评测 CLI 直接 {@code new}）：一律按
@@ -97,8 +105,23 @@ public class KnowledgeService {
     }
 
     /**
-     * Spring 实际使用的构造器。混合检索配置独立成 {@link HybridRagProperties}，
-     * {@link RagProperties} 的 11 参构造器一字未动。
+     * 兼容混合检索之前的调用点：语义等价于「阶段 6 的 SQL 内过滤关闭」，
+     * 检索仍走 SDK {@code vectorStore.search()} + Java 集合过滤。
+     */
+    public KnowledgeService(EmbeddingModel embeddingModel,
+                            VDBStoreBase vectorStore,
+                            JdbcTemplate jdbcTemplate,
+                            JdbcRagTraceStore traceStore,
+                            RagProperties props,
+                            HybridRagProperties hybrid) {
+        this(embeddingModel, vectorStore, jdbcTemplate, traceStore, props,
+                hybrid, SqlPermissionVectorSearch.disabled());
+    }
+
+    /**
+     * Spring 实际使用的构造器。混合检索配置独立成 {@link HybridRagProperties}、
+     * 阶段 6 的 SQL 内过滤独立成 {@link SqlPermissionVectorSearch}，
+     * 两者的开关都不进 {@link RagProperties} 的 11 参构造器。
      */
     @Autowired
     public KnowledgeService(EmbeddingModel embeddingModel,
@@ -106,13 +129,15 @@ public class KnowledgeService {
                             JdbcTemplate jdbcTemplate,
                             JdbcRagTraceStore traceStore,
                             RagProperties props,
-                            HybridRagProperties hybrid) {
+                            HybridRagProperties hybrid,
+                            SqlPermissionVectorSearch sqlSearch) {
         this.embeddingModel = embeddingModel;
         this.vectorStore = vectorStore;
         this.jdbcTemplate = jdbcTemplate;
         this.traceStore = traceStore;
         this.props = props;
         this.hybrid = hybrid;
+        this.sqlSearch = sqlSearch;
         this.sparseRetriever = new SparseRetriever(jdbcTemplate, props, hybrid);
     }
 
@@ -194,33 +219,47 @@ public class KnowledgeService {
                     "生成查询向量失败：嵌入模型返回空结果。");
         }
 
-        // 过滤在召回之后，所以粗召回要比 topK 多取几倍，避免过滤完剩不下几条。
+        // 粗召回比 topK 多取几倍：阶段 6 之前是为了「Java 过滤完还剩得下」，
+        // 现在权限已在 SQL 里裁掉，这个后备只服务 scoreThreshold（阈值在 Java 侧筛，
+        // 不补位，与 SDK 行为一致），所以参数保留、口径变了。
         int expansion = Math.max(1, props.candidateExpansion);
         int candidates = Math.min(MAX_CANDIDATES, Math.max(limit, limit * expansion));
-        SearchDocumentDto searchDto = SearchDocumentDto.builder()
-                .queryEmbedding(queryEmbedding)
-                .limit(candidates)
-                .scoreThreshold(props.scoreThreshold)
-                .build();
 
-        List<Document> hits;
-        try {
-            hits = vectorStore.search(searchDto).block(timeout);
-        } catch (Exception e) {
-            throw new KnowledgeUnavailableException(Reason.SEARCH_FAILED,
-                    "知识库检索失败：" + rootMessage(e), e);
+        // 阶段 6：开关打开 ⇒ 权限条件进 SQL，返回的 dense 已经是「自己有权看的」。
+        boolean denseFiltered = sqlSearch.isEnabled();
+        List<Document> dense;
+        if (denseFiltered) {
+            try {
+                dense = sqlSearch.search(queryEmbedding, who, props, candidates);
+            } catch (Exception e) {
+                throw new KnowledgeUnavailableException(Reason.SEARCH_FAILED,
+                        "知识库检索失败：" + rootMessage(e), e);
+            }
+        } else {
+            SearchDocumentDto searchDto = SearchDocumentDto.builder()
+                    .queryEmbedding(queryEmbedding)
+                    .limit(candidates)
+                    .scoreThreshold(props.scoreThreshold)
+                    .build();
+            List<Document> hits;
+            try {
+                hits = vectorStore.search(searchDto).block(timeout);
+            } catch (Exception e) {
+                throw new KnowledgeUnavailableException(Reason.SEARCH_FAILED,
+                        "知识库检索失败：" + rootMessage(e), e);
+            }
+            dense = hits == null ? List.of() : hits;
         }
-        List<Document> dense = hits == null ? List.of() : hits;
 
         if (hybrid.enabled) {
-            return hybridOutcome(query, scenario, who, limit, traceId, dense);
+            return hybridOutcome(query, scenario, who, limit, traceId, dense, denseFiltered);
         }
 
         // 关闭态：与阶段 4 逐字一致（含空结果提前返回与日志字段），保证「零回归」可验证。
         if (dense.isEmpty()) {
             return new Outcome(List.of(), 0, 0, List.of());
         }
-        List<Document> visible = applyPermissionFilter(dense, who);
+        List<Document> visible = denseFiltered ? dense : applyPermissionFilter(dense, who);
         List<Document> result = visible.stream().limit(limit).toList();
         log.info("[rag] traceId={}, scenario={}, hits={}, visible={}, returned={}, topK={}",
                 traceId, scenario, dense.size(), visible.size(), result.size(), limit);
@@ -241,8 +280,10 @@ public class KnowledgeService {
      * </ol>
      */
     private Outcome hybridOutcome(String query, Scenario scenario, AiCaller who, int limit,
-                                  String traceId, List<Document> denseHits) {
-        List<Document> denseVisible = applyPermissionFilter(denseHits, who);
+                                  String traceId, List<Document> denseHits, boolean denseFiltered) {
+        // 阶段 6 打开时 dense 已在 SQL 内裁过，这里再筛一次即可（幂等，成本是一条轻量 SQL）；
+        // 关闭时维持阶段 5 的原有行为，逐字不变。
+        List<Document> denseVisible = denseFiltered ? denseHits : applyPermissionFilter(denseHits, who);
 
         List<Document> sparseHits;
         try {

@@ -352,4 +352,40 @@ class KnowledgeServiceTest {
         assertEquals(1, result.size());
         assertEquals("BMS.docx", result.get(0).getMetadata().getDocId());
     }
+
+    @Test
+    @DisplayName("阶段 6：开关打开时走 SQL 内过滤——不调 SDK 检索，也不再查可见集合")
+    void sqlFilterEnabledBypassesSdkAndRecheck() {
+        when(vectorStore.search(any())).thenReturn(Mono.just(List.of(doc("BMS.docx", "总则"))));
+        SqlPermissionVectorSearch sqlSearch = mock(SqlPermissionVectorSearch.class);
+        when(sqlSearch.isEnabled()).thenReturn(true);
+        when(sqlSearch.search(any(double[].class), any(AiCaller.class),
+                any(RagProperties.class), anyInt()))
+                .thenReturn(List.of(doc("BMS.docx", "总则")));
+
+        KnowledgeService svc = new KnowledgeService(embeddingModel, vectorStore, jdbcTemplate,
+                traceStore, RagProperties.defaults(), HybridRagProperties.disabled(), sqlSearch);
+
+        List<Document> result = svc.retrieve("崩岸",
+                KnowledgeService.Scenario.CHAT, AiCaller.forUser(7L));
+
+        assertEquals(1, result.size());
+        verify(vectorStore, never()).search(any());
+        verify(jdbcTemplate, never()).queryForList(anyString(), eq(String.class), any(Object[].class));
+    }
+
+    @Test
+    @DisplayName("阶段 6 关闭态：仍走 SDK + Java 集合过滤，行为与阶段 4 逐字一致")
+    void sqlFilterDisabledFallsBackToSdkPath() {
+        when(vectorStore.search(any())).thenReturn(Mono.just(List.of(doc("BMS.docx", "总则"))));
+        when(jdbcTemplate.queryForList(anyString(), eq(String.class), eq(7L)))
+                .thenReturn(List.of("BMS.docx"));
+
+        List<Document> result = service(RagProperties.defaults())
+                .retrieve("崩岸", KnowledgeService.Scenario.CHAT, AiCaller.forUser(7L));
+
+        assertEquals(1, result.size());
+        verify(vectorStore).search(any());
+        verify(jdbcTemplate).queryForList(anyString(), eq(String.class), eq(7L));
+    }
 }

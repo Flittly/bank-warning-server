@@ -177,6 +177,12 @@ app:
       hybrid-sparse-top-k: ${RAG_HYBRID_SPARSE_TOP_K:20}
       hybrid-rrf-k: ${RAG_HYBRID_RRF_K:60}
       hybrid-max-anchors: ${RAG_HYBRID_MAX_ANCHORS:8}
+      # 阶段 6：把「谁能看哪些行」写进向量检索 SQL 的 WHERE（security trimming）。
+      # 打开后无权正文不再进入 JVM，普通用户能稳定拿满 topK，每次检索少一条可见集合查询。
+      # 关闭即退回 SDK search() + Java 集合过滤，行为与阶段 4 逐字一致（应急回滚用）。
+      # 管理员视角两种模式结果应完全相同：RagEvalCli --jdbc（关）与 --sql-filter（开）对照。
+      # 注意：WHERE 加在 ANN 查询上会触发 filtered ANN，数据量上来后需 EXPLAIN 复核计划形状。
+      sql-permission-filter-enabled: ${RAG_SQL_PERMISSION_FILTER:true}
       # 报告轨 RAG：Step 6 撰写前固定预检索一次，把命中的口径作为提示词的一段输入。
       # 默认关闭 —— 库里目前只有 4 段 BMS.docx（内部算法说明，不是判定标准），
       # 打开会把不可信文本注入正式交付物。阶段 3 灌入可信冻结口径后再置 true。
