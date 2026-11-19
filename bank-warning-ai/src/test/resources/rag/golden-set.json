@@ -1,6 +1,6 @@
 {
-  "version": "2",
-  "note": "阶段 4A 考卷 + 阶段 5 准备包。A=改动前即可测且有区分度（管道健康/现存 4 段可召回/该拒答/公共可见）；B=阈值与口径题，阶段 3 灌入冻结口径前只登记不计分；C=报告口径一致性，需 LLM，仅人工抽样评审；D=阶段 5 混合检索专用题（精确关键词/编号/数值，用来对比 dense-only 与 RRF），在阶段 5 上线并完成阶段 3 灌库前一律只登记不计分，否则会把 4A 基线污染成一堆 0。期望答案必须取自代码可验证的冻结事实，本表未经领域老师审定前不得对外表述为准确率。",
+  "version": "3",
+  "note": "阶段一考卷。语料：BMS.docx(4) / 3-项目技术报告.docx(239) / riskScoring.ts(39) / riskLevel.py(72) / template.json(1)，全部 is_public，共 5 篇 355 块。A=管道健康与可见性（每篇至少 1 题，证明五篇都能被召回、公共资料对普通用户可见、库里没有的东西必须拒答）；B=口径题（阈值/权重/枚举/方向，答案取自代码可验证的冻结事实）；C=跨文档口径一致性，需 LLM 判读，只登记不计分；D=精确编号与数值题，用来对比 dense-only / 混合 / 精排三档。判分口径：每题只有一个权威源——数值在 template.json 与 riskScoring.ts 同值时，权威源取生产冻结模板 template.json，命中前端复刻版记为 miss，记的是「有没有找到权威源」而不是「检索错了」。全部答对不等于领域准确率，未经领域老师审定前只能自称自拟题库。",
   "cases": [
     {
       "id": "A01",
@@ -10,7 +10,7 @@
       "mustRefuse": false,
       "caller": "admin",
       "scored": true,
-      "note": "库内现存 4 段 BMS.docx_chunk_0..3 的可召回性（doc_id 均为 BMS.docx）"
+      "note": "小文档可召回性：doc_id=BMS.docx，共 4 块"
     },
     {
       "id": "A02",
@@ -20,17 +20,17 @@
       "mustRefuse": false,
       "caller": "admin",
       "scored": true,
-      "note": "现存语料的第二条召回路径"
+      "note": "同 A01，验证同一篇文档的不同问法都能稳定命中"
     },
     {
       "id": "A03",
       "category": "A",
-      "question": "BMS.docx 的水流冲刷与岸坡稳定说明",
+      "question": "BMS 里对水流冲刷与岸坡稳定的说明",
       "expectedDocIds": ["BMS.docx"],
       "mustRefuse": false,
-      "caller": "user",
+      "caller": "admin",
       "scored": true,
-      "note": "普通用户身份：V16 已把 BMS.docx 标 is_public=true，应仍可见"
+      "note": "带文档名的自然问法，同时检验关键词路能否利用 ASCII 锚点 BMS"
     },
     {
       "id": "A04",
@@ -41,7 +41,7 @@
       "refusalLayer": "ANSWER",
       "caller": "admin",
       "scored": true,
-      "note": "答案层拒答：资料存在但说法取自被排除的 AI 历史报告、与平台冻结口径冲突，检索层返回相关片段不算错"
+      "note": "库内 Zd 的三档阈值是 0.1/0.15/0.3，没有 3m 这个说法。检索层会命中一堆讲阈值的块（实测 top1 相似度 0.60），所以拒答只能发生在答案层：不许顺着前提编"
     },
     {
       "id": "A05",
@@ -49,91 +49,346 @@
       "question": "GB 50286 规定的崩岸风险判定阈值具体是多少",
       "expectedDocIds": [],
       "mustRefuse": true,
+      "refusalLayer": "ANSWER",
+      "caller": "admin",
+      "scored": true,
+      "note": "规范原文未入库。检索层能命中项目自有阈值（实测 top1 0.76），答案层必须说明这是项目口径而不是国标，不得冒充"
+    },
+    {
+      "id": "A13",
+      "category": "A",
+      "question": "如何用 Python 训练一个图像分类模型",
+      "expectedDocIds": [],
+      "mustRefuse": true,
       "refusalLayer": "RETRIEVAL",
       "caller": "admin",
       "scored": true,
-      "note": "检索层拒答：规范原文全仓缺失，知识库不应给出任何标准编号或数值"
+      "note": "真正离题：库里没有任何机器学习内容，检索层必须空返回。这条用来验证 min-score 阈值是否真的在拦，而不是形同虚设"
+    },
+    {
+      "id": "A14",
+      "category": "A",
+      "question": "帮我写一封请假邮件",
+      "expectedDocIds": [],
+      "mustRefuse": true,
+      "refusalLayer": "RETRIEVAL",
+      "caller": "admin",
+      "scored": true,
+      "note": "与专业知识库无关的通用请求，检索层应空返回；有返回就说明阈值偏低或权限过滤没生效"
     },
     {
       "id": "A06",
       "category": "A",
-      "question": "请给出本项目采用的风险等级划分与权重",
+      "question": "这份技术报告的课题名称和项目编号是什么",
+      "expectedDocIds": ["3-项目技术报告.docx"],
+      "mustRefuse": false,
+      "caller": "admin",
+      "scored": true,
+      "note": "大文档封面块可召回性：课题=长江江苏段崩岸预警关键技术研究，编号 2020010"
+    },
+    {
+      "id": "A07",
+      "category": "A",
+      "question": "报告的委托单位和承担单位分别是哪家",
+      "expectedDocIds": ["3-项目技术报告.docx"],
+      "mustRefuse": false,
+      "caller": "admin",
+      "scored": true,
+      "note": "封面/扉页块：委托单位江苏省水利厅，承担单位江苏省水利工程规划办公室、南京水利科学研究院"
+    },
+    {
+      "id": "A08",
+      "category": "A",
+      "question": "前端的 riskScoring.ts 为什么要复刻 riskLevel.py 的算法",
+      "expectedDocIds": ["riskScoring.ts"],
+      "mustRefuse": false,
+      "caller": "admin",
+      "scored": true,
+      "note": "头部注释：人工改结果必须先把口径收敛成一处，否则改完数值后地图颜色与出图/报告的 risk_level 各算各的"
+    },
+    {
+      "id": "A09",
+      "category": "A",
+      "question": "riskLevel.py 里计算风险等级的函数接收哪些参数",
+      "expectedDocIds": ["riskLevel.py"],
+      "mustRefuse": false,
+      "caller": "admin",
+      "scored": true,
+      "note": "get_risk_level(response_list, wRE, wNM, wGE, wRL, risk_threshold, request_json)"
+    },
+    {
+      "id": "A10",
+      "category": "A",
+      "question": "风险阈值模板文件里一共有哪些键",
+      "expectedDocIds": ["template.json"],
+      "mustRefuse": false,
+      "caller": "admin",
+      "scored": true,
+      "note": "单块文档可召回性：Zb/Sa/Ln/PQ/Ky/Zd/Dsed/all/wNM/wRE/wGE/wRL 共 12 个键"
+    },
+    {
+      "id": "A11",
+      "category": "A",
+      "question": "崩岸预警评价用到哪几类指标",
       "expectedDocIds": ["BMS.docx"],
       "mustRefuse": false,
       "caller": "user",
       "scored": true,
-      "note": "权限裁剪题：普通用户不应看到他人私有 doc_id，但公共资料可见"
+      "note": "公共资料可见性：非管理员（user 7）也必须能命中 is_public=true 的文档"
     },
+    {
+      "id": "A12",
+      "category": "A",
+      "question": "技术报告里的研究目标是什么",
+      "expectedDocIds": ["3-项目技术报告.docx"],
+      "mustRefuse": false,
+      "caller": "admin",
+      "scored": true,
+      "note": "报告 1.1.1 节标题即「研究目标」，检验短标题块不会因重叠策略被挤掉"
+    },
+
     {
       "id": "B01",
       "category": "B",
-      "question": "Zd 的高风险阈值是多少",
+      "question": "风险等级 0 到 3 分别对应什么中文名称和颜色",
       "expectedDocIds": ["riskScoring.ts"],
       "mustRefuse": false,
       "caller": "admin",
-      "scored": false,
-      "note": "阈值题：阶段 3 灌入风险等级判定阈值后，4B 才计分（真源 template.json / riskScoring.ts）"
+      "scored": true,
+      "note": "RISK_LABELS：3 高风险 / 2 较高风险 / 1 中风险 / 0 低风险；RISK_COLORS 红橙蓝绿。旧考卷把期望写成 RISK_LABELS（不是文件名）导致永久不计分，已修正"
     },
     {
       "id": "B02",
       "category": "B",
-      "question": "Zb 的等级划分区间分别是什么",
+      "question": "岸坡防护 PL 有哪几个合法取值，分别对应第几档",
       "expectedDocIds": ["riskScoring.ts"],
       "mustRefuse": false,
       "caller": "admin",
-      "scored": false,
-      "note": "同上，4A 阶段期望块不存在，Recall 恒 0，只登记"
+      "scored": true,
+      "note": "ENUM_TIER_OPTIONS.PL：systemic 1 / normal 2 / low 3 / no 4"
     },
     {
       "id": "B03",
       "category": "B",
-      "question": "风险等级 0 到 3 分别对应什么颜色和中文名称",
-      "expectedDocIds": ["RISK_LABELS"],
+      "question": "荷载控制 LC 的合法取值有哪些",
+      "expectedDocIds": ["riskScoring.ts"],
       "mustRefuse": false,
       "caller": "admin",
-      "scored": false,
-      "note": "等级编号换算；真源 web/src/utils/riskScoring.ts 的 RISK_LABELS"
+      "scored": true,
+      "note": "strict / normal / low / no；与 PL 的 systemic 不同，两套字符串不可混用"
     },
     {
       "id": "B04",
       "category": "B",
-      "question": "PL 和 LC 有哪些合法取值",
+      "question": "地质工程组矩阵的三列分别是什么指标，顺序如何",
       "expectedDocIds": ["riskLevel.py"],
       "mustRefuse": false,
       "caller": "admin",
-      "scored": false,
-      "note": "枚举题：非法值必须抛 ValueError，不能把未填报当成防护最强"
+      "scored": true,
+      "note": "np.hstack 列序：土体组成 Dsed、岸坡防护 PL、荷载控制 LC；_one_hot_tier 再按列反推档位"
     },
     {
       "id": "B05",
       "category": "B",
-      "question": "权重 W 的计算取值和指标定义",
-      "expectedDocIds": ["template.json"],
+      "question": "水流动力、河床演变、地质工程三组指标各自点乘哪个权重",
+      "expectedDocIds": ["riskScoring.ts"],
       "mustRefuse": false,
       "caller": "admin",
-      "scored": false,
-      "note": "KNOWLEDGE.md 中两组权重名对调，禁止作为标注来源"
+      "scored": true,
+      "note": "RISK_MATRIX_GROUPS.weightKey：wNM / wRE / wGE；两者曾在前端被对调"
     },
     {
       "id": "B06",
       "category": "B",
-      "question": "Dsed 指标的定义是什么",
+      "question": "risk_value 是由 result_matrix 的哪两档相加得到的",
       "expectedDocIds": ["riskScoring.ts"],
       "mustRefuse": false,
       "caller": "admin",
-      "scored": false,
-      "note": "KNOWLEDGE.md 里 Dsed 定义与平台口径不是同一个量，需人工审定"
+      "scored": true,
+      "note": "result_matrix[2] + result_matrix[3]，即第 3、4 档权重之和"
     },
+    {
+      "id": "B07",
+      "category": "B",
+      "question": "风险总档的默认阈值 0.25、0.50、0.75 定义在哪个常量里",
+      "expectedDocIds": ["riskScoring.ts"],
+      "mustRefuse": false,
+      "caller": "admin",
+      "scored": true,
+      "note": "DEFAULT_RISK_THRESHOLDS = [0.25, 0.5, 0.75]"
+    },
+    {
+      "id": "B08",
+      "category": "B",
+      "question": "模板文件里 wNM、wRE、wGE、wRL 四组权重的数组取值",
+      "expectedDocIds": ["template.json"],
+      "mustRefuse": false,
+      "caller": "admin",
+      "scored": true,
+      "note": "wNM[0.43,0.32,0.25] wRE[0.48,0.16,0.36] wGE[0.6,0.2,0.2] wRL[0.32,0.43,0.25]；riskScoring.ts 有同值副本，权威源记 template.json"
+    },
+    {
+      "id": "B09",
+      "category": "B",
+      "question": "为什么抗冲流速 Ky 的阈值是越大越安全",
+      "expectedDocIds": ["riskScoring.ts"],
+      "mustRefuse": false,
+      "caller": "admin",
+      "scored": true,
+      "note": "INDICATOR_DIRECTION：只有 Ky 是 desc（阈值 1.7/1.35/1.0 降序），其余连续量都是小于阈值更安全"
+    },
+    {
+      "id": "B10",
+      "category": "B",
+      "question": "riskLevel.py 里 risk_threshold 传入 NONE 时会怎么处理",
+      "expectedDocIds": ["riskLevel.py"],
+      "mustRefuse": false,
+      "caller": "admin",
+      "scored": true,
+      "note": "回落读模板文件的 all 数组；wNM/wRE/wGE/wRL 传 NONE 同理各取模板对应键"
+    },
+    {
+      "id": "B11",
+      "category": "B",
+      "question": "riskLevel.py 找不到可用的水动力节点时会怎么办",
+      "expectedDocIds": ["riskLevel.py"],
+      "mustRefuse": false,
+      "caller": "admin",
+      "scored": true,
+      "note": "先回落 DEFAULT_DOMAIN + standard + default 再查一次，仍为空则 raise ValueError"
+    },
+    {
+      "id": "B12",
+      "category": "B",
+      "question": "指标结果是怎么换算成库里 1 到 4 的 risk_level 的",
+      "expectedDocIds": ["riskScoring.ts"],
+      "mustRefuse": false,
+      "caller": "admin",
+      "scored": true,
+      "note": "bucket(risk_value, all) + 1；显示等级 0..3 与 risk_level 1..4 一一对应但数值差 1"
+    },
+    {
+      "id": "B13",
+      "category": "B",
+      "question": "_one_hot_tier 在全 0 的列上返回什么",
+      "expectedDocIds": ["riskLevel.py"],
+      "mustRefuse": false,
+      "caller": "admin",
+      "scored": true,
+      "note": "返回 None，不返回 1——否则「未填报」会被当成最强防护"
+    },
+    {
+      "id": "B14",
+      "category": "B",
+      "question": "枚举型指标 PL 和 LC 为什么不走阈值分档",
+      "expectedDocIds": ["riskScoring.ts"],
+      "mustRefuse": false,
+      "caller": "admin",
+      "scored": true,
+      "note": "ENUM_TIER_OPTIONS / ENUM_TIER_MAP 直接给出档位；走阈值等于给枚举值编一个不存在的量纲"
+    },
+
     {
       "id": "C01",
       "category": "C",
-      "question": "报告「指标分析」章节中的阈值是否与 riskScoring.ts 一致并标注了出处 [n]",
-      "expectedDocIds": [],
+      "question": "报告「指标分析」章节里的阈值是否与 riskScoring.ts 一致",
+      "expectedDocIds": ["3-项目技术报告.docx", "riskScoring.ts"],
       "mustRefuse": false,
       "caller": "admin",
       "scored": false,
-      "note": "报告口径一致性：需调 LLM 且结果非确定，只能抽样人工评审，不进 CI 硬门禁"
+      "note": "跨文档一致性，需 LLM 逐项比对，只登记不计分"
     },
+    {
+      "id": "C02",
+      "category": "C",
+      "question": "报告里风险等级 Ⅰ 到 Ⅳ 的表述与 RISK_LABELS 的口径是否一致",
+      "expectedDocIds": ["3-项目技术报告.docx", "riskScoring.ts"],
+      "mustRefuse": false,
+      "caller": "admin",
+      "scored": false,
+      "note": "已知风险：报告 Ⅰ 级=最高，平台 risk_level 0=低，序号方向相反"
+    },
+    {
+      "id": "C03",
+      "category": "C",
+      "question": "报告给出的权重取值与模板文件里的是否一致",
+      "expectedDocIds": ["3-项目技术报告.docx", "template.json"],
+      "mustRefuse": false,
+      "caller": "admin",
+      "scored": false,
+      "note": "报告可能只列部分权重，需说明覆盖范围"
+    },
+    {
+      "id": "C04",
+      "category": "C",
+      "question": "报告对崩岸机理的描述与 BMS 文档是否一致",
+      "expectedDocIds": ["3-项目技术报告.docx", "BMS.docx"],
+      "mustRefuse": false,
+      "caller": "admin",
+      "scored": false,
+      "note": "机理叙述类无唯一答案，只看是否给出可核对出处"
+    },
+    {
+      "id": "C05",
+      "category": "C",
+      "question": "报告说 Ⅰ 级是高风险，平台界面上 0 是低风险，这两个说法冲突吗",
+      "expectedDocIds": ["3-项目技术报告.docx", "riskScoring.ts"],
+      "mustRefuse": false,
+      "caller": "admin",
+      "scored": false,
+      "note": "编号方向不同，需模型讲清 Ⅰ 级 ↔ risk_level 4 的换算"
+    },
+    {
+      "id": "C06",
+      "category": "C",
+      "question": "BMS 文档里的计算公式与 riskLevel.py 的实现是否一致",
+      "expectedDocIds": ["BMS.docx", "riskLevel.py"],
+      "mustRefuse": false,
+      "caller": "admin",
+      "scored": false,
+      "note": "公式与代码逐项对拍"
+    },
+    {
+      "id": "C07",
+      "category": "C",
+      "question": "报告里关于 Ky 方向性的说法与代码里的方向设置是否一致",
+      "expectedDocIds": ["3-项目技术报告.docx", "riskScoring.ts"],
+      "mustRefuse": false,
+      "caller": "admin",
+      "scored": false,
+      "note": "反方向阈值最容易在文字描述里被写反"
+    },
+    {
+      "id": "C08",
+      "category": "C",
+      "question": "报告里提到的岸坡防护取值，是否覆盖了代码里的四个档位",
+      "expectedDocIds": ["3-项目技术报告.docx", "riskScoring.ts"],
+      "mustRefuse": false,
+      "caller": "admin",
+      "scored": false,
+      "note": "枚举覆盖度检查"
+    },
+    {
+      "id": "C09",
+      "category": "C",
+      "question": "报告里 Zb、Sa、Ln 的阈值与模板 JSON 是否逐项相同",
+      "expectedDocIds": ["3-项目技术报告.docx", "template.json"],
+      "mustRefuse": false,
+      "caller": "admin",
+      "scored": false,
+      "note": "逐项比对，任一项不同即算不一致"
+    },
+    {
+      "id": "C10",
+      "category": "C",
+      "question": "报告里的 Dsed 算例与 riskLevel.py 的计算公式是否对得上",
+      "expectedDocIds": ["3-项目技术报告.docx", "riskLevel.py"],
+      "mustRefuse": false,
+      "caller": "admin",
+      "scored": false,
+      "note": "算例复核，需要模型自己代入数值"
+    },
+
     {
       "id": "D01",
       "category": "D",
@@ -141,28 +396,28 @@
       "expectedDocIds": ["template.json"],
       "mustRefuse": false,
       "caller": "admin",
-      "scored": false,
-      "note": "精确数值串：dense 对孤立数字不敏感，trigram/ILIKE 可精确命中。阶段 5 的 before/after 对照题，灌库前只登记"
+      "scored": true,
+      "note": "Zb:[20,30,40]，升序，小于阈值更安全"
     },
     {
       "id": "D02",
       "category": "D",
-      "question": "wNM wRE wGE wRL 四组权重的取值是多少",
+      "question": "模板里 all 这个键的三档阈值数组是什么",
       "expectedDocIds": ["template.json"],
       "mustRefuse": false,
       "caller": "admin",
-      "scored": false,
-      "note": "英文缩写代号：KNOWLEDGE.md 曾把 wNM 与 wRE 对调，稀疏精确匹配可用于核对代号不串味"
+      "scored": true,
+      "note": "all:[0.25,0.50,0.75]，即 risk_value 的总分档线"
     },
     {
       "id": "D03",
       "category": "D",
-      "question": "PL 和 LC 传入非法值时会抛 ValueError 吗",
+      "question": "risk_value 大于等于 all 的第三个阈值时，risk 数组变成什么",
       "expectedDocIds": ["riskLevel.py"],
       "mustRefuse": false,
       "caller": "admin",
-      "scored": false,
-      "note": "标识符 + 异常名混排题：dense 易被「枚举取值」语义带偏，关键词路可锁定 ValueError"
+      "scored": true,
+      "note": "[0,0,0,1]，即 risk_level 4；前三个分支都是严格小于"
     },
     {
       "id": "D04",
@@ -171,8 +426,108 @@
       "expectedDocIds": ["BMS.docx"],
       "mustRefuse": false,
       "caller": "admin",
-      "scored": false,
-      "note": "唯一在现存 4 段语料中已有答案的 D 类题；保留 scored=false 以免改变 4A 基线计分题数"
+      "scored": true,
+      "note": "纯数值算例，只能靠原文命中"
+    },
+    {
+      "id": "D05",
+      "category": "D",
+      "question": "高风险对应的颜色十六进制值是多少",
+      "expectedDocIds": ["riskScoring.ts"],
+      "mustRefuse": false,
+      "caller": "admin",
+      "scored": true,
+      "note": "#ef4444（红）；较高风险 #f97316、中风险 #3b82f6、低风险 #10b981"
+    },
+    {
+      "id": "D06",
+      "category": "D",
+      "question": "潮位的 1.5 和 2.3 这两个分界值分别对应哪个等级",
+      "expectedDocIds": ["riskLevel.py"],
+      "mustRefuse": false,
+      "caller": "admin",
+      "scored": true,
+      "note": "小于 1.5 是 xc，1.5~2.3 是 zc，大于等于 2.3 是 dc"
+    },
+    {
+      "id": "D07",
+      "category": "D",
+      "question": "1.7 1.35 1.0 这三个数对应哪个指标的阈值",
+      "expectedDocIds": ["template.json"],
+      "mustRefuse": false,
+      "caller": "admin",
+      "scored": true,
+      "note": "Ky（抗冲流速），唯一降序排列的指标"
+    },
+    {
+      "id": "D08",
+      "category": "D",
+      "question": "0.04 0.12 0.20 对应哪个指标的阈值",
+      "expectedDocIds": ["template.json"],
+      "mustRefuse": false,
+      "caller": "admin",
+      "scored": true,
+      "note": "Ln（近岸冲刷）"
+    },
+    {
+      "id": "D09",
+      "category": "D",
+      "question": "ENUM_TIER_MAP 里 no 这个取值对应第几档",
+      "expectedDocIds": ["riskScoring.ts"],
+      "mustRefuse": false,
+      "caller": "admin",
+      "scored": true,
+      "note": "第 4 档；PL 与 LC 的 no 都是 4"
+    },
+    {
+      "id": "D10",
+      "category": "D",
+      "question": "run_risk_level_mcr 返回的结果里包含哪些字段",
+      "expectedDocIds": ["riskLevel.py"],
+      "mustRefuse": false,
+      "caller": "admin",
+      "scored": true,
+      "note": "risk_value、risk 四位 one-hot、matrices（含各矩阵与 indicator_tiers）、raw_values"
+    },
+    {
+      "id": "D11",
+      "category": "D",
+      "question": "模板里 Sa 的三档阈值分别是多少",
+      "expectedDocIds": ["template.json"],
+      "mustRefuse": false,
+      "caller": "admin",
+      "scored": true,
+      "note": "Sa:[0.2,0.3,0.5]"
+    },
+    {
+      "id": "D12",
+      "category": "D",
+      "question": "这份技术报告的项目编号是多少",
+      "expectedDocIds": ["3-项目技术报告.docx"],
+      "mustRefuse": false,
+      "caller": "admin",
+      "scored": true,
+      "note": "2020010，江苏省水利科技项目；五位数编号是关键词路的强锚点"
+    },
+    {
+      "id": "D13",
+      "category": "D",
+      "question": "PL 第一档在代码里对应的字符串是什么",
+      "expectedDocIds": ["riskScoring.ts"],
+      "mustRefuse": false,
+      "caller": "admin",
+      "scored": true,
+      "note": "systemic（强，1 档）；LC 对应的是 strict，两者不可互换"
+    },
+    {
+      "id": "D14",
+      "category": "D",
+      "question": "water_flow_power_weight_matrix 是怎么构造出来的",
+      "expectedDocIds": ["riskLevel.py"],
+      "mustRefuse": false,
+      "caller": "admin",
+      "scored": true,
+      "note": "np.array(wNM).reshape(3, 1)，3 行 1 列"
     }
   ]
 }

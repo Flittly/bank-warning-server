@@ -18,6 +18,7 @@ import reactor.core.publisher.Mono;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.List;
+import java.util.Set;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -42,23 +43,43 @@ import static org.mockito.Mockito.when;
 @DisplayName("RAG 阶段 4A：考卷有效性与检索层回归门禁")
 class RagRetrievalEvalTest {
 
+    /**
+     * 库里实际存在的 doc_id 白名单。
+     *
+     * <p>考卷最容易出的错不是「题出得不好」，而是「期望指向一篇不存在的文档」——
+     * 这种题永远计 0 分，看指标的人只会以为检索烂。旧考卷第 B03 题的期望写成
+     * {@code RISK_LABELS}（一个导出常量名，不是文件名），就属于这一类。
+     * 新增语料时同步改这里；改不动就说明那篇文档还没入库，对应题也不能计分。
+     */
+    private static final Set<String> INGESTED_DOC_IDS = Set.of(
+            "BMS.docx",
+            "3-项目技术报告.docx",
+            "riskScoring.ts",
+            "riskLevel.py",
+            "template.json");
+
     @Test
-    @DisplayName("考卷可加载、标注完整、id 不重复，且保留了只登记不计分的题")
+    @DisplayName("考卷可加载、标注完整、id 不重复，且期望文档都在已入库白名单内")
     void goldenSetIsWellFormed() throws Exception {
         RagGoldenSet golden = RagGoldenSet.load();
         golden.validate();
 
         assertFalse(golden.cases.isEmpty());
-        assertTrue(golden.cases.stream().anyMatch(c -> "A".equals(c.category)));
-        assertTrue(golden.cases.stream().anyMatch(c -> "B".equals(c.category)));
-        assertTrue(golden.cases.stream().anyMatch(c -> "C".equals(c.category)));
-        assertTrue(golden.cases.stream().anyMatch(c -> "D".equals(c.category)),
-                "阶段 5 准备包应登记 D 类关键词/编号题");
+        for (String category : List.of("A", "B", "C", "D")) {
+            assertTrue(golden.cases.stream().anyMatch(c -> category.equals(c.category)),
+                    "每类都要有题，缺 " + category);
+        }
         assertTrue(golden.cases.stream().anyMatch(c -> !c.scored),
-                "B/C/D 类在灌库与阶段 5 上线前必须只登记不计分，否则 Recall 恒 0 会污染基线");
-        assertTrue(golden.cases.stream().filter(c -> "D".equals(c.category))
-                        .allMatch(c -> !c.scored),
-                "D 类计分会改变 4A 基线的计分题数，破坏 before/after 可比性");
+                "C 类跨文档一致性题要 LLM 判读，必须保留为只登记不计分");
+        assertTrue(golden.scoredCount() >= 20,
+                "计分题不足 20 道时 MRR/nDCG 没有区分度，等于没测");
+        // 期望文档必须真实入库：写错一个 docId 就等于给自己判了个永久 0 分。
+        for (RagGoldenSet.GoldenCase c : golden.cases) {
+            for (String docId : c.expectedDocIdsOrEmpty()) {
+                assertTrue(INGESTED_DOC_IDS.contains(docId),
+                        c.id + " 的期望文档不在已入库白名单: " + docId);
+            }
+        }
         assertEquals(golden.cases.size(),
                 golden.cases.stream().map(c -> c.id).distinct().count());
     }

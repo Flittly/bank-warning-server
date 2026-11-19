@@ -177,6 +177,15 @@ app:
       hybrid-sparse-top-k: ${RAG_HYBRID_SPARSE_TOP_K:20}
       hybrid-rrf-k: ${RAG_HYBRID_RRF_K:60}
       hybrid-max-anchors: ${RAG_HYBRID_MAX_ANCHORS:8}
+      # 阶段 8：两路 RRF 权重。默认 1.0/1.0，与阶段 5 的等权实现逐位一致，不改就不影响线上。
+      # 为什么要权重：向量路衡量语义相近、关键词路衡量字面命中，两路可靠度在中文长文档场景并不对等。
+      # 取值必须由离线评测的格点搜索决定（RagEvalCli --rrf-dense-weight/--rrf-sparse-weight），
+      # 不要凭感觉设。sparse-weight=0 等价于关闭关键词路。
+      hybrid-dense-weight: ${RAG_HYBRID_DENSE_WEIGHT:1.0}
+      hybrid-sparse-weight: ${RAG_HYBRID_SPARSE_WEIGHT:1.0}
+      # 融合前的候选池。0 = 沿用 limit × candidate-expansion 的旧逻辑（行为不变）。
+      # 配正数才会抬高粗召回量，让 RRF 与 rerank 有足够候选可比较；上限 100，配大了自动夹。
+      hybrid-candidate-pool: ${RAG_HYBRID_CANDIDATE_POOL:0}
       # 阶段 6：把「谁能看哪些行」写进向量检索 SQL 的 WHERE（security trimming）。
       # 打开后无权正文不再进入 JVM，普通用户能稳定拿满 topK，每次检索少一条可见集合查询。
       # 关闭即退回 SDK search() + Java 集合过滤，行为与阶段 4 逐字一致（应急回滚用）。
@@ -198,6 +207,30 @@ app:
       batch-concurrency: ${RAG_BATCH_CONCURRENCY:4}
       batch-timeout-ms: ${RAG_BATCH_TIMEOUT_MS:30000}
       ingest-budget-ms: ${RAG_INGEST_BUDGET_MS:180000}
+      # 相邻 chunk 的重叠字数，取值 0 ~ 250（半块），默认 50（块长的 10%）。
+      # 定值方法：业界按块长比例定重叠，再按文档类型取档 —— 通用 10%、技术文档与代码
+      #      10~15%、长篇报告与法律 15~20%。本项目块长 500、语料以技术报告为主，取下限。
+      # 实测（217 块 / 9 万字真实语料）：
+      #      重叠 0  → 217 块，9.0 万字
+      #      重叠 50 → 239 块（+10%），10.1 万字（+12%）
+      #      重叠 100 → 270 块（+24%），11.3 万字（+25%）
+      # 取 50 而非 100：块尾被真正切断的句子（残句 >60 字）仅 9 条、p90 为 48 字，
+      #      50 字已覆盖九成断句；再加的部分主要作用于跨块上下文衔接，属答案忠实度收益，
+      #      需生成层评估才能验证，在验证手段到位前不预付双倍成本。
+      # 注意：改动本值属于「切分口径变更」，新段与旧段不可直接比较，需重灌已有文档。
+      chunk-overlap: ${RAG_CHUNK_OVERLAP:50}
+      # 阶段 8：rerank 二阶段精排（DashScope gte-rerank-v2）。默认关闭。
+      # 关闭时检索路径一行都不多走，结果与阶段 7 逐字一致。
+      # 打开后：粗召回取 rerank-candidate-pool 条 → cross-encoder 逐对打分 → 截到 topK。
+      # 代价是每次检索多一次外部往返（典型 100~300ms）与按量计费，所以候选池别开太大。
+      # 安全：rerank 会把候选正文发给外部服务，因此它必须发生在权限过滤之后——
+      #      代码里固定在 applyPermissionFilter / SQL 内过滤之后调用，不要往前挪。
+      # rerank-score-threshold 默认 0（不过滤）：rerank 分数的分布要先用评测标定，
+      # 没标定就给阈值等于凭空造一个不可解释的口径。标定后再配。
+      rerank-enabled: ${RAG_RERANK_ENABLED:false}
+      rerank-model: ${RAG_RERANK_MODEL:gte-rerank-v2}
+      rerank-candidate-pool: ${RAG_RERANK_CANDIDATE_POOL:30}
+      rerank-score-threshold: ${RAG_RERANK_SCORE_THRESHOLD:0.0}
       # 报告轨 RAG：Step 6 撰写前固定预检索一次，把命中的口径作为提示词的一段输入。
       # 默认关闭 —— 库里目前只有 4 段 BMS.docx（内部算法说明，不是判定标准），
       # 打开会把不可信文本注入正式交付物。阶段 3 灌入可信冻结口径后再置 true。

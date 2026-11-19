@@ -12,6 +12,7 @@ import io.agentscope.core.rag.model.Document;
 import io.agentscope.core.rag.model.DocumentMetadata;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.jdbc.core.JdbcTemplate;
@@ -37,6 +38,37 @@ public class KnowledgeController {
     private final EmbeddingBatchProperties batchProps;
 
     private static final int MAX_CHUNK_SIZE = 500;
+
+    /**
+     * 相邻 chunk 共享的边界字数，取值 {@code [0, MAX_CHUNK_SIZE / 2]}，默认 50。
+     *
+     * <p>固定长度切分会把一句话拦腰截断：「……判为高风险，应立｜即启动加密监测……」
+     * 被切成两段后，任何一段单独看都缺少完整语义，检索命中哪段都答不全。
+     * 重叠让相邻块共享边界文本，使被切断的句子至少在一块里保持完整。
+     *
+     * <p><b>定值方法</b>：业界不按绝对值定重叠，而是按块长的比例定，再按文档类型取档
+     * ——通用文本 10% 左右，技术文档与代码 10~15%，长篇报告与法律文书 15~20%。
+     * 本项目块长 500 字，文档以技术报告为主，取下限 {@code 500 × 10% = 50}。
+     *
+     * <p><b>真实语料上的核算</b>（9 万字技术报告，1252 段 / 217 块）：
+     * <ul>
+     *   <li>只有 4 段（占字数 2.8%）超过单块上限，即绝大多数切点落在段落边界上；</li>
+     *   <li>块尾 112 处不是句末标点，其中 88% 是「1.1.1 研究目标」这类短标题（≤30 字），
+     *       本身不需要补全；真正被切断的句子（残句 &gt;60 字）仅 9 条，其 p90 为 48 字；</li>
+     *   <li>50 字可覆盖这 90% 的断句，代价是块数 +10%（217→239）、嵌入量 +12%。</li>
+     * </ul>
+     *
+     * <p>不取 20%（100 字）的理由：块数增幅会到 +24%，而多出来的部分主要作用在
+     * 「跨块上下文衔接」上——那属于答案忠实度的收益，需要生成层评估才能验证。
+     * 在验证手段到位之前，默认值停在业界建议的下限。
+     *
+     * <p>上界是半块（250 字）：再大则下一块起点回落到上一块中部，产生大量近似重复的块。
+     *
+     * <p>为什么用字段注入而不是构造器参数：构造器已被 4 处测试直接 {@code new}，
+     * 每加一个参数都要连带改一遍，而这里只是切分策略的一个标量。
+     */
+    @Value("${app.ai.rag.chunk-overlap:50}")
+    private int chunkOverlap = 50;
 
     public KnowledgeController(KnowledgeService knowledgeService, PdfService pdfService,
                                JdbcTemplate jdbcTemplate, RagProperties ragProps,
@@ -64,6 +96,81 @@ public class KnowledgeController {
     }
 
     /**
+     * 阶段二：一次入库的临时 doc_id。
+     *
+     * <p>为什么要临时 id：正式 doc_id 里可能已经躺着上一版，直接 INSERT 只会并排多一份
+     * （主键 {@code id} 是随机 UUID，没有任何约束能挡住重复）。先写到一个不会与真实文档
+     * 重名的 id 上，整批成功后再「删旧 + 换名」，失败就整批丢掉——旧版本始终可检索。
+     *
+     * <p>{@code #stg-} 这个形状是刻意的：真实文档名不会带它，检索时若真漏出一批 staging 行
+     * 也能一眼看出是脏数据。doc_id 列是 VARCHAR(256)，长标题截断后仍留出 32 位余量。
+     */
+    static String stagingDocId(String docTitle) {
+        String base = docTitle.length() > 200 ? docTitle.substring(0, 200) : docTitle;
+        return base + "#stg-" + UUID.randomUUID().toString().substring(0, 12);
+    }
+
+    /** 按统一口径造块：{@code chunkId} 用正式标题（换名后与检索去重键保持一致），docId 用临时 id。 */
+    static List<Document> chunkDocuments(String docTitle, String stagingDocId,
+                                         List<String> chunks, Map<String, String> payload) {
+        List<Document> docs = new ArrayList<>(chunks.size());
+        for (int i = 0; i < chunks.size(); i++) {
+            var builder = DocumentMetadata.builder()
+                    .content(TextBlock.builder().text(chunks.get(i)).build())
+                    .docId(stagingDocId)
+                    .chunkId(docTitle + "_chunk_" + i)
+                    .addPayload("chunkIndex", String.valueOf(i))
+                    .addPayload("totalChunks", String.valueOf(chunks.size()));
+            payload.forEach(builder::addPayload);
+            docs.add(new Document(builder.build()));
+        }
+        return docs;
+    }
+
+    /**
+     * 阶段二：把临时批次落成正式文档。
+     *
+     * <p><b>整批成功才换名</b>：只要有一段没嵌入成功（模型 400、内容审核、超时），
+     * 换名就等于用残缺版本替换完整版本，「传一次丢一半」比「传失败」难查得多。
+     * 所以这里宁可整批作废、旧版本留在库里，并在返回体里给出 {@code failed} 让前端说明原因。
+     *
+     * @return 本次入库是否生效
+     */
+    boolean finishIngest(String stagingDocId, String docTitle, Long userId,
+                         KnowledgeService.IngestResult ingest) {
+        if (ingest == null || ingest.total() == 0 || !ingest.allOk()) {
+            knowledgeService.discardStaged(stagingDocId);
+            log.warn("[api] 入库未完整（成功 {}/{} 段），本批作废，旧版本保持不变: docId={}",
+                    ingest == null ? 0 : ingest.ok(), ingest == null ? 0 : ingest.total(), docTitle);
+            return false;
+        }
+        knowledgeService.replaceStaged(stagingDocId, docTitle, userId);
+        return true;
+    }
+
+    /**
+     * 入库返回体。失败时<b>必须带 error</b>：前端写的是 {@code data.error || "上传失败: " + status}，
+     * 只给一个 {@code success:false} 会让用户看到「上传失败: 200」——状态码是成功的意思，
+     * 提示却什么都没有，比报错本身更难排查。
+     */
+    static Map<String, Object> ingestResponse(boolean ok, String docId, int chunks,
+                                              KnowledgeService.IngestResult ingest,
+                                              Map<String, ?> extra) {
+        Map<String, Object> body = new LinkedHashMap<>();
+        body.put("success", ok);
+        body.put("docId", docId);
+        body.put("chunks", chunks);
+        body.put("embedded", ingest.ok());
+        body.put("failed", ingest.failed());
+        if (!ok) {
+            body.put("error", "入库未完整：成功 " + ingest.ok() + "/" + ingest.total()
+                    + " 段，本次改动未生效（库中仍是上一版），请稍后重试");
+        }
+        body.putAll(extra);
+        return body;
+    }
+
+    /**
      * 列表/详情的可见口径必须与检索一致：管理员看全部、普通用户看「自己 + 公共」。
      * 关掉 public-knowledge-enabled 就退回阶段 1 的严格私有口径（也可用于列未就绪时应急）。
      * 删除操作刻意不套用这个条件：公共规范只有归属者或管理员能删。
@@ -87,32 +194,26 @@ public class KnowledgeController {
         // 与 /knowledge/upload 走同一套切分。文本直传曾把整篇写成一个 chunk_0，
         // 长文件（如 riskLevel.py）会退化成单段，检索粒度与 PDF 路径不一致。
         List<String> chunks = chunkText(content);
-        List<Document> docs = new ArrayList<>();
-        for (int i = 0; i < chunks.size(); i++) {
-            DocumentMetadata metadata = DocumentMetadata.builder()
-                    .content(TextBlock.builder().text(chunks.get(i)).build())
-                    .docId(title)
-                    .chunkId(title + "_chunk_" + i)
-                    .addPayload("type", type)
-                    .addPayload("chunkIndex", String.valueOf(i))
-                    .addPayload("totalChunks", String.valueOf(chunks.size()))
-                    .build();
-            docs.add(new Document(metadata));
-        }
+        // 阶段二：先写进一个临时 doc_id，整批成功后再换名成正式 doc_id。
+        // 直接往正式 doc_id 里 INSERT 会让「同文档再传一次」变成两份（id 是 UUID，
+        // 表上没有任何东西能挡住重复），检索时两份相同内容互相挤名额。
+        String staging = stagingDocId(title);
+        List<Document> docs = chunkDocuments(title, staging, chunks, Map.of("type", type));
+        Long userId = SecurityUtils.getCurrentUserId();
         KnowledgeService.IngestResult ingest = ingest(docs);
+        boolean ok = finishIngest(staging, title, userId, ingest);
         // 默认私有；公共资料由上传界面显式勾选 isPublic=true。
         boolean isPublic = parseBoolean(body.get("isPublic"));
-        Long userId = SecurityUtils.getCurrentUserId();
-        if (userId != null) {
-            jdbcTemplate.update("UPDATE ai_knowledge_store SET user_id = ?, is_public = ? WHERE doc_id = ?",
-                    userId, isPublic, title);
-        } else {
-            jdbcTemplate.update("UPDATE ai_knowledge_store SET is_public = ? WHERE doc_id = ?",
-                    isPublic, title);
+        // 只改刚换名进来的这批（user_id 仍为 NULL），不碰同 doc_id 下属于别人的行。
+        if (ok && userId != null) {
+            jdbcTemplate.update("UPDATE ai_knowledge_store SET user_id = ?, is_public = ? "
+                    + "WHERE doc_id = ? AND user_id IS NULL", userId, isPublic, title);
+        } else if (ok) {
+            jdbcTemplate.update("UPDATE ai_knowledge_store SET is_public = ? "
+                    + "WHERE doc_id = ? AND user_id IS NULL", isPublic, title);
         }
-        // success 不再恒为 true：全部段嵌入失败时前端必须能看见，而不是只看到 chunks>0。
-        return Map.of("success", ingest.ok() > 0, "docId", title, "chunks", chunks.size(),
-                "embedded", ingest.ok(), "failed", ingest.failed(), "isPublic", isPublic);
+        // success 不再恒为 true：整批有一段没嵌入成功就不落库，前端必须能看见。
+        return ingestResponse(ok, title, chunks.size(), ingest, Map.of("isPublic", isPublic));
     }
 
     @PostMapping("/knowledge/upload")
@@ -164,36 +265,28 @@ public class KnowledgeController {
             }
 
             List<String> chunks = chunkText(text);
-            List<Document> docs = new ArrayList<>();
-            for (int i = 0; i < chunks.size(); i++) {
-                DocumentMetadata metadata = DocumentMetadata.builder()
-                        .content(TextBlock.builder().text(chunks.get(i)).build())
-                        .docId(docTitle)
-                        .chunkId(docTitle + "_chunk_" + i)
-                        .addPayload("type", type)
-                        .addPayload("chunkIndex", String.valueOf(i))
-                        .addPayload("fileName", fileName)
-                        .addPayload("totalChunks", String.valueOf(chunks.size()))
-                        .build();
-                docs.add(new Document(metadata));
-            }
+            // 阶段二：同 importKnowledge，先写临时 doc_id，整批成功后再换名。
+            String staging = stagingDocId(docTitle);
+            List<Document> docs = chunkDocuments(docTitle, staging, chunks,
+                    Map.of("type", type, "fileName", fileName));
 
-            KnowledgeService.IngestResult ingest = ingest(docs);
-            // 阶段 2：公共标记与归属分开写，未登录时也要能把公共标记落库。
             Long userId = SecurityUtils.getCurrentUserId();
-            if (userId != null) {
-                jdbcTemplate.update("UPDATE ai_knowledge_store SET user_id = ?, is_public = ? WHERE doc_id = ?",
-                        userId, isPublic, docTitle);
-            } else {
-                jdbcTemplate.update("UPDATE ai_knowledge_store SET is_public = ? WHERE doc_id = ?",
-                        isPublic, docTitle);
+            KnowledgeService.IngestResult ingest = ingest(docs);
+            boolean ok = finishIngest(staging, docTitle, userId, ingest);
+            // 阶段 2：公共标记与归属分开写，未登录时也要能把公共标记落库。
+            // 只改刚换名进来的这批（user_id 仍为 NULL），不碰别人的同 doc_id 行。
+            if (ok && userId != null) {
+                jdbcTemplate.update("UPDATE ai_knowledge_store SET user_id = ?, is_public = ? "
+                        + "WHERE doc_id = ? AND user_id IS NULL", userId, isPublic, docTitle);
+            } else if (ok) {
+                jdbcTemplate.update("UPDATE ai_knowledge_store SET is_public = ? "
+                        + "WHERE doc_id = ? AND user_id IS NULL", isPublic, docTitle);
             }
             log.info("[api] knowledge imported, title={}, chunks={}, embedded={}, failed={}, file={}, isPublic={}",
                     docTitle, chunks.size(), ingest.ok(), ingest.failed(), fileName, isPublic);
 
-            return Map.of("success", ingest.ok() > 0, "docId", docTitle, "chunks", chunks.size(),
-                    "embedded", ingest.ok(), "failed", ingest.failed(),
-                    "type", type, "isPublic", isPublic);
+            return ingestResponse(ok, docTitle, chunks.size(), ingest,
+                    Map.of("type", type, "isPublic", isPublic));
 
         } catch (Exception e) {
             log.error("[api] upload failed", e);
@@ -326,28 +419,140 @@ public class KnowledgeController {
         return raw != null && "true".equalsIgnoreCase(String.valueOf(raw).trim());
     }
 
-    private List<String> chunkText(String text) {
+    /**
+     * 按空行切段、累加到 {@link #MAX_CHUNK_SIZE} 字为一块。
+     *
+     * <p>三条约束：
+     * <ol>
+     *   <li><b>单块不超过 {@link #MAX_CHUNK_SIZE}</b>：单段本身超长时先落盘已有块，
+     *       再按句末把该段切碎。超长块既超出嵌入模型的有效语义范围，
+     *       也会在检索时把整节内容稀释成一条低分命中；</li>
+     *   <li><b>相邻块共享边界文本</b>（{@link #chunkOverlap}），
+     *       避免一句话被拦腰截断后两段都答不全；</li>
+     *   <li><b>不丢正文</b>：除重叠带来的重复，原文内容全部落在某个块里。</li>
+     * </ol>
+     *
+     * <p>{@code chunkOverlap = 0} 时不加尾巴，块间无重复。
+     */
+    List<String> chunkText(String text) {
+        int max = MAX_CHUNK_SIZE;
+        // 重叠不能超过半块：否则下一块的起点会落回上一块中间，产生近乎重复的段。
+        int overlap = Math.max(0, Math.min(chunkOverlap, max / 2));
+
         List<String> chunks = new ArrayList<>();
         String[] paragraphs = text.split("\\n\\s*\\n");
         StringBuilder current = new StringBuilder();
 
         for (String p : paragraphs) {
             String trimmed = p.trim();
-            if (trimmed.isBlank()) continue;
-            if (current.length() + trimmed.length() > MAX_CHUNK_SIZE && !current.isEmpty()) {
-                chunks.add(current.toString().trim());
-                current = new StringBuilder();
+            if (trimmed.isBlank()) {
+                continue;
             }
-            if (current.length() > 0) current.append("\n\n");
+            // 单段本身就超长：先把已有的块落盘，再把这个长段按句子边界切碎。
+            if (trimmed.length() > max) {
+                if (current.length() > 0) {
+                    chunks.add(current.toString().trim());
+                    current = new StringBuilder();
+                }
+                chunks.addAll(splitLongParagraph(trimmed, max, overlap));
+                continue;
+            }
+            if (current.length() + trimmed.length() > max && current.length() > 0) {
+                String body = current.toString().trim();
+                chunks.add(body);
+                String tail = overlapTail(body, overlap);
+                // 尾巴加新段仍超上限（新段本身就很长）：宁可不要尾巴，也不突破单块长度。
+                current = new StringBuilder(tail.length() + trimmed.length() > max ? "" : tail);
+            }
+            if (current.length() > 0) {
+                current.append("\n\n");
+            }
             current.append(trimmed);
         }
-        if (!current.isEmpty()) {
+        if (current.length() > 0) {
             chunks.add(current.toString().trim());
         }
         if (chunks.isEmpty() && !text.isBlank()) {
             chunks.add(text.trim());
         }
         return chunks;
+    }
+
+    /**
+     * 把超长段落切成不超过 {@code max} 的若干块，尽量落在句末，避免从词中间截断。
+     *
+     * <p>找不到句末标点（例如无标点的长数字串、英文表格）时退化为硬切——
+     * 有截断总比整段超长好，因为超长段会同时拖累嵌入质量和检索精度。
+     */
+    private static List<String> splitLongParagraph(String paragraph, int max, int overlap) {
+        List<String> out = new ArrayList<>();
+        int start = 0;
+        while (start < paragraph.length()) {
+            int end = Math.min(paragraph.length(), start + max);
+            if (end < paragraph.length()) {
+                int cut = lastSentenceEnd(paragraph, start, end);
+                if (cut > start) {
+                    end = cut;
+                }
+            }
+            String piece = paragraph.substring(start, end).trim();
+            if (!piece.isEmpty()) {
+                out.add(piece);
+            }
+            if (end >= paragraph.length()) {
+                break;
+            }
+            // 至少前进一个字，防止 overlap 恰好等于块长时死循环
+            start = Math.max(start + 1, end - overlap);
+        }
+        return out;
+    }
+
+    /** 在 [from, to) 里找最后一个句末标点之后的切点；找不到返回 -1。 */
+    private static int lastSentenceEnd(String text, int from, int to) {
+        for (int i = to - 1; i >= from; i--) {
+            char c = text.charAt(i);
+            if (c == '。' || c == '！' || c == '？' || c == '；' || c == '\n') {
+                return i + 1;
+            }
+        }
+        return -1;
+    }
+
+    /**
+     * 取上一块末尾的重叠文本，长度落在 {@code [overlap / 2, overlap]}；{@code overlap == 0} 时返回空串。
+     *
+     * <p>优先让尾巴从句子边界开始，避免下一块以半句话开头。但「对齐」不能以牺牲重叠量为代价：
+     * 若窗口里第一个句末标点太靠后（对齐后剩余不足 {@code overlap / 2}），说明真正的句界
+     * 落在窗口之外，此时退回原始窗口——宁可尾巴从半句开始，也不能把重叠让没了。
+     *
+     * <p>这一条在段落末尾是短标题时尤为关键：例如上一块以「…具有节点的作用。\n\n2.1.3.2 主要地质问题」
+     * 结尾、配置 100 字时，若对齐到该标题只继承 14 字，而标题并不携带上一块的正文信息，
+     * 重叠形同未生效。
+     */
+    private static String overlapTail(String body, int overlap) {
+        if (overlap <= 0 || body.isEmpty()) {
+            return "";
+        }
+        // 块本身不比窗口长：整块复制给下一块是重复，不是重叠。
+        // 不排除这两种情况会让短块（标题行、单句段）在原处和下一块开头各出现一次，
+        // 并且下一块 = 整块 + 新段，突破单块上限。
+        if (body.length() <= overlap) {
+            return "";
+        }
+        int hard = Math.max(0, body.length() - overlap);
+        int minKeep = overlap / 2;
+        for (int i = hard; i < body.length() - 1; i++) {
+            char c = body.charAt(i);
+            if (c == '。' || c == '！' || c == '？' || c == '；' || c == '\n') {
+                // 对齐后仍须保留至少一半重叠量，否则放弃对齐
+                if (body.length() - (i + 1) >= minKeep) {
+                    return body.substring(i + 1).trim();
+                }
+                break;
+            }
+        }
+        return body.substring(hard).trim();
     }
 
     @GetMapping("/knowledge/stats")

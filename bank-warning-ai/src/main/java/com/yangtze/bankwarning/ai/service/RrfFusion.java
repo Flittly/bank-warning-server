@@ -21,6 +21,11 @@ import java.util.Map;
  * 会把余弦相似度改写成 RRF 分，导致「开关打开但无锚点」与关闭态结果不一致，
  * 既破坏 4A 基线可比性，也让留痕里的 {@code score} 语义变得不可解释。
  *
+ * <p><b>阶段 8：两路权重</b>。{@code 1/(k+rank)} 被各乘一个权重后再相加，公式为
+ * {@code w_d/(k+r_d) + w_s/(k+r_s)}。默认 {@code 1.0/1.0}，与阶段 5 的等权实现
+ * <b>逐位一致</b>（{@code x * 1.0 == x}）。单路直接返回时权重不生效——此时不存在
+ * 「两路博弈」，乘权重只会平白改写分数口径。
+ *
  * <p>纯静态、无状态、不连库，单测可直接构造 {@link Document} 验证。
  */
 public final class RrfFusion {
@@ -32,18 +37,32 @@ public final class RrfFusion {
     }
 
     /**
+     * 等权融合（阶段 5 原样，行为不变）。
+     *
      * @param dense  向量路召回（已按余弦距离升序，即越靠前越相似）
      * @param sparse 关键词路召回（已按命中锚点数降序）
      * @param rrfK   平滑常数，常用 60
      * @param limit  最终返回条数
      */
     public static List<Document> fuse(List<Document> dense, List<Document> sparse, int rrfK, int limit) {
+        return fuse(dense, sparse, rrfK, limit, 1.0, 1.0);
+    }
+
+    /**
+     * 阶段 8：加权融合。
+     *
+     * @param denseWeight  向量路权重，&lt;0 与 1.0 等价
+     * @param sparseWeight 关键词路权重，&lt;0 与 1.0 等价
+     */
+    public static List<Document> fuse(List<Document> dense, List<Document> sparse, int rrfK, int limit,
+                                      double denseWeight, double sparseWeight) {
         List<Document> d = dense == null ? List.of() : dense;
         List<Document> s = sparse == null ? List.of() : sparse;
         int k = rrfK > 0 ? rrfK : 60;
         int cap = limit > 0 ? limit : 1;
 
-        // 单路：原样返回，不改写 score（见类注释）
+        // 单路：原样返回，不改写 score（见类注释）。权重在此不生效——
+        // 只有一路时乘权重等于给分数换单位，没有比较意义。
         if (s.isEmpty()) {
             return head(d, cap);
         }
@@ -51,10 +70,13 @@ public final class RrfFusion {
             return head(s, cap);
         }
 
+        double wd = denseWeight >= 0 ? denseWeight : 1.0;
+        double ws = sparseWeight >= 0 ? sparseWeight : 1.0;
+
         Map<String, Double> fusedScore = new LinkedHashMap<>();
         Map<String, Document> byKey = new LinkedHashMap<>();
-        accumulate(d, k, fusedScore, byKey);
-        accumulate(s, k, fusedScore, byKey);
+        accumulate(d, k, wd, fusedScore, byKey);
+        accumulate(s, k, ws, fusedScore, byKey);
 
         List<Map.Entry<String, Double>> ranked = new ArrayList<>(fusedScore.entrySet());
         // 稳定排序：同分时保持「先被 dense 收进来的」在前，避免同分抖动导致结果不可复现。
@@ -91,12 +113,12 @@ public final class RrfFusion {
         return id == null ? "identity:" + System.identityHashCode(doc) : id;
     }
 
-    private static void accumulate(List<Document> docs, int k,
+    private static void accumulate(List<Document> docs, int k, double weight,
                                    Map<String, Double> score, Map<String, Document> byKey) {
         for (int i = 0; i < docs.size(); i++) {
             Document doc = docs.get(i);
             String key = key(doc);
-            score.merge(key, 1.0 / (k + i + 1), Double::sum);
+            score.merge(key, weight / (k + i + 1), Double::sum);
             byKey.putIfAbsent(key, doc);
         }
     }

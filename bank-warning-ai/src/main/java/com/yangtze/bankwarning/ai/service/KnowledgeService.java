@@ -3,6 +3,7 @@ package com.yangtze.bankwarning.ai.service;
 import com.yangtze.bankwarning.ai.config.EmbeddingBatchProperties;
 import com.yangtze.bankwarning.ai.config.HybridRagProperties;
 import com.yangtze.bankwarning.ai.config.RagProperties;
+import com.yangtze.bankwarning.ai.config.RerankProperties;
 import com.yangtze.bankwarning.ai.config.UnconfiguredEmbeddingModel;
 import com.yangtze.bankwarning.ai.context.AiCaller;
 import com.yangtze.bankwarning.ai.service.KnowledgeUnavailableException.Reason;
@@ -19,6 +20,7 @@ import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Transactional;
 import reactor.core.publisher.Mono;
 
 import java.time.Duration;
@@ -89,6 +91,13 @@ public class KnowledgeService {
             "SELECT DISTINCT doc_id FROM ai_knowledge_store "
                     + "WHERE (user_id = CAST(? AS BIGINT) OR is_public = TRUE)";
 
+    /**
+     * 阶段二：删除某文档的上一版，范围与删除接口同口径（本人名下；userId 为空 = 管理员删全部）。
+     * 不限定归属的话，两个用户用同一标题上传时，后传的会把先传的整篇删掉。
+     */
+    private static final String DELETE_OWN_DOC_SQL =
+            "DELETE FROM ai_knowledge_store WHERE doc_id = ? AND (user_id = ? OR ?::bigint IS NULL)";
+
     private final EmbeddingModel embeddingModel;
     private final VDBStoreBase vectorStore;
     private final JdbcTemplate jdbcTemplate;
@@ -98,6 +107,8 @@ public class KnowledgeService {
     private final SparseRetriever sparseRetriever;
     private final SqlPermissionVectorSearch sqlSearch;
     private final BatchEmbeddingClient batchClient;
+    /** 阶段 8：rerank 精排。关闭态对象非 null，{@code isEnabled()} 返回 false。 */
+    private final RerankClient rerankClient;
 
     /**
      * 兼容既有调用点（5 处单元测试 + 离线评测 CLI 直接 {@code new}）：一律按
@@ -142,10 +153,27 @@ public class KnowledgeService {
     }
 
     /**
+     * 阶段 7 及之前的调用点：等价于「rerank 关闭」，检索结果与阶段 7 逐字一致。
+     */
+    public KnowledgeService(EmbeddingModel embeddingModel,
+                            VDBStoreBase vectorStore,
+                            JdbcTemplate jdbcTemplate,
+                            JdbcRagTraceStore traceStore,
+                            RagProperties props,
+                            HybridRagProperties hybrid,
+                            SqlPermissionVectorSearch sqlSearch,
+                            BatchEmbeddingClient batchClient) {
+        this(embeddingModel, vectorStore, jdbcTemplate, traceStore, props,
+                hybrid, sqlSearch, batchClient,
+                RerankClient.disabled(RerankProperties.disabled()));
+    }
+
+    /**
      * Spring 实际使用的构造器。混合检索配置独立成 {@link HybridRagProperties}、
      * 阶段 6 的 SQL 内过滤独立成 {@link SqlPermissionVectorSearch}、
-     * 阶段 7 的入库批量嵌入独立成 {@link BatchEmbeddingClient}，
-     * 三者的开关都不进 {@link RagProperties} 的 11 参构造器。
+     * 阶段 7 的入库批量嵌入独立成 {@link BatchEmbeddingClient}、
+     * 阶段 8 的精排独立成 {@link RerankClient}，
+     * 四者的开关都不进 {@link RagProperties} 的 11 参构造器。
      */
     @Autowired
     public KnowledgeService(EmbeddingModel embeddingModel,
@@ -155,7 +183,8 @@ public class KnowledgeService {
                             RagProperties props,
                             HybridRagProperties hybrid,
                             SqlPermissionVectorSearch sqlSearch,
-                            BatchEmbeddingClient batchClient) {
+                            BatchEmbeddingClient batchClient,
+                            RerankClient rerankClient) {
         this.embeddingModel = embeddingModel;
         this.vectorStore = vectorStore;
         this.jdbcTemplate = jdbcTemplate;
@@ -164,6 +193,7 @@ public class KnowledgeService {
         this.hybrid = hybrid;
         this.sqlSearch = sqlSearch;
         this.batchClient = batchClient;
+        this.rerankClient = rerankClient;
         this.sparseRetriever = new SparseRetriever(jdbcTemplate, props, hybrid);
     }
 
@@ -250,6 +280,17 @@ public class KnowledgeService {
         // 不补位，与 SDK 行为一致），所以参数保留、口径变了。
         int expansion = Math.max(1, props.candidateExpansion);
         int candidates = Math.min(MAX_CANDIDATES, Math.max(limit, limit * expansion));
+        // 阶段 8：融合与 rerank 需要有「可重排的东西」。候选池配 0 时沿用上式，
+        // 行为与阶段 7 逐字一致；配了正数才抬高粗召回量（仍受 MAX_CANDIDATES 约束）。
+        if (hybrid.enabled && hybrid.candidatePool > 0) {
+            candidates = Math.min(MAX_CANDIDATES, Math.max(candidates, hybrid.candidatePool));
+        }
+
+        // 阶段 8：rerank 打开时，粗召回必须比它自己的池子更大，否则「精排」没有候选可选。
+        if (rerankClient.isEnabled()) {
+            candidates = Math.min(MAX_CANDIDATES,
+                    Math.max(candidates, rerankClient.candidatePool()));
+        }
 
         // 阶段 6：开关打开 ⇒ 权限条件进 SQL，返回的 dense 已经是「自己有权看的」。
         boolean denseFiltered = sqlSearch.isEnabled();
@@ -281,12 +322,13 @@ public class KnowledgeService {
             return hybridOutcome(query, scenario, who, limit, traceId, dense, denseFiltered);
         }
 
-        // 关闭态：与阶段 4 逐字一致（含空结果提前返回与日志字段），保证「零回归」可验证。
+        // 关闭态：rerank 也关闭时与阶段 4 逐字一致（含空结果提前返回与日志字段），
+        // 保证「零回归」可验证；rerank 打开时这里多一道精排，其余不变。
         if (dense.isEmpty()) {
             return new Outcome(List.of(), 0, 0, List.of());
         }
         List<Document> visible = denseFiltered ? dense : applyPermissionFilter(dense, who);
-        List<Document> result = visible.stream().limit(limit).toList();
+        List<Document> result = rerankOrHead(query, visible, limit, traceId);
         log.info("[rag] traceId={}, scenario={}, hits={}, visible={}, returned={}, topK={}",
                 traceId, scenario, dense.size(), visible.size(), result.size(), limit);
         return new Outcome(result, dense.size(), visible.size(), toHits(result));
@@ -322,13 +364,36 @@ public class KnowledgeService {
         List<Document> sparseVisible = sparseHits.isEmpty()
                 ? List.of() : applyPermissionFilter(sparseHits, who);
 
-        List<Document> fused = RrfFusion.fuse(denseVisible, sparseVisible, hybrid.rrfK, limit);
+        // rerank 打开时先融合到池子大小、再精排到 limit；关闭时直接截到 limit，
+        // 与阶段 5/7 的返回逐字一致。
+        int fusionLimit = rerankClient.isEnabled()
+                ? Math.max(limit, rerankClient.candidatePool()) : limit;
+        List<Document> fused = RrfFusion.fuse(denseVisible, sparseVisible, hybrid.rrfK, fusionLimit,
+                hybrid.denseWeight, hybrid.sparseWeight);
+        List<Document> result = rerankOrHead(query, fused, limit, traceId);
         log.info("[rag] traceId={}, scenario={}, hybrid=on, dense={}, denseVisible={}, "
-                        + "sparse={}, sparseVisible={}, fused={}, topK={}",
+                        + "sparse={}, sparseVisible={}, fused={}, returned={}, topK={}, weights={}/{}",
                 traceId, scenario, denseHits.size(), denseVisible.size(),
-                sparseHits.size(), sparseVisible.size(), fused.size(), limit);
-        return new Outcome(fused, denseHits.size() + sparseHits.size(),
-                denseVisible.size() + sparseVisible.size(), toHits(fused));
+                sparseHits.size(), sparseVisible.size(), fused.size(), result.size(), limit,
+                hybrid.denseWeight, hybrid.sparseWeight);
+        return new Outcome(result, denseHits.size() + sparseHits.size(),
+                denseVisible.size() + sparseVisible.size(), toHits(result));
+    }
+
+    /**
+     * 阶段 8：精排最后一道。关闭或失败时都退回「粗排顺序 + 截断」，
+     * 保证 rerank 是<b>增益</b>而不是新的失败点。
+     */
+    private List<Document> rerankOrHead(String query, List<Document> candidates, int limit, String traceId) {
+        if (!rerankClient.isEnabled()) {
+            return candidates.stream().limit(limit).toList();
+        }
+        try {
+            return rerankClient.rerank(query, candidates, limit);
+        } catch (Exception e) {
+            log.warn("[rag] traceId={}, rerank 失败，本次退回粗排顺序: {}", traceId, rootMessage(e));
+            return candidates.stream().limit(limit).toList();
+        }
     }
 
     private static List<RagTrace.Hit> toHits(List<Document> docs) {
@@ -432,6 +497,44 @@ public class KnowledgeService {
         return Mono.fromCallable(() -> batchClient.isEnabled()
                 ? ingestBatched(docs)
                 : ingestSequentially(docs));
+    }
+
+    /**
+     * 阶段二：把一批「临时 docId」的行换成正式 docId，同时删掉该文档的上一版。
+     *
+     * <p><b>为什么不在入库前先删旧行</b>：删了之后嵌入失败就两头空（旧的没了、新的没成）。
+     * 这里让整批先写在临时 id 上，全部嵌入成功后才进这个事务；事务里只有「删旧 + 换名」
+     * 两条语句，中间不存在「文档暂时不存在」的窗口（外部看不到未提交状态）。
+     * 写入失败时只会留下 staging 残行，由 {@link #discardStaged} 清掉，旧版本完好。
+     *
+     * <p><b>换名一行都没改到</b>（staging 被并发清掉、或写库其实没成功）必须抛异常：
+     * 继续往下走就是「旧版被删、新版没进来」，而日志里只会看到一条 success。
+     *
+     * @param stagingDocId 临时 id，形如 {@code 标题#stg-xxxx}
+     * @param finalDocId   正式 doc_id（用户在列表里看到的那个）
+     * @param ownerUserId  调用者 userId；{@code null} = 管理员，删该 doc_id 下全部旧行
+     */
+    @Transactional
+    public void replaceStaged(String stagingDocId, String finalDocId, Long ownerUserId) {
+        int deleted = jdbcTemplate.update(DELETE_OWN_DOC_SQL, finalDocId, ownerUserId, ownerUserId);
+        int promoted = jdbcTemplate.update(
+                "UPDATE ai_knowledge_store SET doc_id = ? WHERE doc_id = ?", finalDocId, stagingDocId);
+        if (promoted == 0) {
+            throw new IllegalStateException("入库换名失败：临时批次不存在 " + stagingDocId);
+        }
+        log.info("[rag] 入库换名：docId={}, 删除旧段={}, 迁入新段={}", finalDocId, deleted, promoted);
+    }
+
+    /**
+     * 阶段二：整批作废。只删临时 docId 的行，<b>永远不碰正式文档</b>。
+     *
+     * @return 清掉的残行数（正常语义下应为「本次写入的段数」）
+     */
+    public int discardStaged(String stagingDocId) {
+        int removed = jdbcTemplate.update(
+                "DELETE FROM ai_knowledge_store WHERE doc_id = ?", stagingDocId);
+        log.info("[rag] 丢弃临时批次：docId={}, 清理残行={}", stagingDocId, removed);
+        return removed;
     }
 
     /** 改造前的逐段串行循环，逻辑与日志一字未改，只多返回一个计数。 */

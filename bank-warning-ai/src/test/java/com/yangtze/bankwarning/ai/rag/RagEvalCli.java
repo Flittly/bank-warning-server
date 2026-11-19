@@ -2,10 +2,14 @@ package com.yangtze.bankwarning.ai.rag;
 
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.yangtze.bankwarning.ai.config.EmbeddingBatchProperties;
 import com.yangtze.bankwarning.ai.config.HybridRagProperties;
 import com.yangtze.bankwarning.ai.config.RagProperties;
+import com.yangtze.bankwarning.ai.config.RerankProperties;
 import com.yangtze.bankwarning.ai.context.AiCaller;
+import com.yangtze.bankwarning.ai.service.BatchEmbeddingClient;
 import com.yangtze.bankwarning.ai.service.KnowledgeService;
+import com.yangtze.bankwarning.ai.service.RerankClient;
 import com.yangtze.bankwarning.ai.service.SqlPermissionVectorSearch;
 import com.yangtze.bankwarning.ai.store.JdbcRagTraceStore;
 import io.agentscope.core.embedding.dashscope.DashScopeTextEmbedding;
@@ -117,8 +121,10 @@ public final class RagEvalCli {
         Files.writeString(out, markdown, StandardCharsets.UTF_8);
 
         System.out.println("[rag-eval] 报告: " + out.toAbsolutePath());
-        System.out.printf("[rag-eval] 计分题=%d, 平均Recall=%.4f, 平均Precision=%.4f, 拒答通过率=%.4f, 异常=%d%n",
+        System.out.printf("[rag-eval] 计分题=%d, 平均Recall=%.4f, 平均Precision=%.4f, "
+                        + "平均MRR=%.4f, 平均nDCG=%.4f, 拒答通过率=%.4f, 异常=%d%n",
                 report.countedCases(), report.meanRecall(), report.meanPrecision(),
+                report.meanMrr(), report.meanNdcg(),
                 report.refusalPassRate(), report.errorCount());
         return report.errorCount() > 0 ? 1 : 0;
     }
@@ -126,14 +132,9 @@ public final class RagEvalCli {
     /** 默认自检：不联网、不需要 key，只验证 runner 本身能跑通并产出报告。 */
     private static RetrievalSource selfCheck() {
         RagRetrievalEvaluator.RetrievalFn fn = (question, topK, caller, traceId) -> {
-            // 拒答对抗题、以及尚未灌入冻结口径的 B 类题，都应返回空；
-            // 其余题返回库内现存公共语料 BMS.docx。
-            if (question.contains("3m") || question.contains("GB 50286")
-                    || question.contains("Zd") || question.contains("Zb")
-                    || question.contains("Dsed") || question.contains("权重")
-                    || question.contains("风险等级 0") || question.contains("PL 和 LC")) {
-                return List.of();
-            }
+            // 这个 fixture 不认识考卷里的任何期望，只按关键词回几条固定 id：
+            // 它的作用是证明「加载考卷 → 逐题检索 → 算指标 → 出报告」这条链没断。
+            // 报告里的数字因此没有意义，看效果请用 --jdbc / --hybrid / --rerank。
             return List.of("BMS.docx");
         };
         return new RetrievalSource("self-check-fixture（非真实检索，仅用于 runner 自检）", fn);
@@ -204,9 +205,18 @@ public final class RagEvalCli {
         RagProperties props = new RagProperties(
                 true, true, true, false, 5, 5, 5, 0.4, 5, 15_000L, 600_000L);
         // 阶段 5：--hybrid 打开第二路；不加该参数即「关闭态」，与 4A 基线口径一致。
+        // 阶段 8：--hybrid 可与 --rrf-dense-weight / --rrf-sparse-weight / --candidate-pool
+        // 组合，用来做融合策略的格点对照（等权 vs 加权 vs 纯向量）。
         HybridRagProperties hybrid = opts.containsKey("hybrid")
-                ? HybridRagProperties.enabledWithDefaults()
+                ? HybridRagProperties.withWeights(
+                        doubleOpt(opts, "rrf-dense-weight", 1.0),
+                        doubleOpt(opts, "rrf-sparse-weight", 1.0),
+                        intOpt(opts, "candidate-pool", 0))
                 : HybridRagProperties.disabled();
+        // 阶段 8：--rerank 打开精排。未加则与阶段 7 逐字一致。
+        RerankClient rerank = opts.containsKey("rerank")
+                ? RerankClient.dashscope(key, RerankProperties.enabledWithDefaults())
+                : RerankClient.disabled(RerankProperties.disabled());
         KnowledgeService service = new KnowledgeService(
                 DashScopeTextEmbedding.builder()
                         .apiKey(key)
@@ -218,7 +228,10 @@ public final class RagEvalCli {
                 // 与 4A 基线口径逐字一致。两者都跑一遍即可做 off/on 对照。
                 opts.containsKey("sql-filter")
                         ? new SqlPermissionVectorSearch(jdbcTemplate, true)
-                        : SqlPermissionVectorSearch.disabled());
+                        : SqlPermissionVectorSearch.disabled(),
+                // 入库批量嵌入与本评测无关（只读检索），固定关闭态即可。
+                BatchEmbeddingClient.disabled(EmbeddingBatchProperties.disabled()),
+                rerank);
 
         // 真库路径覆盖 fetchScored()：把 Document.getScore() 一并带进报告，
         // 这样「该拒答的题」才能看到它到底拿了多高的相似度，而不是只有 0/1 的空/非空。
@@ -249,7 +262,10 @@ public final class RagEvalCli {
         };
         return new RetrievalSource(
                 "jdbc 真库直连 + text-embedding-v4（trace 关闭，未写 ai_rag_traces，hybrid="
-                        + (hybrid.enabled ? "on" : "off") + "）", fn);
+                        + (hybrid.enabled ? "on" : "off")
+                        + (hybrid.enabled ? ", w=" + hybrid.denseWeight + "/" + hybrid.sparseWeight : "")
+                        + (hybrid.candidatePool > 0 ? ", pool=" + hybrid.candidatePool : "")
+                        + ", rerank=" + (rerank.isEnabled() ? "on" : "off") + "）", fn);
     }
 
     /**
@@ -305,8 +321,7 @@ public final class RagEvalCli {
     private record RetrievalSource(String name, RagRetrievalEvaluator.RetrievalFn fn) {
     }
 
-    private static Map<String, String> parse(String[] args) {
-        Map<String, String> opts = new LinkedHashMap<>();
+    private static Map<String, String> parse(String[] args) {        Map<String, String> opts = new LinkedHashMap<>();
         for (int i = 0; i < args.length; i++) {
             String a = args[i];
             if (!a.startsWith("--")) {
@@ -323,5 +338,30 @@ public final class RagEvalCli {
             }
         }
         return opts;
+    }
+
+    /** {@code --key 1.5} 取值；缺省或非法时回落默认值，不让一个手误把整轮评测变成异常。 */
+    private static double doubleOpt(Map<String, String> opts, String key, double fallback) {
+        String v = opts.get(key);
+        if (v == null || v.isBlank() || "true".equals(v)) {
+            return fallback;
+        }
+        try {
+            return Double.parseDouble(v.trim());
+        } catch (NumberFormatException e) {
+            return fallback;
+        }
+    }
+
+    private static int intOpt(Map<String, String> opts, String key, int fallback) {
+        String v = opts.get(key);
+        if (v == null || v.isBlank() || "true".equals(v)) {
+            return fallback;
+        }
+        try {
+            return Integer.parseInt(v.trim());
+        } catch (NumberFormatException e) {
+            return fallback;
+        }
     }
 }

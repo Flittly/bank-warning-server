@@ -7,6 +7,7 @@ import com.yangtze.bankwarning.ai.service.BatchEmbeddingClient;
 import com.yangtze.bankwarning.ai.service.KnowledgeService;
 import com.yangtze.bankwarning.ai.service.NacosSkillRepositoryHolder;
 import com.yangtze.bankwarning.ai.service.PdfService;
+import com.yangtze.bankwarning.ai.service.RerankClient;
 import com.yangtze.bankwarning.ai.service.SkillVersionService;
 import com.yangtze.bankwarning.ai.service.TaskContextService;
 import com.yangtze.bankwarning.ai.service.VisualizationService;
@@ -123,6 +124,30 @@ public class AgentScopeConfig {
                 batchProps.batchSize, batchProps.concurrency,
                 batchProps.batchTimeoutMs, batchProps.ingestBudgetMs);
         return BatchEmbeddingClient.dashscope(apiKey, modelName, dimensions, baseUrl, batchProps);
+    }
+
+    /**
+     * 阶段 8：rerank 精排客户端。
+     *
+     * <p>与 {@link #batchEmbeddingClient} 同样是「不启用也返回对象」：
+     * 不注册 Bean 会让 {@code KnowledgeService} 注入失败、应用起不来。
+     * 关闭态对象保证检索路径一行都不多走，与阶段 7 逐字一致。
+     */
+    @Bean
+    public RerankClient rerankClient(
+            @Value("${agentscope.dashscope.api-key:}") String apiKey,
+            RerankProperties rerankProps) {
+        if (apiKey == null || apiKey.isBlank()) {
+            log.warn("[config] DashScope apiKey 未配置，rerank 不可用（与 embeddingModel 同一原因）");
+            return RerankClient.disabled(rerankProps);
+        }
+        if (!rerankProps.enabled) {
+            log.info("[config] rerank 未启用（app.ai.rag.rerank-enabled=false），检索走粗排顺序");
+            return RerankClient.disabled(rerankProps);
+        }
+        log.info("[config] rerank 已启用：model={}, 候选池={}, 阈值={}",
+                rerankProps.model, rerankProps.candidatePool, rerankProps.scoreThreshold);
+        return RerankClient.dashscope(apiKey, rerankProps);
     }
 
     /**
