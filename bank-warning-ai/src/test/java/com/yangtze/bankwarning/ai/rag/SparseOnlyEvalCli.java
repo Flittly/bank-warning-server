@@ -210,14 +210,14 @@ public final class SparseOnlyEvalCli {
                 .append(" 题，计分且非拒答 ").append(before.total).append(" 题\n");
         sb.append("- 口径：只跑 SparseRetriever（不调 embedding、不联网），topK=")
                 .append(topK).append("，指标按 docId 计算\n");
-        sb.append("- 对照：`锚点only` = 阶段 5 行为（只认 ASCII 标识符与数字）；`")
+        sb.append("- 对照：`锚点only` = 阶段 3 之前的行为（只认 ASCII 标识符与数字）；`")
                 .append(rewrite ? "+中文词项+改写` = 阶段 3 + 归一化与同义词扩展" : "+中文词项` = 阶段 3（jieba + tsvector）")
                 .append("`\n\n");
 
         sb.append("## 汇总\n\n");
         sb.append("| 模式 | 有命中题数 | Recall@").append(topK).append(" | MRR |\n");
         sb.append("|---|---|---|---|\n");
-        sb.append(row("锚点only（阶段 5）", before));
+        sb.append(row("锚点only（阶段 3 之前）", before));
         sb.append(row(rewrite ? "+中文词项+改写" : "+中文词项（阶段 3）", after));
         sb.append('\n');
 
