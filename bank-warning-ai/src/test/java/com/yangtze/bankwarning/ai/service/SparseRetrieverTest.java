@@ -1,5 +1,6 @@
 package com.yangtze.bankwarning.ai.service;
 
+import com.yangtze.bankwarning.ai.config.ChineseKeywordProperties;
 import com.yangtze.bankwarning.ai.config.HybridRagProperties;
 import com.yangtze.bankwarning.ai.config.RagProperties;
 import com.yangtze.bankwarning.ai.context.AiCaller;
@@ -44,6 +45,10 @@ class SparseRetrieverTest {
 
     private SparseRetriever retriever(RagProperties props) {
         return new SparseRetriever(jdbc, props, HybridRagProperties.enabledWithDefaults());
+    }
+
+    private SparseRetriever retriever(RagProperties props, ChineseKeywordProperties chinese) {
+        return new SparseRetriever(jdbc, props, HybridRagProperties.enabledWithDefaults(), chinese);
     }
 
     /** 捕获实际发出的 SQL，用于断言权限片段与正文表达式。 */
@@ -181,13 +186,79 @@ class SparseRetrieverTest {
     // ---------------- 行为边界 ----------------
 
     @Test
-    @DisplayName("提不出锚点：一条 SQL 都不发")
-    void noAnchorsMeansNoQuery() {
-        List<Document> docs = retriever(RagProperties.defaults())
+    @DisplayName("关掉中文词项且提不出锚点：一条 SQL 都不发（阶段 5 行为）")
+    void noAnchorsAndNoChineseMeansNoQuery() {
+        List<Document> docs = retriever(RagProperties.defaults(), ChineseKeywordProperties.disabled())
                 .retrieve("崩岸风险怎么判", AiCaller.forAdmin(), 20);
 
         assertTrue(docs.isEmpty());
         verifyNoInteractions(jdbc);
+    }
+
+    @Test
+    @DisplayName("阶段 3：纯中文提问不再空返回——发 SQL 且走 search_text 的 tsvector")
+    void pureChineseQuestionQueriesChineseIndex() {
+        when(jdbc.query(anyString(), any(RowMapper.class), any(Object[].class)))
+                .thenReturn(List.of());
+
+        retriever(RagProperties.defaults()).retrieve("崩岸风险等级是怎么判定的", AiCaller.forAdmin(), 20);
+
+        String sql = captureSql();
+        assertTrue(sql.contains("to_tsvector('simple', search_text)"),
+                "倒排索引表达式必须与 V19 的索引定义逐字一致，否则索引失效");
+        assertTrue(sql.contains("to_tsquery('simple', ?)"));
+        assertTrue(sql.contains("ts_rank_cd("), "中文词项要按相关度排序，不能只按命中与否");
+        assertFalse(sql.contains("ILIKE"), "纯中文提问没有锚点，不该出现锚点条件");
+    }
+
+    @Test
+    @DisplayName("阶段 3：中文词项与锚点并存时是 OR 关系，排序优先锚点数")
+    void chineseTermsAndAnchorsAreOred() {
+        when(jdbc.query(anyString(), any(RowMapper.class), any(Object[].class)))
+                .thenReturn(List.of());
+
+        retriever(RagProperties.defaults())
+                .retrieve("Zb 的三级阈值分别是什么", AiCaller.forAdmin(), 20);
+
+        String sql = captureSql();
+        assertTrue(sql.contains("to_tsquery('simple', ?) OR ("), "两套词项必须是 OR，否则一半候选被布尔条件挡掉");
+        assertTrue(sql.contains("THEN 1 ELSE 0 END"), "锚点命中数仍是第一排序键");
+        assertTrue(sql.contains("rank DESC NULLS LAST"),
+                "DESC 默认 NULLS FIRST，未回填 search_text 的行会排到最前，必须显式 NULLS LAST");
+    }
+
+    @Test
+    @DisplayName("阶段 3：关闭中文词项后 SQL 里没有 tsquery，退回纯锚点（可随时回滚）")
+    void chineseDisabledFallsBackToAnchorsOnly() {
+        when(jdbc.query(anyString(), any(RowMapper.class), any(Object[].class)))
+                .thenReturn(List.of());
+
+        retriever(RagProperties.defaults(), ChineseKeywordProperties.disabled())
+                .retrieve("Zb 的三级阈值分别是什么", AiCaller.forAdmin(), 20);
+
+        String sql = captureSql();
+        assertFalse(sql.contains("to_tsquery"), "关闭态必须与阶段 5 逐字一致，不能残留中文条件");
+        assertFalse(sql.contains("ts_rank_cd"));
+        assertTrue(sql.contains("ILIKE"));
+    }
+
+    @Test
+    @DisplayName("阶段 3：参数按占位符顺序绑——rank 的 tsquery 必须在锚点模式串之前")
+    void bindsParametersInPlaceholderOrder() {
+        when(jdbc.query(anyString(), any(RowMapper.class), any(Object[].class)))
+                .thenReturn(List.of());
+
+        retriever(RagProperties.defaults())
+                .retrieve("Zb 的三级阈值", AiCaller.forAdmin(), 20);
+
+        ArgumentCaptor<Object[]> args = ArgumentCaptor.forClass(Object[].class);
+        verify(jdbc).query(anyString(), any(RowMapper.class), args.capture());
+        Object[] values = args.getValue();
+        // 顺序：rank 的 tsquery → where 的 tsquery → 锚点 ILIKE → order 的锚点 ILIKE → limit
+        assertTrue(String.valueOf(values[0]).contains("'"), "第一个参数应是 tsquery 表达式");
+        assertEquals(values[0], values[1], "rank 与 where 用的是同一个 tsquery");
+        assertEquals("%Zb%", values[2]);
+        assertEquals(20, values[values.length - 1]);
     }
 
     @Test

@@ -145,6 +145,10 @@ public class KnowledgeController {
             return false;
         }
         knowledgeService.replaceStaged(stagingDocId, docTitle, userId);
+        // 阶段 3：换名成功后补写 search_text（jieba 词项）。刻意放在事务外——
+        // 这一列只服务中文关键词路，写不进去也不该让入库失败；失败只打 warn，
+        // 该篇暂时只走向量路，运维可再调 refreshSearchText 补。
+        knowledgeService.refreshSearchText(docTitle);
         return true;
     }
 

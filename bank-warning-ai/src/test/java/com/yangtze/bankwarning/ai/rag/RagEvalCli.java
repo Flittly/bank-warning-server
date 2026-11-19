@@ -2,6 +2,7 @@ package com.yangtze.bankwarning.ai.rag;
 
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.yangtze.bankwarning.ai.config.ChineseKeywordProperties;
 import com.yangtze.bankwarning.ai.config.EmbeddingBatchProperties;
 import com.yangtze.bankwarning.ai.config.HybridRagProperties;
 import com.yangtze.bankwarning.ai.config.RagProperties;
@@ -57,6 +58,9 @@ import java.util.Map;
  * 形成 off / on 对照；http 模式的开关由服务端配置决定，命令行改不了。
  * <b>阶段 6</b>：加 {@code --sql-filter} 即让权限条件进向量 SQL（默认关闭，走 SDK 路径），
  * 管理员视角下 off / on 的每题结果必须完全一致——不一致就是实现有 bug。
+ * <b>阶段 3（进阶）</b>：加 {@code --no-chinese} 关掉 jieba 词项，让 sparse 路退回阶段 5
+ * 的纯 ASCII 锚点行为，与默认开启形成「中文词项带来多少增益」的 A/B。
+ * 该开关只影响混合检索打开时的第二路，不加 {@code --hybrid} 时两者结果逐字相同。
  * 报告默认落到 {@code reports/rag-eval-<时间戳>.md}。
  */
 public final class RagEvalCli {
@@ -231,7 +235,12 @@ public final class RagEvalCli {
                         : SqlPermissionVectorSearch.disabled(),
                 // 入库批量嵌入与本评测无关（只读检索），固定关闭态即可。
                 BatchEmbeddingClient.disabled(EmbeddingBatchProperties.disabled()),
-                rerank);
+                rerank,
+                // 阶段 3：--no-chinese 关掉 jieba 词项，让 sparse 路退回阶段 5 的纯锚点行为，
+                // 用于「中文词项到底带来多少增益」的 A/B。不加则默认开启。
+                opts.containsKey("no-chinese")
+                        ? ChineseKeywordProperties.disabled()
+                        : ChineseKeywordProperties.enabledDefaults());
 
         // 真库路径覆盖 fetchScored()：把 Document.getScore() 一并带进报告，
         // 这样「该拒答的题」才能看到它到底拿了多高的相似度，而不是只有 0/1 的空/非空。

@@ -1,5 +1,6 @@
 package com.yangtze.bankwarning.ai.service;
 
+import com.yangtze.bankwarning.ai.config.ChineseKeywordProperties;
 import com.yangtze.bankwarning.ai.config.HybridRagProperties;
 import com.yangtze.bankwarning.ai.config.RagProperties;
 import com.yangtze.bankwarning.ai.context.AiCaller;
@@ -20,15 +21,21 @@ import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 /**
- * 阶段 5 的关键词召回（sparse）—— 混合检索的第二路。
+ * 关键词召回（sparse）—— 混合检索的第二路。
  *
- * <p><b>不做通用全文检索</b>：中文没有空格分词，PostgreSQL 的 {@code tsvector} 会把整句
- * 当成一个词（项目里已实测过），所以这里只抓「精确锚点」——ASCII 标识符与数字，
- * 用 {@code ILIKE '%锚点%'} 找字面命中的段落。作用是补上向量路的短板：向量只知道
- * 「都讲 Zb，挺像」，不关心写的是 20/30/40 中的哪一组。
+ * <p><b>两套词项，各管一类提问</b>：
+ * <ul>
+ *   <li><b>中文词项</b>（阶段 3）：{@link ChineseTokenizer} 把提问切成词，走
+ *       {@code search_text} 上的 tsvector 倒排索引，按 {@code ts_rank_cd} 排序。
+ *       解决「崩岸预警怎么分级」这类纯中文问题——改造前它们在这一路是空返回的。</li>
+ *   <li><b>ASCII 锚点</b>（阶段 5）：{@code Zb} / {@code PL} / {@code 20} / {@code 50286}
+ *       用 {@code ILIKE} 找字面命中。向量只知道「都讲 Zb，挺像」，不关心写的是
+ *       20/30/40 中的哪一组；锚点是精确的。</li>
+ * </ul>
  *
- * <p><b>一个锚点都提不出来就直接返回空、不查库</b>：纯中文语义问题（如「崩岸风险怎么判」）
- * 会自动退回 dense-only，因此开启混合检索不会改变这类问题的结果。
+ * <p><b>两路是 OR 关系，排序不是</b>：只要中文词项或锚点命中就进候选，但
+ * 「命中锚点的个数」优先于 ts_rank——锚点命中是硬证据，覆盖多个锚点的段落
+ * 几乎一定是用户要的那段。
  *
  * <p><b>权限条件内建在 SQL 里</b>，不沿用「先召回后过滤」。否则等于把
  * {@code applyPermissionFilter()} 那个「无权正文短暂进 JVM」的弱点复制一份到第二路，
@@ -49,6 +56,18 @@ public class SparseRetriever {
      */
     static final String TEXT_EXPR = "(content::jsonb ->> 'text')";
 
+    /**
+     * 阶段 3：中文词项的倒排索引表达式，必须与
+     * {@code migration/V19__rag_chinese_search_text.sql} 里的索引表达式<b>逐字一致</b>，
+     * 否则 PostgreSQL 用不上索引、退回顺序扫描。
+     *
+     * <p>{@code to_tsvector(regconfig, text)} 是 immutable（单参数的
+     * {@code to_tsvector(text)} 是 stable，建不了索引），这里必须写两参数版本。
+     * {@code search_text} 为 NULL 时整个表达式为 NULL，{@code @@} 判为 NULL（不命中），
+     * 所以未回填的行自然被跳过，不需要额外的 IS NOT NULL 判断。
+     */
+    static final String TSV_EXPR = "to_tsvector('simple', search_text)";
+
     /** ASCII 标识符：Zb / PL / LC / hs / Dsed / wNM / ValueError。 */
     private static final Pattern IDENTIFIER = Pattern.compile("[A-Za-z][A-Za-z0-9_]{1,30}");
 
@@ -67,20 +86,33 @@ public class SparseRetriever {
     private final JdbcTemplate jdbc;
     private final RagProperties props;
     private final HybridRagProperties hybrid;
+    private final ChineseKeywordProperties chinese;
 
+    /** 阶段 5 及之前的调用点：中文词项默认开启，行为由 {@code hybrid-enabled} 决定。 */
     public SparseRetriever(JdbcTemplate jdbc, RagProperties props, HybridRagProperties hybrid) {
+        this(jdbc, props, hybrid, ChineseKeywordProperties.enabledDefaults());
+    }
+
+    public SparseRetriever(JdbcTemplate jdbc, RagProperties props, HybridRagProperties hybrid,
+                           ChineseKeywordProperties chinese) {
         this.jdbc = jdbc;
         this.props = props;
         this.hybrid = hybrid;
+        this.chinese = chinese;
     }
 
     /**
-     * @return 命中的段落，已按「命中锚点数」降序；无锚点或无非空正文时返回空列表
+     * @return 命中的段落，已按「锚点数 → ts_rank_cd」降序；两套词项都为空时返回空列表
      * @throws RuntimeException JDBC 失败或 content 不是合法 JSON，交由调用方降级
      */
     public List<Document> retrieve(String query, AiCaller who, int limit) {
         List<String> anchors = extractAnchors(query, hybrid.maxAnchors);
-        if (anchors.isEmpty()) {
+        // 阶段 3：纯中文提问在这里第一次拿到非空词项。分词不可用时返回空，
+        // 自动退回「只认锚点」，与阶段 5 行为一致。
+        List<String> terms = chinese.enabled
+                ? ChineseTokenizer.terms(query, chinese.maxTerms) : List.of();
+        String tsQuery = ChineseTokenizer.toTsQuery(terms);
+        if (anchors.isEmpty() && tsQuery.isEmpty()) {
             return List.of();
         }
         if (props.permissionFilterEnabled && !who.seeAll() && who.userId() == null) {
@@ -90,7 +122,7 @@ public class SparseRetriever {
         }
 
         List<Object> args = new ArrayList<>();
-        String sql = buildSql(anchors, who, limit, args);
+        String sql = buildSql(anchors, tsQuery, who, limit, args);
         List<Document> docs = jdbc.query(sql, (rs, rowNum) -> {
             String body = rs.getString("body");
             if (body == null || body.isBlank()) {
@@ -116,25 +148,48 @@ public class SparseRetriever {
                 out.add(doc);
             }
         }
-        log.info("[rag] sparse 路：anchors={}, hits={}", anchors.size(), out.size());
+        log.info("[rag] sparse 路：anchors={}, terms={}, hits={}",
+                anchors.size(), terms.size(), out.size());
         return out;
     }
 
     /**
-     * 拼 SQL：WHERE 若干 ILIKE（OR）→ 权限条件 → ORDER BY 命中锚点数降序 → LIMIT。
-     * 参数顺序与占位符一一对应，单测用 ArgumentCaptor 断言权限片段存在。
+     * 拼 SQL，参数按占位符出现顺序追加到 {@code args}。
+     *
+     * <p>结构：SELECT（rank 的 ?）→ WHERE（tsquery ? / 锚点 ?）→ 权限（user_id ?）
+     * → ORDER BY（锚点 CASE ?）→ LIMIT ?。参数顺序不能重排，改了要同步改单测的
+     * {@code ArgumentCaptor} 断言。
      */
-    String buildSql(List<String> anchors, AiCaller who, int limit, List<Object> args) {
-        StringBuilder sql = new StringBuilder(256)
-                .append("SELECT id, doc_id, chunk_id, ").append(TEXT_EXPR).append(" AS body ")
-                .append("FROM ai_knowledge_store WHERE (");
+    String buildSql(List<String> anchors, String tsQuery, AiCaller who, int limit, List<Object> args) {
+        boolean hasTs = tsQuery != null && !tsQuery.isEmpty();
+        boolean hasAnchors = anchors != null && !anchors.isEmpty();
 
-        for (int i = 0; i < anchors.size(); i++) {
-            if (i > 0) {
+        StringBuilder sql = new StringBuilder(512)
+                .append("SELECT id, doc_id, chunk_id, ").append(TEXT_EXPR).append(" AS body");
+        if (hasTs) {
+            sql.append(", ts_rank_cd(").append(TSV_EXPR)
+                    .append(", to_tsquery('simple', ?)) AS rank");
+            args.add(tsQuery);
+        }
+
+        sql.append(" FROM ai_knowledge_store WHERE (");
+        if (hasTs) {
+            sql.append(TSV_EXPR).append(" @@ to_tsquery('simple', ?)");
+            args.add(tsQuery);
+        }
+        if (hasAnchors) {
+            if (hasTs) {
                 sql.append(" OR ");
             }
-            sql.append(TEXT_EXPR).append(" ILIKE ? ESCAPE '\\'");
-            args.add(like(anchors.get(i)));
+            sql.append('(');
+            for (int i = 0; i < anchors.size(); i++) {
+                if (i > 0) {
+                    sql.append(" OR ");
+                }
+                sql.append(TEXT_EXPR).append(" ILIKE ? ESCAPE '\\'");
+                args.add(like(anchors.get(i)));
+            }
+            sql.append(')');
         }
         sql.append(')');
 
@@ -147,17 +202,27 @@ public class SparseRetriever {
             args.add(who.userId());
         }
 
-        sql.append(" ORDER BY (");
-        for (int i = 0; i < anchors.size(); i++) {
-            if (i > 0) {
-                sql.append(" + ");
+        sql.append(" ORDER BY ");
+        if (hasAnchors) {
+            sql.append('(');
+            for (int i = 0; i < anchors.size(); i++) {
+                if (i > 0) {
+                    sql.append(" + ");
+                }
+                sql.append("CASE WHEN ").append(TEXT_EXPR)
+                        .append(" ILIKE ? ESCAPE '\\' THEN 1 ELSE 0 END");
             }
-            sql.append("CASE WHEN ").append(TEXT_EXPR).append(" ILIKE ? ESCAPE '\\' THEN 1 ELSE 0 END");
+            sql.append(") DESC, ");
+            for (String anchor : anchors) {
+                args.add(like(anchor));
+            }
         }
-        sql.append(") DESC, id");
-        for (String anchor : anchors) {
-            args.add(like(anchor));
+        if (hasTs) {
+            // DESC 时 PostgreSQL 默认 NULLS FIRST，未回填 search_text 的行会排到最前，
+            // 必须显式 NULLS LAST，否则「只有锚点命中」的段会盖住真正相关的段。
+            sql.append("rank DESC NULLS LAST, ");
         }
+        sql.append("id");
 
         sql.append(" LIMIT ?");
         args.add(limit);

@@ -88,6 +88,17 @@
             <groupId>com.fasterxml.jackson.core</groupId>
             <artifactId>jackson-databind</artifactId>
         </dependency>
+        <!--
+            阶段 3：中文分词。关键词路（SparseRetriever）在中文提问下必须先切词，
+            否则 PostgreSQL 的 tsvector 会把整句当一个词（项目实测）。选 jieba 而不是
+            zhparser / pg_search：后两者要编译扩展或换镜像，本项目是 Windows 原生
+            PostgreSQL 部署，装不上；jieba 是纯 Java、零外部依赖，词典随 jar 分发。
+        -->
+        <dependency>
+            <groupId>com.huaban</groupId>
+            <artifactId>jieba-analysis</artifactId>
+            <version>1.0.2</version>
+        </dependency>
         <dependency>
             <groupId>org.projectlombok</groupId>
             <artifactId>lombok</artifactId>

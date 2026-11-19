@@ -186,6 +186,16 @@ app:
       # 融合前的候选池。0 = 沿用 limit × candidate-expansion 的旧逻辑（行为不变）。
       # 配正数才会抬高粗召回量，让 RRF 与 rerank 有足够候选可比较；上限 100，配大了自动夹。
       hybrid-candidate-pool: ${RAG_HYBRID_CANDIDATE_POOL:0}
+      # 阶段 3：中文关键词路（jieba 分词 + search_text 上的 tsvector 倒排索引）。
+      # 只作用于混合检索的第二路，sparse 结果按 ts_rank_cd 排序后交给 RRF。
+      # 打开 hybrid-enabled 之前必须先执行 migration/V19__rag_chinese_search_text.sql
+      # 并对存量文档跑一次 SearchTextBackfillCli，否则 search_text 为 NULL 的行不参与这一路
+      # （仍能被向量路与 ASCII 锚点召回，不会丢）。
+      # 实测（52 题考卷、单路 topK=5、不联网）：只认锚点时 Recall 0.4474 / MRR 0.3333，
+      # 加中文词项后 0.6842 / 0.5219，18 题新增召回、0 题退化为空。
+      chinese-keyword-enabled: ${RAG_CHINESE_KEYWORD_ENABLED:true}
+      # 单次查询最多用多少个中文词项。长问句切出二三十个词全塞进去会拖慢且引入噪声。
+      chinese-keyword-max-terms: ${RAG_CHINESE_KEYWORD_MAX_TERMS:12}
       # 阶段 6：把「谁能看哪些行」写进向量检索 SQL 的 WHERE（security trimming）。
       # 打开后无权正文不再进入 JVM，普通用户能稳定拿满 topK，每次检索少一条可见集合查询。
       # 关闭即退回 SDK search() + Java 集合过滤，行为与阶段 4 逐字一致（应急回滚用）。

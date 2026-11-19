@@ -1,5 +1,6 @@
 package com.yangtze.bankwarning.ai.service;
 
+import com.yangtze.bankwarning.ai.config.ChineseKeywordProperties;
 import com.yangtze.bankwarning.ai.config.EmbeddingBatchProperties;
 import com.yangtze.bankwarning.ai.config.HybridRagProperties;
 import com.yangtze.bankwarning.ai.config.RagProperties;
@@ -28,6 +29,7 @@ import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashSet;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ExecutionException;
@@ -64,6 +66,8 @@ import java.util.concurrent.TimeoutException;
  * {@link #hybridOutcome}，由 {@code app.ai.rag.hybrid-enabled} 控制，<b>默认关闭</b>：
  * 关闭时本类的执行路径、SQL 条数、日志字段与阶段 4 完全一致。
  * 阶段 6 = SQL 内权限过滤，实现在 {@link SqlPermissionVectorSearch}。
+ * 阶段 3（进阶）= 中文关键词路，{@link SparseRetriever} 用 jieba 词项查
+ * {@code search_text} 倒排索引；入库后由 {@link #refreshSearchText} 补写该列。
  */
 @Service
 @SuppressWarnings({"deprecation", "removal"})
@@ -109,6 +113,8 @@ public class KnowledgeService {
     private final BatchEmbeddingClient batchClient;
     /** 阶段 8：rerank 精排。关闭态对象非 null，{@code isEnabled()} 返回 false。 */
     private final RerankClient rerankClient;
+    /** 阶段 3（进阶）：中文关键词路配置。关闭时 sparse 路退回纯 ASCII 锚点。 */
+    private final ChineseKeywordProperties chinese;
 
     /**
      * 兼容既有调用点（5 处单元测试 + 离线评测 CLI 直接 {@code new}）：一律按
@@ -154,6 +160,8 @@ public class KnowledgeService {
 
     /**
      * 阶段 7 及之前的调用点：等价于「rerank 关闭」，检索结果与阶段 7 逐字一致。
+     * 阶段 3 的中文词项按默认开启传入——它只影响混合检索打开时的 sparse 路，
+     * 而这些调用点的 {@code hybrid} 恒为关闭态，行为不变。
      */
     public KnowledgeService(EmbeddingModel embeddingModel,
                             VDBStoreBase vectorStore,
@@ -165,7 +173,8 @@ public class KnowledgeService {
                             BatchEmbeddingClient batchClient) {
         this(embeddingModel, vectorStore, jdbcTemplate, traceStore, props,
                 hybrid, sqlSearch, batchClient,
-                RerankClient.disabled(RerankProperties.disabled()));
+                RerankClient.disabled(RerankProperties.disabled()),
+                ChineseKeywordProperties.enabledDefaults());
     }
 
     /**
@@ -184,7 +193,8 @@ public class KnowledgeService {
                             HybridRagProperties hybrid,
                             SqlPermissionVectorSearch sqlSearch,
                             BatchEmbeddingClient batchClient,
-                            RerankClient rerankClient) {
+                            RerankClient rerankClient,
+                            ChineseKeywordProperties chinese) {
         this.embeddingModel = embeddingModel;
         this.vectorStore = vectorStore;
         this.jdbcTemplate = jdbcTemplate;
@@ -194,7 +204,13 @@ public class KnowledgeService {
         this.sqlSearch = sqlSearch;
         this.batchClient = batchClient;
         this.rerankClient = rerankClient;
-        this.sparseRetriever = new SparseRetriever(jdbcTemplate, props, hybrid);
+        this.chinese = chinese;
+        this.sparseRetriever = new SparseRetriever(jdbcTemplate, props, hybrid, chinese);
+        if (chinese.enabled) {
+            // 阶段 3：jieba 词典约 2 MB，首次分词 0.6~1.2 s。放在构造期预热，
+            // 不让第一个提问的用户承担这份开销；失败也只是少一路召回，不影响启动。
+            ChineseTokenizer.warmUp();
+        }
     }
 
     /** 兼容既有调用点；trace_id 由本方法生成。 */
@@ -523,6 +539,47 @@ public class KnowledgeService {
             throw new IllegalStateException("入库换名失败：临时批次不存在 " + stagingDocId);
         }
         log.info("[rag] 入库换名：docId={}, 删除旧段={}, 迁入新段={}", finalDocId, deleted, promoted);
+    }
+
+    /**
+     * 阶段 3：为某篇文档的所有段补写 {@code search_text}（jieba 词项，空格分隔）。
+     *
+     * <p><b>为什么不做在 {@link #replaceStaged} 的事务里</b>：换名事务只管「删旧 + 迁入」。
+     * 一旦分词或 UPDATE 抛错（最典型的是新机器还没执行 V19，列不存在），
+     * PostgreSQL 会把整个事务标记为 aborted，连入库一起回滚。而 search_text 只是
+     * 关键词路的加速列，缺了它这篇文档仍能被向量路召回——不该让它有否决入库的权力。
+     *
+     * <p>因此本方法是 <b>best-effort</b>：异常一律吞掉并打 warn，返回成功写入的行数。
+     * 幂等，可反复调用；灌库与回填脚本也走它。
+     */
+    public int refreshSearchText(String docId) {
+        if (docId == null || docId.isBlank()) {
+            return 0;
+        }
+        try {
+            List<Map<String, Object>> rows = jdbcTemplate.queryForList(
+                    "SELECT id, " + SparseRetriever.TEXT_EXPR + " AS body "
+                            + "FROM ai_knowledge_store WHERE doc_id = ?", docId);
+            List<Object[]> batch = new ArrayList<>(rows.size());
+            for (Map<String, Object> row : rows) {
+                Object body = row.get("body");
+                String searchText = ChineseTokenizer.indexText(body == null ? null : body.toString());
+                if (!searchText.isEmpty()) {
+                    batch.add(new Object[]{searchText, row.get("id")});
+                }
+            }
+            if (batch.isEmpty()) {
+                return 0;
+            }
+            jdbcTemplate.batchUpdate(
+                    "UPDATE ai_knowledge_store SET search_text = ? WHERE id = ?", batch);
+            log.info("[rag] search_text 已刷新：docId={}, 段数={}", docId, batch.size());
+            return batch.size();
+        } catch (RuntimeException e) {
+            log.warn("[rag] search_text 刷新失败（该篇暂不参与中文关键词路，确认已执行 V19）："
+                    + "docId={}, 原因={}", docId, e.toString());
+            return 0;
+        }
     }
 
     /**
