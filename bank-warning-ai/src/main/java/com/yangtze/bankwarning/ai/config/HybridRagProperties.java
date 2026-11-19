@@ -10,9 +10,10 @@ import org.springframework.stereotype.Component;
  * （6 处测试 + {@code defaults()}）直接 {@code new}，加参数会让这批调用同时编译失败。
  * 同样的做法已在 {@link ReportRagProperties} 上验证过。
  *
- * <p><b>默认关闭（{@code enabled=false}）</b>：关闭时 {@code KnowledgeService.doRetrieve()}
- * 走原路径，第二路 SQL 一行都不发、RRF 一行都不执行，线上行为逐字不变。
- * 这样「代码合进仓库」与「能力通电」是两件事，可以分开决定。
+ * <p><b>阶段 5 起默认开启</b>：关闭时 {@code KnowledgeService.doRetrieve()} 走原路径，
+ * 第二路 SQL 一行都不发、RRF 一行都不执行，行为退化为纯向量档——这是应急回滚姿势。
+ * 之所以敢默认开：同一份 52 题考卷上 hybrid+rerank 把 Recall@5 从 0.6842 抬到 0.8421，
+ * 而开关留在关闭态时那 0.16 的收益用户一次都拿不到。
  *
  * <p>打开前请确认三件事：① 知识库已有足够多的不同 {@code doc_id}（否则两路都只能
  * 召回同一篇，融合结果与 dense-only 无差别，测不出收益）；② 已手动执行
@@ -69,13 +70,13 @@ public final class HybridRagProperties {
     public final int maxAnchors;
 
     public HybridRagProperties(
-            @Value("${app.ai.rag.hybrid-enabled:false}") boolean enabled,
+            @Value("${app.ai.rag.hybrid-enabled:true}") boolean enabled,
             @Value("${app.ai.rag.hybrid-sparse-top-k:20}") int sparseTopK,
             @Value("${app.ai.rag.hybrid-rrf-k:60}") int rrfK,
             @Value("${app.ai.rag.hybrid-max-anchors:8}") int maxAnchors,
             @Value("${app.ai.rag.hybrid-dense-weight:1.0}") double denseWeight,
             @Value("${app.ai.rag.hybrid-sparse-weight:1.0}") double sparseWeight,
-            @Value("${app.ai.rag.hybrid-candidate-pool:0}") int candidatePool) {
+            @Value("${app.ai.rag.hybrid-candidate-pool:30}") int candidatePool) {
         this.enabled = enabled;
         this.sparseTopK = sparseTopK > 0 ? sparseTopK : 20;
         this.rrfK = rrfK > 0 ? rrfK : 60;

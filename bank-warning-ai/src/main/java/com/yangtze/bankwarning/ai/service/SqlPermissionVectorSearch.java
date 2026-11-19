@@ -101,13 +101,23 @@ public class SqlPermissionVectorSearch {
      * 检索候选。返回条数上限 {@code candidates}，不做最终 {@code limit} 截断——
      * 截断由 {@link KnowledgeService} 负责，保持"候选 / 可见 / 返回"三段计数口径不变。
      *
+     * <p><b>阶段 5：阈值改成入参。</b>原来本类直接读 {@code props.scoreThreshold}，
+     * 于是「向量路召回底线」和「最终答案门槛」被绑成了同一个数——混合检索打开后，
+     * 一条 0.3953 的真答案在粗筛就被淘汰，根本进不了融合与精排。现在由
+     * {@link RagThresholdPolicy} 按档位决定传哪个值，本类只负责执行。
+     *
+     * <p><b>为什么还要回报被切掉的条数</b>：{@code 0 条结果}有两种完全不同的成因
+     * （库里没有 / 有但被门槛切了），只看返回列表分不出来，留痕里就只能写一个含糊的
+     * 「没有命中」。切掉的条数是唯一能区分两者的信息，而它只在这里存在，随手带回成本最低。
+     *
      * @param queryEmbedding 查询向量
      * @param who            调用者身份；普通用户且 userId 为空时返回空（fail-closed）
-     * @param props          仅用 {@code permissionFilterEnabled / publicKnowledgeEnabled / scoreThreshold}
-     * @param candidates     粗召回条数，含给 {@code scoreThreshold} 留的后备
+     * @param props          仅用 {@code permissionFilterEnabled / publicKnowledgeEnabled}
+     * @param candidates     粗召回条数
+     * @param threshold      本次生效的相似度底线；{@code <= 0} 表示不设底线
      */
-    public List<Document> search(double[] queryEmbedding, AiCaller who,
-                                 RagProperties props, int candidates) {
+    public SearchResult search(double[] queryEmbedding, AiCaller who,
+                               RagProperties props, int candidates, double threshold) {
         if (!enabled) {
             throw new IllegalStateException("SQL 内权限过滤已关闭，不应调用本方法");
         }
@@ -118,7 +128,7 @@ public class SqlPermissionVectorSearch {
         if (needFilter && userId == null) {
             // 与 applyPermissionFilter 同口径：已认证但拿不到 userId 一律按无权处理。
             log.warn("[rag] 已认证但 userId 为空，SQL 内过滤按无权处理");
-            return List.of();
+            return new SearchResult(List.of(), 0, 0);
         }
 
         String sql;
@@ -135,12 +145,26 @@ public class SqlPermissionVectorSearch {
         }
 
         List<Document> rows = jdbcTemplate.query(sql, ROW_MAPPER, args);
-        return applyThreshold(rows, props.scoreThreshold);
+        List<Document> kept = applyThreshold(rows, threshold);
+        return new SearchResult(kept, rows.size(), rows.size() - kept.size());
+    }
+
+    /**
+     * 候选与「被门槛切掉多少」。
+     *
+     * @param docs              通过门槛的候选
+     * @param rowsFetched       向量 SQL 实际取回的行数（门槛之前）
+     * @param droppedByThreshold 被门槛切掉的行数
+     */
+    public record SearchResult(List<Document> docs, int rowsFetched, int droppedByThreshold) {
+        public boolean isEmpty() {
+            return docs.isEmpty();
+        }
     }
 
     /** 与 SDK 一致：{@code score >= threshold} 保留，其余丢弃（而不是在 SQL 里筛后补位）。 */
     private static List<Document> applyThreshold(List<Document> rows, double threshold) {
-        if (rows.isEmpty()) {
+        if (rows.isEmpty() || threshold <= 0) {
             return rows;
         }
         return rows.stream()

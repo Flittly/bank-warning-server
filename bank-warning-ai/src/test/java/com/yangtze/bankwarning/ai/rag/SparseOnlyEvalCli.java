@@ -2,6 +2,7 @@ package com.yangtze.bankwarning.ai.rag;
 
 import com.yangtze.bankwarning.ai.config.ChineseKeywordProperties;
 import com.yangtze.bankwarning.ai.config.HybridRagProperties;
+import com.yangtze.bankwarning.ai.config.QueryRewriteProperties;
 import com.yangtze.bankwarning.ai.config.RagProperties;
 import com.yangtze.bankwarning.ai.context.AiCaller;
 import com.yangtze.bankwarning.ai.service.SparseRetriever;
@@ -68,10 +69,15 @@ public final class SparseOnlyEvalCli {
         RagProperties props = new RagProperties(
                 true, true, true, false, 5, 5, 5, 0.4, 5, 15_000L, 600_000L);
         HybridRagProperties hybrid = HybridRagProperties.enabledWithDefaults();
+        // 阶段 5：--rewrite 在「+中文词项」的基础上再叠一层归一化与同义词扩展。
+        // 基线（锚点 only）始终保持纯净：它代表改造前的能力，不能被任何新开关污染。
+        QueryRewriteProperties rewriteProps = opts.containsKey("rewrite")
+                ? QueryRewriteProperties.enabledDefaults()
+                : QueryRewriteProperties.disabled();
         SparseRetriever anchorsOnly = new SparseRetriever(jdbc, props, hybrid,
                 ChineseKeywordProperties.disabled());
         SparseRetriever withChinese = new SparseRetriever(jdbc, props, hybrid,
-                ChineseKeywordProperties.enabledDefaults());
+                ChineseKeywordProperties.enabledDefaults(), rewriteProps);
 
         RagGoldenSet golden = RagGoldenSet.load();
         List<Row> rows = new ArrayList<>(golden.cases.size());
@@ -81,7 +87,7 @@ public final class SparseOnlyEvalCli {
             rows.add(new Row(c, before, after));
         }
 
-        String report = render(rows, golden, topK);
+        String report = render(rows, golden, topK, rewriteProps.enabled);
         Path path = Path.of(out);
         if (path.getParent() != null) {
             Files.createDirectories(path.getParent());
@@ -92,7 +98,8 @@ public final class SparseOnlyEvalCli {
         Summary after = summarize(rows, true);
         System.out.printf("[sparse-eval] 锚点only 命中=%d/%d Recall=%.4f MRR=%.4f%n",
                 before.hitCases, before.total, before.recall, before.mrr);
-        System.out.printf("[sparse-eval] +中文词项 命中=%d/%d Recall=%.4f MRR=%.4f%n",
+        System.out.printf("[sparse-eval] %s 命中=%d/%d Recall=%.4f MRR=%.4f%n",
+                rewriteProps.enabled ? "+中文词项+改写" : "+中文词项",
                 after.hitCases, after.total, after.recall, after.mrr);
         System.out.println("[sparse-eval] 报告: " + path.toAbsolutePath());
         return 0;
@@ -192,23 +199,26 @@ public final class SparseOnlyEvalCli {
 
     // ---------------- 报告 ----------------
 
-    static String render(List<Row> rows, RagGoldenSet golden, int topK) {
+    static String render(List<Row> rows, RagGoldenSet golden, int topK, boolean rewrite) {
         Summary before = summarize(rows, false);
         Summary after = summarize(rows, true);
         StringBuilder sb = new StringBuilder(4096);
-        sb.append("# 关键词路单路对照（阶段 3：中文词项）\n\n");
+        sb.append(rewrite ? "# 关键词路单路对照（中文词项 + 查询改写）\n\n"
+                : "# 关键词路单路对照（阶段 3：中文词项）\n\n");
         sb.append("- 生成时间：").append(LocalDateTime.now().format(TS)).append('\n');
         sb.append("- 考卷：v").append(golden.version).append("，共 ").append(rows.size())
                 .append(" 题，计分且非拒答 ").append(before.total).append(" 题\n");
         sb.append("- 口径：只跑 SparseRetriever（不调 embedding、不联网），topK=")
                 .append(topK).append("，指标按 docId 计算\n");
-        sb.append("- 对照：`锚点only` = 阶段 5 行为（只认 ASCII 标识符与数字）；`+中文词项` = 阶段 3（jieba + tsvector）\n\n");
+        sb.append("- 对照：`锚点only` = 阶段 5 行为（只认 ASCII 标识符与数字）；`")
+                .append(rewrite ? "+中文词项+改写` = 阶段 3 + 归一化与同义词扩展" : "+中文词项` = 阶段 3（jieba + tsvector）")
+                .append("`\n\n");
 
         sb.append("## 汇总\n\n");
         sb.append("| 模式 | 有命中题数 | Recall@").append(topK).append(" | MRR |\n");
         sb.append("|---|---|---|---|\n");
         sb.append(row("锚点only（阶段 5）", before));
-        sb.append(row("+中文词项（阶段 3）", after));
+        sb.append(row(rewrite ? "+中文词项+改写" : "+中文词项（阶段 3）", after));
         sb.append('\n');
 
         sb.append("## 分类\n\n");
@@ -228,7 +238,8 @@ public final class SparseOnlyEvalCli {
         sb.append('\n');
 
         sb.append("## 逐题\n\n");
-        sb.append("| id | 类别 | 计分 | 期望 | 锚点only 返回 | 中文返回 | 变化 |\n");
+        sb.append("| id | 类别 | 计分 | 期望 | 锚点only 返回 | ")
+                .append(rewrite ? "中文+改写 返回" : "中文返回").append(" | 变化 |\n");
         sb.append("|---|---|---|---|---|---|---|\n");
         for (Row r : rows) {
             String mark = r.counted() ? "是" : "否";

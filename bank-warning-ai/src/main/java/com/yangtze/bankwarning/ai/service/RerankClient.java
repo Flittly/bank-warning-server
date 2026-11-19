@@ -13,6 +13,12 @@ import org.slf4j.LoggerFactory;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.List;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 import java.util.function.Supplier;
 
 /**
@@ -89,6 +95,14 @@ public final class RerankClient {
     }
 
     /**
+     * 只读配置视图，供 {@link RagThresholdPolicy} 取「最终门槛」与 {@link KnowledgeService}
+     * 打印生效档位。对外不暴露 SDK 句柄，避免调用方绕过降级逻辑直接发请求。
+     */
+    public RerankProperties properties() {
+        return props;
+    }
+
+    /**
      * 对候选重排。
      *
      * @param query       原始用户问题（不是改写后的查询——rerank 要判断的是「这段能不能回答用户」）
@@ -157,7 +171,7 @@ public final class RerankClient {
 
         TextReRankResult result;
         try {
-            result = sdk.call(builder.build());
+            result = callWithTimeout(builder.build());
         } catch (Exception e) {
             throw new IllegalStateException("rerank 调用失败：" + rootMessage(e), e);
         }
@@ -182,6 +196,48 @@ public final class RerankClient {
         items.sort(Comparator.comparingDouble(TextReRankResultItem::score).reversed());
         return items;
     }
+
+    /**
+     * 阶段 5：给同步 SDK 调用套一层超时。
+     *
+     * <p><b>为什么用线程池而不是给 SDK 配超时</b>：{@code TextReRankParam} 没有超时字段，
+     * 底层 HTTP 客户端也不由我们构造。同步调用没有「放弃等待」的语法，只有「另起一个线程去等，
+     * 主线程只等到点」这一条路。
+     *
+     * <p><b>超时后必须 cancel</b>：不取消的话，慢请求仍占着连接与线程，几次抖动就把池子耗尽，
+     * 表现成「明明每次都降级了，却越来越慢」。取消只能尽力而为（SDK 未必响应中断），
+     * 所以池子大小要留余量，且线程必须是 daemon——否则应用关不掉。
+     */
+    private TextReRankResult callWithTimeout(TextReRankParam param) throws Exception {
+        Future<TextReRankResult> future = CALL_POOL.submit(() -> sdk.call(param));
+        try {
+            if (props.timeoutMs <= 0) {
+                return future.get();
+            }
+            return future.get(props.timeoutMs, TimeUnit.MILLISECONDS);
+        } catch (TimeoutException e) {
+            future.cancel(true);
+            throw new IllegalStateException(
+                    "rerank 超时（>" + props.timeoutMs + "ms），本次退回粗排顺序");
+        } catch (InterruptedException e) {
+            future.cancel(true);
+            Thread.currentThread().interrupt();
+            throw new IllegalStateException("rerank 等待被中断，本次退回粗排顺序", e);
+        } catch (ExecutionException e) {
+            Throwable cause = e.getCause() == null ? e : e.getCause();
+            throw new IllegalStateException("rerank 调用失败：" + rootMessage(cause), cause);
+        }
+    }
+
+    /**
+     * 精排专用线程池。<b>4 个线程 + daemon</b>：对话请求本身有限流，
+     * 4 条并发足够覆盖正常峰值；daemon 保证池子不会拖住 JVM 退出。
+     */
+    private static final ExecutorService CALL_POOL = Executors.newFixedThreadPool(4, r -> {
+        Thread t = new Thread(r, "rag-rerank-call");
+        t.setDaemon(true);
+        return t;
+    });
 
     private record TextReRankResultItem(int index, double score) {
     }

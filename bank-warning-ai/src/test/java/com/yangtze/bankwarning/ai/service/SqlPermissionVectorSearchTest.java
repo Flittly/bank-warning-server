@@ -59,7 +59,7 @@ class SqlPermissionVectorSearchTest {
     @Test
     @DisplayName("普通用户 + 公共资料：SQL 同时带 user_id 与 is_public，参数顺序为 向量/身份/向量/条数")
     void ownerOrPublicSqlCarriesBothConditions() {
-        dao().search(QUERY, AiCaller.forUser(7L), props(true, true), 15);
+        dao().search(QUERY, AiCaller.forUser(7L), props(true, true), 15, 0.4);
 
         ArgumentCaptor<String> sql = ArgumentCaptor.forClass(String.class);
         ArgumentCaptor<Object[]> args = ArgumentCaptor.forClass(Object[].class);
@@ -82,7 +82,7 @@ class SqlPermissionVectorSearchTest {
     @Test
     @DisplayName("公共资料开关关闭：退回阶段 1 的严格私有口径")
     void ownerOnlySqlWhenPublicDisabled() {
-        dao().search(QUERY, AiCaller.forUser(7L), props(true, false), 10);
+        dao().search(QUERY, AiCaller.forUser(7L), props(true, false), 10, 0.4);
 
         ArgumentCaptor<String> sql = ArgumentCaptor.forClass(String.class);
         verify(jdbcTemplate).query(sql.capture(), any(RowMapper.class), any(Object[].class));
@@ -94,7 +94,7 @@ class SqlPermissionVectorSearchTest {
     @Test
     @DisplayName("管理员：SQL 没有任何权限条件（与阶段 4 等价，保证基线可比）")
     void adminSqlHasNoPermissionCondition() {
-        dao().search(QUERY, AiCaller.forAdmin(), props(true, true), 15);
+        dao().search(QUERY, AiCaller.forAdmin(), props(true, true), 15, 0.4);
 
         ArgumentCaptor<String> sql = ArgumentCaptor.forClass(String.class);
         ArgumentCaptor<Object[]> args = ArgumentCaptor.forClass(Object[].class);
@@ -110,7 +110,7 @@ class SqlPermissionVectorSearchTest {
     @Test
     @DisplayName("权限过滤总开关关闭：也是无条件检索（沿用阶段 1 的语义）")
     void noFilterWhenPermissionFilterDisabled() {
-        dao().search(QUERY, AiCaller.forUser(7L), props(false, true), 15);
+        dao().search(QUERY, AiCaller.forUser(7L), props(false, true), 15, 0.4);
 
         ArgumentCaptor<String> sql = ArgumentCaptor.forClass(String.class);
         verify(jdbcTemplate).query(sql.capture(), any(RowMapper.class), any(Object[].class));
@@ -121,9 +121,10 @@ class SqlPermissionVectorSearchTest {
     @Test
     @DisplayName("拿不到 userId：直接返回空，绝不查库（fail-closed）")
     void anonymousFailsClosed() {
-        List<Document> out = dao().search(QUERY, AiCaller.anonymous(), props(true, true), 15);
+        SqlPermissionVectorSearch.SearchResult out = dao().search(
+                QUERY, AiCaller.anonymous(), props(true, true), 15, 0.4);
 
-        assertTrue(out.isEmpty());
+        assertTrue(out.docs().isEmpty());
         verifyNoInteractions(jdbcTemplate);
     }
 
@@ -133,10 +134,12 @@ class SqlPermissionVectorSearchTest {
         when(jdbcTemplate.query(anyString(), any(RowMapper.class), any(Object[].class)))
                 .thenReturn(List.of(doc("high", 0.9), doc("low", 0.1)));
 
-        List<Document> out = dao().search(QUERY, AiCaller.forUser(7L), props(true, true), 15);
+        SqlPermissionVectorSearch.SearchResult out = dao().search(
+                QUERY, AiCaller.forUser(7L), props(true, true), 15, 0.4);
 
-        assertEquals(1, out.size());
-        assertEquals("high", out.get(0).getMetadata().getDocId());
+        assertEquals(1, out.docs().size());
+        assertEquals("high", out.docs().get(0).getMetadata().getDocId());
+        assertEquals(1, out.droppedByThreshold(), "被门槛切掉的条数必须能回报，否则空返回原因无从判断");
 
         ArgumentCaptor<String> sql = ArgumentCaptor.forClass(String.class);
         verify(jdbcTemplate).query(sql.capture(), any(RowMapper.class), any(Object[].class));
@@ -150,13 +153,13 @@ class SqlPermissionVectorSearchTest {
 
         assertFalse(off.isEnabled());
         assertThrows(IllegalStateException.class,
-                () -> off.search(QUERY, AiCaller.forUser(7L), props(true, true), 15));
+                () -> off.search(QUERY, AiCaller.forUser(7L), props(true, true), 15, 0.4));
     }
 
     @Test
     @DisplayName("向量文本化：与 pgvector 的 [a,b,c] 字面量一致")
     void vectorLiteralFormat() {
-        dao().search(new double[]{0.5, -1.25}, AiCaller.forAdmin(), props(true, true), 5);
+        dao().search(new double[]{0.5, -1.25}, AiCaller.forAdmin(), props(true, true), 5, 0.4);
 
         ArgumentCaptor<Object[]> args = ArgumentCaptor.forClass(Object[].class);
         verify(jdbcTemplate).query(anyString(), any(RowMapper.class), args.capture());

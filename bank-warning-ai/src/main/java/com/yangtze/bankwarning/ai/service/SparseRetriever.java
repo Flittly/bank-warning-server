@@ -2,6 +2,7 @@ package com.yangtze.bankwarning.ai.service;
 
 import com.yangtze.bankwarning.ai.config.ChineseKeywordProperties;
 import com.yangtze.bankwarning.ai.config.HybridRagProperties;
+import com.yangtze.bankwarning.ai.config.QueryRewriteProperties;
 import com.yangtze.bankwarning.ai.config.RagProperties;
 import com.yangtze.bankwarning.ai.context.AiCaller;
 import io.agentscope.core.message.TextBlock;
@@ -87,6 +88,8 @@ public class SparseRetriever {
     private final RagProperties props;
     private final HybridRagProperties hybrid;
     private final ChineseKeywordProperties chinese;
+    /** 阶段 5：归一化 + 同义词扩展。关闭态是默认值，行为与阶段 3 逐字一致。 */
+    private final QueryRewriteProperties rewrite;
 
     /** 阶段 5 及之前的调用点：中文词项默认开启，行为由 {@code hybrid-enabled} 决定。 */
     public SparseRetriever(JdbcTemplate jdbc, RagProperties props, HybridRagProperties hybrid) {
@@ -95,10 +98,16 @@ public class SparseRetriever {
 
     public SparseRetriever(JdbcTemplate jdbc, RagProperties props, HybridRagProperties hybrid,
                            ChineseKeywordProperties chinese) {
+        this(jdbc, props, hybrid, chinese, QueryRewriteProperties.disabled());
+    }
+
+    public SparseRetriever(JdbcTemplate jdbc, RagProperties props, HybridRagProperties hybrid,
+                           ChineseKeywordProperties chinese, QueryRewriteProperties rewrite) {
         this.jdbc = jdbc;
         this.props = props;
         this.hybrid = hybrid;
         this.chinese = chinese;
+        this.rewrite = rewrite;
     }
 
     /**
@@ -106,11 +115,18 @@ public class SparseRetriever {
      * @throws RuntimeException JDBC 失败或 content 不是合法 JSON，交由调用方降级
      */
     public List<Document> retrieve(String query, AiCaller who, int limit) {
-        List<String> anchors = extractAnchors(query, hybrid.maxAnchors);
+        // 阶段 5：改写只作用于关键词路——向量路本来就能跨词面差异，不需要同义词表。
+        // 归一化（全角/罗马数字/零宽字符）是无损的，但仍在开关里，保证关掉后行为与阶段 3 一致。
+        String effectiveQuery = rewrite.enabled ? QueryNormalizer.normalize(query) : query;
+        List<String> anchors = new ArrayList<>(extractAnchors(effectiveQuery, hybrid.maxAnchors));
         // 阶段 3：纯中文提问在这里第一次拿到非空词项。分词不可用时返回空，
         // 自动退回「只认锚点」，与阶段 5 行为一致。
         List<String> terms = chinese.enabled
-                ? ChineseTokenizer.terms(query, chinese.maxTerms) : List.of();
+                ? new ArrayList<>(ChineseTokenizer.terms(effectiveQuery, chinese.maxTerms))
+                : new ArrayList<>();
+        if (rewrite.enabled) {
+            expand(effectiveQuery, anchors, terms);
+        }
         String tsQuery = ChineseTokenizer.toTsQuery(terms);
         if (anchors.isEmpty() && tsQuery.isEmpty()) {
             return List.of();
@@ -150,9 +166,51 @@ public class SparseRetriever {
                 out.add(doc);
             }
         }
-        log.info("[rag] sparse 路：anchors={}, terms={}, hits={}",
-                anchors.size(), terms.size(), out.size());
+        log.info("[rag] sparse 路：anchors={}, terms={}, hits={}, rewrite={}",
+                anchors.size(), terms.size(), out.size(), rewrite.enabled ? "on" : "off");
         return out;
+    }
+
+    /**
+     * 阶段 5：把同义词追加进两套词项。
+     *
+     * <p>标识符（{@code Zb}/{@code PL}）进锚点集合，走 ILIKE 字面匹配；
+     * 中文词（「滩槽高差」）进中文词项，走倒排索引。两边各有容量上限，
+     * 到了上限就停——追加词的边际收益递减，而每条 OR 都在拉长 SQL。
+     */
+    private void expand(String query, List<String> anchors, List<String> terms) {
+        List<String> extra = QueryReformulator.expansions(query);
+        if (extra.isEmpty()) {
+            return;
+        }
+        int added = 0;
+        for (String token : extra) {
+            if (added >= rewrite.maxExtraTerms) {
+                break;
+            }
+            if (QueryReformulator.isIdentifier(token)) {
+                if (anchors.size() < hybrid.maxAnchors && addIgnoreCase(anchors, token)) {
+                    added++;
+                }
+            } else if (terms.size() < chinese.maxTerms && !terms.contains(token)) {
+                terms.add(token);
+                added++;
+            }
+        }
+        if (added > 0) {
+            log.debug("[rag] 查询改写：追加 {} 个词项（anchors={}, terms={}）", added,
+                    anchors.size(), terms.size());
+        }
+    }
+
+    private static boolean addIgnoreCase(List<String> target, String token) {
+        for (String existing : target) {
+            if (existing.equalsIgnoreCase(token)) {
+                return false;
+            }
+        }
+        target.add(token);
+        return true;
     }
 
     /**

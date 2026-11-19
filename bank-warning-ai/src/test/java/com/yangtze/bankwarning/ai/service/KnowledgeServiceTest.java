@@ -360,8 +360,9 @@ class KnowledgeServiceTest {
         SqlPermissionVectorSearch sqlSearch = mock(SqlPermissionVectorSearch.class);
         when(sqlSearch.isEnabled()).thenReturn(true);
         when(sqlSearch.search(any(double[].class), any(AiCaller.class),
-                any(RagProperties.class), anyInt()))
-                .thenReturn(List.of(doc("BMS.docx", "总则")));
+                any(RagProperties.class), anyInt(), anyDouble()))
+                .thenReturn(new SqlPermissionVectorSearch.SearchResult(
+                        List.of(doc("BMS.docx", "总则")), 1, 0));
 
         KnowledgeService svc = new KnowledgeService(embeddingModel, vectorStore, jdbcTemplate,
                 traceStore, RagProperties.defaults(), HybridRagProperties.disabled(), sqlSearch);

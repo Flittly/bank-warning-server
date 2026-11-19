@@ -3,12 +3,16 @@ package com.yangtze.bankwarning.ai.service;
 import com.yangtze.bankwarning.ai.config.ChineseKeywordProperties;
 import com.yangtze.bankwarning.ai.config.EmbeddingBatchProperties;
 import com.yangtze.bankwarning.ai.config.HybridRagProperties;
+import com.yangtze.bankwarning.ai.config.QueryRewriteProperties;
 import com.yangtze.bankwarning.ai.config.RagProperties;
+import com.yangtze.bankwarning.ai.config.RagThresholdProperties;
 import com.yangtze.bankwarning.ai.config.RerankProperties;
 import com.yangtze.bankwarning.ai.config.UnconfiguredEmbeddingModel;
 import com.yangtze.bankwarning.ai.context.AiCaller;
 import com.yangtze.bankwarning.ai.service.KnowledgeUnavailableException.Reason;
+import com.yangtze.bankwarning.ai.service.SqlPermissionVectorSearch.SearchResult;
 import com.yangtze.bankwarning.ai.store.JdbcRagTraceStore;
+import com.yangtze.bankwarning.ai.store.RagEmptyReason;
 import com.yangtze.bankwarning.ai.store.RagTrace;
 import io.agentscope.core.embedding.EmbeddingModel;
 import io.agentscope.core.message.ContentBlock;
@@ -115,6 +119,8 @@ public class KnowledgeService {
     private final RerankClient rerankClient;
     /** 阶段 3（进阶）：中文关键词路配置。关闭时 sparse 路退回纯 ASCII 锚点。 */
     private final ChineseKeywordProperties chinese;
+    /** 阶段 5：向量路召回底线。只在混合/精排档生效，纯向量档仍用 {@code props.scoreThreshold}。 */
+    private final RagThresholdProperties thresholdProps;
 
     /**
      * 兼容既有调用点（5 处单元测试 + 离线评测 CLI 直接 {@code new}）：一律按
@@ -174,15 +180,18 @@ public class KnowledgeService {
         this(embeddingModel, vectorStore, jdbcTemplate, traceStore, props,
                 hybrid, sqlSearch, batchClient,
                 RerankClient.disabled(RerankProperties.disabled()),
-                ChineseKeywordProperties.enabledDefaults());
+                ChineseKeywordProperties.enabledDefaults(),
+                RagThresholdProperties.legacy(),
+                QueryRewriteProperties.disabled());
     }
 
     /**
      * Spring 实际使用的构造器。混合检索配置独立成 {@link HybridRagProperties}、
      * 阶段 6 的 SQL 内过滤独立成 {@link SqlPermissionVectorSearch}、
      * 阶段 7 的入库批量嵌入独立成 {@link BatchEmbeddingClient}、
-     * 阶段 8 的精排独立成 {@link RerankClient}，
-     * 四者的开关都不进 {@link RagProperties} 的 11 参构造器。
+     * 阶段 8 的精排独立成 {@link RerankClient}、
+     * 阶段 5（进阶）的召回底线独立成 {@link RagThresholdProperties}，
+     * 五者的开关都不进 {@link RagProperties} 的 11 参构造器。
      */
     @Autowired
     public KnowledgeService(EmbeddingModel embeddingModel,
@@ -194,7 +203,9 @@ public class KnowledgeService {
                             SqlPermissionVectorSearch sqlSearch,
                             BatchEmbeddingClient batchClient,
                             RerankClient rerankClient,
-                            ChineseKeywordProperties chinese) {
+                            ChineseKeywordProperties chinese,
+                            RagThresholdProperties thresholdProps,
+                            QueryRewriteProperties rewriteProps) {
         this.embeddingModel = embeddingModel;
         this.vectorStore = vectorStore;
         this.jdbcTemplate = jdbcTemplate;
@@ -205,7 +216,8 @@ public class KnowledgeService {
         this.batchClient = batchClient;
         this.rerankClient = rerankClient;
         this.chinese = chinese;
-        this.sparseRetriever = new SparseRetriever(jdbcTemplate, props, hybrid, chinese);
+        this.thresholdProps = thresholdProps;
+        this.sparseRetriever = new SparseRetriever(jdbcTemplate, props, hybrid, chinese, rewriteProps);
         if (chinese.enabled) {
             // 阶段 3：jieba 词典约 2 MB，首次分词 0.6~1.2 s。放在构造期预热，
             // 不让第一个提问的用户承担这份开销；失败也只是少一路召回，不影响启动。
@@ -226,35 +238,87 @@ public class KnowledgeService {
     /**
      * 全量入口：{@code traceId} 传一次请求的编号（聊天侧传 sessionId），
      * 不传则为这次检索生成独立 UUID。留痕写入失败不影响返回值。
+     *
+     * <p>阶段 5 起改为交给 {@link #retrieveDetailed}：调用方若关心「为什么一条都没返回」，
+     * 用那个方法拿原因；只关心结果的既有调用点继续用本方法，行为逐字不变。
      */
     public List<Document> retrieve(String query, Scenario scenario, AiCaller caller,
                                    Integer limitOverride, String traceId) {
+        return retrieveDetailed(query, scenario, caller, limitOverride, traceId).docs();
+    }
+
+    /**
+     * 检索结果 + 空返回原因。
+     *
+     * @param docs        返回给调用方的段落（最多 topK 条）
+     * @param emptyReason 有结果时为 null；空列表时为 {@link RagEmptyReason} 的 {@code code()}。
+     *                    工具层据此告诉模型「是没这条规范」还是「是门槛/权限挡的」——
+     *                    这两种情况对用户要说的话完全不同。
+     */
+    public record RetrieveResult(List<Document> docs, String emptyReason) {
+        public boolean isEmpty() {
+            return docs.isEmpty();
+        }
+    }
+
+    public RetrieveResult retrieveDetailed(String query, Scenario scenario, AiCaller caller,
+                                           Integer limitOverride, String traceId) {
         String tid = (traceId == null || traceId.isBlank()) ? UUID.randomUUID().toString() : traceId;
         AiCaller who = AiCaller.orAnonymous(caller);
         int limit = (limitOverride != null && limitOverride > 0) ? limitOverride : topKFor(scenario);
         long start = System.currentTimeMillis();
+        RagThresholdPolicy.Thresholds th = thresholds();
 
         try {
-            Outcome outcome = doRetrieve(query, scenario, who, limit, tid);
+            Outcome outcome = doRetrieve(query, scenario, who, limit, tid, th);
+            String empty = emptyReasonOf(outcome);
             traceStore.record(RagTrace.success(tid, scenario.name(), query, who.userId(),
-                    limit, props.scoreThreshold, outcome.hits(), outcome.visible(),
-                    outcome.hitDetails(), System.currentTimeMillis() - start));
-            return outcome.docs();
+                    limit, th.recallFloor(), outcome.hits(), outcome.visible(),
+                    toHits(outcome.docs()), System.currentTimeMillis() - start,                    th.mode(), empty));
+            return new RetrieveResult(outcome.docs(), empty);
         } catch (KnowledgeUnavailableException e) {
             traceStore.record(RagTrace.failure(tid, scenario.name(), query, who.userId(),
-                    limit, props.scoreThreshold, e.reason().name(), e.getMessage(),
-                    System.currentTimeMillis() - start));
+                    limit, th.recallFloor(), e.reason().name(), e.getMessage(),
+                    System.currentTimeMillis() - start, th.mode()));
             throw e;
         } catch (RuntimeException e) {
             traceStore.record(RagTrace.failure(tid, scenario.name(), query, who.userId(),
-                    limit, props.scoreThreshold, RagTrace.STATUS_UNEXPECTED, rootMessage(e),
-                    System.currentTimeMillis() - start));
+                    limit, th.recallFloor(), RagTrace.STATUS_UNEXPECTED, rootMessage(e),
+                    System.currentTimeMillis() - start, th.mode()));
             throw e;
         }
     }
 
+    /** 阶段 5：当前档位与两把尺子。每次检索算一次是纯函数，成本可忽略。 */
+    private RagThresholdPolicy.Thresholds thresholds() {
+        return RagThresholdPolicy.of(props, hybrid, rerankClient.isEnabled(),
+                rerankClient.properties().scoreThreshold, thresholdProps);
+    }
+
+    /**
+     * 空返回原因：四种成因要做的事完全不同，所以必须分开记。
+     *
+     * <p>{@code hits} 是<b>门槛之前</b>取回的候选数，{@code visible} 是权限之后的可见数。
+     * 没有前者就分不出「库里没有」与「全被门槛切了」——这两种在改造前都是同一个空数组。
+     */
+    private static String emptyReasonOf(Outcome o) {
+        if (!o.docs().isEmpty()) {
+            return null;
+        }
+        if (o.hits() == 0) {
+            return o.droppedByThreshold() > 0
+                    ? RagEmptyReason.BELOW_RECALL_FLOOR.code()
+                    : RagEmptyReason.NO_CANDIDATE.code();
+        }
+        if (o.visible() == 0) {
+            return RagEmptyReason.PERMISSION_TRIMMED.code();
+        }
+        return RagEmptyReason.BELOW_FINAL_FLOOR.code();
+    }
+
     /** 真正的检索过程；三段计数用于留痕，不用成员变量以免并发串数据。 */
-    private Outcome doRetrieve(String query, Scenario scenario, AiCaller who, int limit, String traceId) {
+    private Outcome doRetrieve(String query, Scenario scenario, AiCaller who, int limit, String traceId,
+                               RagThresholdPolicy.Thresholds th) {
         if (!props.enabled) {
             throw new KnowledgeUnavailableException(Reason.DISABLED,
                     "知识库检索已在配置中关闭（app.ai.rag.enabled=false）。");
@@ -309,20 +373,28 @@ public class KnowledgeService {
         }
 
         // 阶段 6：开关打开 ⇒ 权限条件进 SQL，返回的 dense 已经是「自己有权看的」。
+        // 阶段 5：门槛不再固定 0.4，由 RagThresholdPolicy 按档位给——纯向量档仍是 0.4，
+        // 混合/精排档降到 recall-floor（默认 0），把「相关不相关」的判断留给后面两层。
         boolean denseFiltered = sqlSearch.isEnabled();
         List<Document> dense;
+        int denseRows;
+        int droppedByThreshold;
         if (denseFiltered) {
+            SearchResult result;
             try {
-                dense = sqlSearch.search(queryEmbedding, who, props, candidates);
+                result = sqlSearch.search(queryEmbedding, who, props, candidates, th.recallFloor());
             } catch (Exception e) {
                 throw new KnowledgeUnavailableException(Reason.SEARCH_FAILED,
                         "知识库检索失败：" + rootMessage(e), e);
             }
+            dense = result.docs();
+            denseRows = result.rowsFetched();
+            droppedByThreshold = result.droppedByThreshold();
         } else {
             SearchDocumentDto searchDto = SearchDocumentDto.builder()
                     .queryEmbedding(queryEmbedding)
                     .limit(candidates)
-                    .scoreThreshold(props.scoreThreshold)
+                    .scoreThreshold(th.recallFloor())
                     .build();
             List<Document> hits;
             try {
@@ -332,22 +404,28 @@ public class KnowledgeService {
                         "知识库检索失败：" + rootMessage(e), e);
             }
             dense = hits == null ? List.of() : hits;
+            // SDK 只返回筛过的列表，被切掉多少无从得知：这里填 0 表示「不知道」，
+            // 空返回原因因此会落到 NO_CANDIDATE 而不是 BELOW_RECALL_FLOOR。
+            // 这是应急回滚路径（sql-permission-filter-enabled=false）才有的精度损失。
+            denseRows = dense.size();
+            droppedByThreshold = 0;
         }
 
         if (hybrid.enabled) {
-            return hybridOutcome(query, scenario, who, limit, traceId, dense, denseFiltered);
+            return hybridOutcome(query, scenario, who, limit, traceId, dense, denseFiltered,
+                    denseRows, droppedByThreshold);
         }
 
         // 关闭态：rerank 也关闭时与阶段 4 逐字一致（含空结果提前返回与日志字段），
         // 保证「零回归」可验证；rerank 打开时这里多一道精排，其余不变。
         if (dense.isEmpty()) {
-            return new Outcome(List.of(), 0, 0, List.of());
+            return new Outcome(List.of(), denseRows, 0, droppedByThreshold);
         }
         List<Document> visible = denseFiltered ? dense : applyPermissionFilter(dense, who);
         List<Document> result = rerankOrHead(query, visible, limit, traceId);
         log.info("[rag] traceId={}, scenario={}, hits={}, visible={}, returned={}, topK={}",
                 traceId, scenario, dense.size(), visible.size(), result.size(), limit);
-        return new Outcome(result, dense.size(), visible.size(), toHits(result));
+        return new Outcome(result, denseRows, visible.size(), droppedByThreshold);
     }
 
     /**
@@ -360,11 +438,13 @@ public class KnowledgeService {
      *   <li>关键词路抛异常时<b>降级为 dense-only 并打 warn</b>，不打死原本可用的检索；
      *       降级痕迹同时出现在日志里，避免重演阶段 1 之前的静默失败；</li>
      *   <li>融合后 {@code Document.getScore()} 的语义从余弦相似度变成无量纲 RRF 分，
-     *       留痕表结构与列不变，口径见 {@code docs/rag-hybrid-phase5-design.md}。</li>
+     *       这是第三种量纲，不能和 0.4 那把余弦尺子比；阶段 5 起留痕多记 {@code mode}，
+     *       就是为了让「这一次用的是哪把尺子」可查。</li>
      * </ol>
      */
     private Outcome hybridOutcome(String query, Scenario scenario, AiCaller who, int limit,
-                                  String traceId, List<Document> denseHits, boolean denseFiltered) {
+                                  String traceId, List<Document> denseHits, boolean denseFiltered,
+                                  int denseRows, int droppedByThreshold) {
         // 阶段 6 打开时 dense 已在 SQL 内裁过，这里再筛一次即可（幂等，成本是一条轻量 SQL）；
         // 关闭时维持阶段 5 的原有行为，逐字不变。
         List<Document> denseVisible = denseFiltered ? denseHits : applyPermissionFilter(denseHits, who);
@@ -392,8 +472,8 @@ public class KnowledgeService {
                 traceId, scenario, denseHits.size(), denseVisible.size(),
                 sparseHits.size(), sparseVisible.size(), fused.size(), result.size(), limit,
                 hybrid.denseWeight, hybrid.sparseWeight);
-        return new Outcome(result, denseHits.size() + sparseHits.size(),
-                denseVisible.size() + sparseVisible.size(), toHits(result));
+        return new Outcome(result, denseRows + sparseHits.size(),
+                denseVisible.size() + sparseVisible.size(), droppedByThreshold);
     }
 
     /**
@@ -466,8 +546,15 @@ public class KnowledgeService {
         };
     }
 
-    private record Outcome(List<Document> docs, int hits, int visible,
-                           List<RagTrace.Hit> hitDetails) {}
+    /**
+     * 一次检索的三段计数。
+     *
+     * @param docs               最终返回的段落
+     * @param hits               门槛之前取回的候选总数（向量路原始行数 + 关键词路条数）
+     * @param visible            权限过滤后仍可见的条数
+     * @param droppedByThreshold 被向量路召回路底线切掉的行数；0 同时表示「没切」与「SDK 路径不知道」
+     */
+    private record Outcome(List<Document> docs, int hits, int visible, int droppedByThreshold) {}
 
     private static String rootMessage(Throwable e) {
         Throwable cur = e;

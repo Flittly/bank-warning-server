@@ -4,6 +4,7 @@ import com.yangtze.bankwarning.ai.context.AiCaller;
 import com.yangtze.bankwarning.ai.service.KnowledgeService;
 import com.yangtze.bankwarning.ai.service.KnowledgeUnavailableException;
 import com.yangtze.bankwarning.ai.service.SourceCitation;
+import com.yangtze.bankwarning.ai.store.RagEmptyReason;
 import io.agentscope.core.rag.model.Document;
 import io.agentscope.core.tool.Tool;
 import io.agentscope.core.tool.ToolParam;
@@ -34,11 +35,17 @@ public class KnowledgeQueryTool {
             AiCaller caller) {
         log.info("[tool] querying knowledge: {}", query);
         try {
-            List<Document> docs = knowledgeService.retrieve(query, KnowledgeService.Scenario.TOOL, caller);
-            if (docs.isEmpty()) {
-                return "未找到与「" + query + "」相关的知识。请如实告知用户知识库中没有该问题的依据，"
-                        + "不要用常识代替规范条文，也不要把近似内容说成依据。";
+            // 阶段 5：拿「空返回原因」。只说「没找到」会把「被门槛切了」和「库里没有」
+            // 说成同一句话，而这两种情况用户该做的事完全不同（换个问法 vs 补资料）。
+            KnowledgeService.RetrieveResult result = knowledgeService.retrieveDetailed(
+                    query, KnowledgeService.Scenario.TOOL, caller, null, null);
+            if (result.isEmpty()) {
+                String why = RagEmptyReason.messageOf(result.emptyReason());
+                String detail = why.isBlank() ? "" : "（" + why + "）";
+                return "未找到与「" + query + "」相关的知识" + detail + "。请如实告知用户知识库中"
+                        + "没有该问题的依据，不要用常识代替规范条文，也不要把近似内容说成依据。";
             }
+            List<Document> docs = result.docs();
             // 阶段 4：编号 + 来源 + 契约三件套。只给正文，模型既说不出出处，也无从判断
             // 「这条到底是不是用户问的那份文件」。
             return SourceCitation.render(docs) + SourceCitation.RULE;

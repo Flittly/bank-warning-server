@@ -5,7 +5,9 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.yangtze.bankwarning.ai.config.ChineseKeywordProperties;
 import com.yangtze.bankwarning.ai.config.EmbeddingBatchProperties;
 import com.yangtze.bankwarning.ai.config.HybridRagProperties;
+import com.yangtze.bankwarning.ai.config.QueryRewriteProperties;
 import com.yangtze.bankwarning.ai.config.RagProperties;
+import com.yangtze.bankwarning.ai.config.RagThresholdProperties;
 import com.yangtze.bankwarning.ai.config.RerankProperties;
 import com.yangtze.bankwarning.ai.context.AiCaller;
 import com.yangtze.bankwarning.ai.service.BatchEmbeddingClient;
@@ -61,6 +63,11 @@ import java.util.Map;
  * <b>阶段 3（进阶）</b>：加 {@code --no-chinese} 关掉 jieba 词项，让 sparse 路退回阶段 5
  * 的纯 ASCII 锚点行为，与默认开启形成「中文词项带来多少增益」的 A/B。
  * 该开关只影响混合检索打开时的第二路，不加 {@code --hybrid} 时两者结果逐字相同。
+ * <b>阶段 5</b>：三把尺子可分别覆盖，用于阈值对照——
+ * {@code --score-threshold}（纯向量档最终门槛，默认 0.4）、
+ * {@code --recall-floor}（混合/精排档向量路召回底线，默认 0.0）、
+ * {@code --rerank-threshold}（精排最终门槛，默认 0.0）；
+ * 加 {@code --rewrite} 则打开归一化与领域同义词扩展（只作用于关键词路）。
  * 报告默认落到 {@code reports/rag-eval-<时间戳>.md}。
  */
 public final class RagEvalCli {
@@ -206,8 +213,16 @@ public final class RagEvalCli {
         DriverManagerDataSource ds = new DriverManagerDataSource(url, user, password);
         JdbcTemplate jdbcTemplate = new JdbcTemplate(ds);
         // 与线上默认一致，但关掉留痕：评测不该往生产表里写观测数据。
+        // 阶段 5：三把尺子都可从命令行覆盖，用来做阈值三档对照——
+        //   --score-threshold  纯向量档的最终门槛（默认 0.4，与历史基线逐字一致）
+        //   --recall-floor     混合/精排档的向量路召回底线（默认 0.0）
+        //   --rerank-threshold 精排最终门槛（默认 0，先用分布标定再给值）
+        double scoreThreshold = doubleOpt(opts, "score-threshold", 0.4);
+        double recallFloor = doubleOpt(opts, "recall-floor", 0.0);
+        double rerankThreshold = doubleOpt(opts, "rerank-threshold", 0.0);
         RagProperties props = new RagProperties(
-                true, true, true, false, 5, 5, 5, 0.4, 5, 15_000L, 600_000L);
+                true, true, true, false, 5, 5, 5, scoreThreshold, 5, 15_000L, 600_000L);
+        RagThresholdProperties thresholdProps = new RagThresholdProperties(recallFloor);
         // 阶段 5：--hybrid 打开第二路；不加该参数即「关闭态」，与 4A 基线口径一致。
         // 阶段 8：--hybrid 可与 --rrf-dense-weight / --rrf-sparse-weight / --candidate-pool
         // 组合，用来做融合策略的格点对照（等权 vs 加权 vs 纯向量）。
@@ -219,7 +234,8 @@ public final class RagEvalCli {
                 : HybridRagProperties.disabled();
         // 阶段 8：--rerank 打开精排。未加则与阶段 7 逐字一致。
         RerankClient rerank = opts.containsKey("rerank")
-                ? RerankClient.dashscope(key, RerankProperties.enabledWithDefaults())
+                ? RerankClient.dashscope(key, new RerankProperties(
+                        true, "gte-rerank-v2", 30, rerankThreshold, "", 3000))
                 : RerankClient.disabled(RerankProperties.disabled());
         KnowledgeService service = new KnowledgeService(
                 DashScopeTextEmbedding.builder()
@@ -240,7 +256,11 @@ public final class RagEvalCli {
                 // 用于「中文词项到底带来多少增益」的 A/B。不加则默认开启。
                 opts.containsKey("no-chinese")
                         ? ChineseKeywordProperties.disabled()
-                        : ChineseKeywordProperties.enabledDefaults());
+                        : ChineseKeywordProperties.enabledDefaults(),
+                thresholdProps,
+                opts.containsKey("rewrite")
+                        ? QueryRewriteProperties.enabledDefaults()
+                        : QueryRewriteProperties.disabled());
 
         // 真库路径覆盖 fetchScored()：把 Document.getScore() 一并带进报告，
         // 这样「该拒答的题」才能看到它到底拿了多高的相似度，而不是只有 0/1 的空/非空。
@@ -285,7 +305,7 @@ public final class RagEvalCli {
      * 只认环境变量，换一个 shell 就跑不了，破坏了「重跑结果是否一致」这一评测前提。
      * key 绝不写入报告、命令行参数或日志；{@code ${...}} 占位符不算有效值。
      */
-    private static String resolveDashScopeKey(Map<String, String> opts) throws IOException {
+    static String resolveDashScopeKey(Map<String, String> opts) throws IOException {
         String fromEnv = System.getenv("DASHSCOPE_API_KEY");
         if (fromEnv != null && !fromEnv.isBlank()) {
             return fromEnv.trim();
@@ -330,7 +350,7 @@ public final class RagEvalCli {
     private record RetrievalSource(String name, RagRetrievalEvaluator.RetrievalFn fn) {
     }
 
-    private static Map<String, String> parse(String[] args) {        Map<String, String> opts = new LinkedHashMap<>();
+    static Map<String, String> parse(String[] args) {        Map<String, String> opts = new LinkedHashMap<>();
         for (int i = 0; i < args.length; i++) {
             String a = args[i];
             if (!a.startsWith("--")) {

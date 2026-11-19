@@ -29,8 +29,9 @@ public class JdbcRagTraceStore {
     private static final String INSERT_SQL = """
             INSERT INTO ai_rag_traces
                 (trace_id, scenario, query_text, user_id, top_k, score_threshold,
-                 hits, visible, returned, hits_json, status, degrade_reason, elapsed_ms)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 hits, visible, returned, hits_json, status, degrade_reason, elapsed_ms,
+                 mode, empty_reason)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """;
 
     private final JdbcTemplate jdbcTemplate;
@@ -60,8 +61,18 @@ public class JdbcRagTraceStore {
                         status           VARCHAR(24)  NOT NULL,
                         degrade_reason   TEXT,
                         elapsed_ms       BIGINT       NOT NULL DEFAULT 0,
-                        created_at       TIMESTAMP    NOT NULL DEFAULT CURRENT_TIMESTAMP
+                        created_at       TIMESTAMP    NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                        mode             VARCHAR(24),
+                        empty_reason     VARCHAR(32)
                     )""");
+            // 【阶段 5 的关键一步】上面的 CREATE TABLE IF NOT EXISTS 只对「表不存在」生效，
+            // 表已经存在时它<b>整条语句被跳过</b>，新列不会补上——接着 INSERT 15 个值就会
+            // 报 column "mode" does not exist，而 record() 把这个异常吞成一条 warn，
+            // 于是表现是「表在、开关开着、就是永远 0 行」。这类静默失败只能靠显式 ALTER 兜住。
+            jdbcTemplate.execute(
+                    "ALTER TABLE ai_rag_traces ADD COLUMN IF NOT EXISTS mode VARCHAR(24)");
+            jdbcTemplate.execute(
+                    "ALTER TABLE ai_rag_traces ADD COLUMN IF NOT EXISTS empty_reason VARCHAR(32)");
             jdbcTemplate.execute(
                     "CREATE INDEX IF NOT EXISTS idx_ai_rag_traces_trace_id ON ai_rag_traces(trace_id)");
             jdbcTemplate.execute(
@@ -119,10 +130,34 @@ public class JdbcRagTraceStore {
                     trace.hitsJson(),
                     trace.status(),
                     trace.degradeReason(),
-                    trace.elapsedMs());
+                    trace.elapsedMs(),
+                    trace.mode(),
+                    trace.emptyReason());
         } catch (Exception e) {
             log.warn("[rag] 写检索留痕失败（不影响本次检索）: traceId={}, err={}",
                     trace.traceId(), e.getMessage());
+        }
+    }
+
+    /**
+     * 留痕表的体检结果，供启动自检打印。任何异常都返回 {@code rows=-1}：
+     * 「查不到行数」和「表里是 0 行」是两件事，启动日志里必须能区分。
+     */
+    public record TableStat(long rows, String lastWriteAt) {
+        public boolean readable() {
+            return rows >= 0;
+        }
+    }
+
+    public TableStat stat() {
+        try {
+            Long rows = jdbcTemplate.queryForObject("SELECT count(*) FROM ai_rag_traces", Long.class);
+            String last = jdbcTemplate.queryForObject(
+                    "SELECT max(created_at)::text FROM ai_rag_traces", String.class);
+            return new TableStat(rows == null ? 0 : rows, last);
+        } catch (Exception e) {
+            log.warn("[rag] 读取留痕表统计失败: {}", e.getMessage());
+            return new TableStat(-1, null);
         }
     }
 }

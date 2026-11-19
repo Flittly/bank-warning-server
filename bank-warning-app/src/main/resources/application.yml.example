@@ -152,7 +152,7 @@ app:
     # 主要开关：RAG_ENABLED / RAG_PERMISSION_FILTER / RAG_PUBLIC_KNOWLEDGE / RAG_TRACE_ENABLED /
     #          RAG_CHAT_TOP_K / RAG_TOOL_TOP_K / RAG_SEARCH_TOP_K /
     #          RAG_SCORE_THRESHOLD / RAG_RETRIEVE_TIMEOUT_MS / RAG_SSE_TIMEOUT_MS /
-    #          RAG_HYBRID_ENABLED（阶段 5，默认 false）
+    #          RAG_HYBRID_ENABLED / RAG_RERANK_ENABLED / RAG_RECALL_FLOOR（阶段 5，默认均开启）
     rag:
       enabled: ${RAG_ENABLED:true}
       permission-filter-enabled: ${RAG_PERMISSION_FILTER:true}
@@ -161,19 +161,29 @@ app:
       chat-top-k: ${RAG_CHAT_TOP_K:3}
       tool-top-k: ${RAG_TOOL_TOP_K:5}
       search-top-k: ${RAG_SEARCH_TOP_K:5}
+      # 纯向量档的最终门槛；混合/精排档下改由 recall-floor + 精排门槛接管（见 RagThresholdPolicy）。
       score-threshold: ${RAG_SCORE_THRESHOLD:0.4}
       candidate-expansion: ${RAG_CANDIDATE_EXPANSION:5}
       retrieve-timeout-ms: ${RAG_RETRIEVE_TIMEOUT_MS:15000}
       sse-timeout-ms: ${RAG_SSE_TIMEOUT_MS:600000}
-      # 阶段 5 混合检索（dense 向量 + sparse 关键词 → RRF）。默认关闭：
-      # 关闭时 doRetrieve 执行路径与阶段 4 完全一致，第二路 SQL 一条都不发。
-      # 打开前需要：① 手动执行 migration/V17__rag_hybrid_content_trgm.sql；
-      #            ② 知识库已有足够多的不同 doc_id（只有一篇时两路只能召回同一份，
-      #               融合结果与 dense-only 无差别，测不出收益）；
-      #            ③ 用 RagEvalCli --jdbc 跑过 off / --hybrid 的对照报告。
-      # 说明：sparse 只抓 ASCII 标识符与数字（Zb / PL / 20 / 13.5 这类），
-      #      提不出锚点时自动退回 dense-only，纯中文语义问题不受影响。
-      hybrid-enabled: ${RAG_HYBRID_ENABLED:false}
+      # 阶段 5：混合/精排档下向量路的「召回底线」。0 = 不设底线，只受候选条数限制。
+      # 为什么不再用 0.4：那个数是「最终答案合不合格」的标准，被用在粗筛上会切掉真答案
+      # （实测有真答案落在 0.3953，还没进融合就被淘汰）。粗筛的职责是「别漏」，不是「别错」。
+      recall-floor: ${RAG_RECALL_FLOOR:0.0}
+      # 阶段 5：查询改写（全角/罗马数字归一化 + 领域同义词，仅作用于关键词路）。默认关闭。
+      # 词表在 QueryReformulator，只收本项目语料里核对过的对应关系（Zb=滩槽高差 等），
+      # 不做通用同义词库。开不开由 SparseOnlyEvalCli --rewrite 的 Recall/MRR 对照决定
+      # （门槛：Recall@5 +2pp 且没有任何一题从命中退化为空），不凭感觉开。
+      rewrite-enabled: ${RAG_REWRITE_ENABLED:false}
+      rewrite-max-extra-terms: ${RAG_REWRITE_MAX_EXTRA_TERMS:6}
+      # 阶段 5 混合检索（dense 向量 + sparse 关键词 → RRF）。默认开启。
+      # 依据：同一份 52 题考卷、topK=5，dense 0.6842/0.5570/0.5899 →
+      #      hybrid 0.7895/0.5921/0.6432 → hybrid+rerank 0.8421/0.7368/0.7644
+      #      （Recall@5 / MRR / nDCG@5，见 reports/rag-eval-p4-hybridrerank.md）。
+      # 打开前提：① 手动执行 migration/V19__rag_chinese_search_text.sql 并跑过 SearchTextBackfillCli；
+      #          ② 知识库有多个不同 doc_id（只有一篇时两路只能召回同一份，融合无差别）。
+      # 回滚：改 false 即退回纯向量档，此时 score-threshold 重新成为最终门槛。
+      hybrid-enabled: ${RAG_HYBRID_ENABLED:true}
       hybrid-sparse-top-k: ${RAG_HYBRID_SPARSE_TOP_K:20}
       hybrid-rrf-k: ${RAG_HYBRID_RRF_K:60}
       hybrid-max-anchors: ${RAG_HYBRID_MAX_ANCHORS:8}
@@ -183,9 +193,9 @@ app:
       # 不要凭感觉设。sparse-weight=0 等价于关闭关键词路。
       hybrid-dense-weight: ${RAG_HYBRID_DENSE_WEIGHT:1.0}
       hybrid-sparse-weight: ${RAG_HYBRID_SPARSE_WEIGHT:1.0}
-      # 融合前的候选池。0 = 沿用 limit × candidate-expansion 的旧逻辑（行为不变）。
-      # 配正数才会抬高粗召回量，让 RRF 与 rerank 有足够候选可比较；上限 100，配大了自动夹。
-      hybrid-candidate-pool: ${RAG_HYBRID_CANDIDATE_POOL:0}
+      # 融合前的候选池。0 = 沿用 limit × candidate-expansion 的旧逻辑。
+      # 默认 30：与精排池对齐，让 RRF 与 rerank 两边看到同一批候选；上限 100，配大了自动夹。
+      hybrid-candidate-pool: ${RAG_HYBRID_CANDIDATE_POOL:30}
       # 阶段 3：中文关键词路（jieba 分词 + search_text 上的 tsvector 倒排索引）。
       # 只作用于混合检索的第二路，sparse 结果按 ts_rank_cd 排序后交给 RRF。
       # 打开 hybrid-enabled 之前必须先执行 migration/V19__rag_chinese_search_text.sql
@@ -229,18 +239,24 @@ app:
       #      需生成层评估才能验证，在验证手段到位前不预付双倍成本。
       # 注意：改动本值属于「切分口径变更」，新段与旧段不可直接比较，需重灌已有文档。
       chunk-overlap: ${RAG_CHUNK_OVERLAP:50}
-      # 阶段 8：rerank 二阶段精排（DashScope gte-rerank-v2）。默认关闭。
-      # 关闭时检索路径一行都不多走，结果与阶段 7 逐字一致。
+      # 阶段 8：rerank 二阶段精排（DashScope gte-rerank-v2）。默认开启（阶段 5 合闸）。
+      # 关闭时检索路径一行都不多走，结果退回阶段 7 的粗排顺序（应急回滚）。
       # 打开后：粗召回取 rerank-candidate-pool 条 → cross-encoder 逐对打分 → 截到 topK。
       # 代价是每次检索多一次外部往返（典型 100~300ms）与按量计费，所以候选池别开太大。
       # 安全：rerank 会把候选正文发给外部服务，因此它必须发生在权限过滤之后——
       #      代码里固定在 applyPermissionFilter / SQL 内过滤之后调用，不要往前挪。
       # rerank-score-threshold 默认 0（不过滤）：rerank 分数的分布要先用评测标定，
       # 没标定就给阈值等于凭空造一个不可解释的口径。标定后再配。
-      rerank-enabled: ${RAG_RERANK_ENABLED:false}
+      # rerank-timeout-ms 必须有值：精排是同步调用，retrieve-timeout-ms 包不住它，
+      # 没有超时就是「一次外部抖动 = 一次全站卡死」。
+      rerank-enabled: ${RAG_RERANK_ENABLED:true}
       rerank-model: ${RAG_RERANK_MODEL:gte-rerank-v2}
       rerank-candidate-pool: ${RAG_RERANK_CANDIDATE_POOL:30}
-      rerank-score-threshold: ${RAG_RERANK_SCORE_THRESHOLD:0.0}
+      # 0.15 是标定值：真离题题精排 top1 = 0.1434 / 0.0061，命中题最低 top1 = 0.1583，
+      # 门槛取两者之间。实测 Recall 不变（0.8421），Precision 0.4890→0.5197，拒答通过率 0→0.5；
+      # 抬到 0.20 会切掉真答案（Recall 0.8421→0.5263）。换语料需重新标定。
+      rerank-score-threshold: ${RAG_RERANK_SCORE_THRESHOLD:0.15}
+      rerank-timeout-ms: ${RAG_RERANK_TIMEOUT_MS:3000}
       # 报告轨 RAG：Step 6 撰写前固定预检索一次，把命中的口径作为提示词的一段输入。
       # 默认关闭 —— 库里目前只有 4 段 BMS.docx（内部算法说明，不是判定标准），
       # 打开会把不可信文本注入正式交付物。阶段 3 灌入可信冻结口径后再置 true。

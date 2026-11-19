@@ -55,4 +55,48 @@ class JdbcRagTraceStoreTest {
         assertTrue(parsed instanceof List);
         assertTrue(json.contains("a\\\"b"));
     }
+
+    @Test
+    @DisplayName("阶段 5：档位与空返回原因必须真的写进参数列表（不是加在对象里就算了）")
+    void modeAndEmptyReasonArePersisted() {
+        JdbcTemplate jdbc = mock(JdbcTemplate.class);
+        RagTrace trace = RagTrace.success("t-3", "CHAT", "离题的问题", 3L, 3, 0.0,
+                0, 0, List.of(), 5L, "hybrid+rerank",
+                RagEmptyReason.BELOW_FINAL_FLOOR.code());
+
+        new JdbcRagTraceStore(jdbc, withTrace(true)).record(trace);
+
+        org.mockito.ArgumentCaptor<Object[]> args =
+                org.mockito.ArgumentCaptor.forClass(Object[].class);
+        verify(jdbc).update(anyString(), args.capture());
+        Object[] bound = args.getValue();
+        assertEquals(15, bound.length, "列数改了却漏改 INSERT 是最常见的静默失败");
+        assertEquals("hybrid+rerank", bound[13]);
+        assertEquals("BELOW_FINAL_FLOOR", bound[14]);
+    }
+
+    @Test
+    @DisplayName("阶段 5：自举建表必须补 ALTER——CREATE TABLE IF NOT EXISTS 不会给老表加列")
+    void bootstrapAltersExistingTable() {
+        JdbcTemplate jdbc = mock(JdbcTemplate.class);
+
+        new JdbcRagTraceStore(jdbc, withTrace(true)).init();
+
+        org.mockito.ArgumentCaptor<String> sql = org.mockito.ArgumentCaptor.forClass(String.class);
+        verify(jdbc, atLeast(3)).execute(sql.capture());
+        String all = String.join("\n", sql.getAllValues());
+        assertTrue(all.contains("ADD COLUMN IF NOT EXISTS mode"),
+                "表已存在时 CREATE TABLE 整条被跳过，不加 ALTER 就永远缺列：" + all);
+        assertTrue(all.contains("ADD COLUMN IF NOT EXISTS empty_reason"), all);
+    }
+
+    @Test
+    @DisplayName("空返回原因有四种，各自对用户说的话不同；未知值不抛异常")
+    void emptyReasonMessagesAreDistinct() {
+        long distinct = java.util.Arrays.stream(RagEmptyReason.values())
+                .map(RagEmptyReason::message).distinct().count();
+        assertEquals(RagEmptyReason.values().length, distinct, "四种原因不能共用一句话");
+        assertEquals("", RagEmptyReason.messageOf(null));
+        assertEquals("", RagEmptyReason.messageOf("SOMETHING_ELSE"));
+    }
 }
