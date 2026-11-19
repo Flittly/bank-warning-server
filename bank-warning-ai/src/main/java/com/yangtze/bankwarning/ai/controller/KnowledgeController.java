@@ -6,6 +6,7 @@ import com.yangtze.bankwarning.ai.context.AiCaller;
 import com.yangtze.bankwarning.ai.service.KnowledgeService;
 import com.yangtze.bankwarning.ai.service.KnowledgeUnavailableException;
 import com.yangtze.bankwarning.ai.service.PdfService;
+import com.yangtze.bankwarning.ai.service.SourceCitation;
 import com.yangtze.bankwarning.security.security.SecurityUtils;
 import io.agentscope.core.message.TextBlock;
 import io.agentscope.core.rag.model.Document;
@@ -398,11 +399,18 @@ public class KnowledgeController {
      * 「这条没有分数」。前者是向量路真算了分，后者是关键词命中，显示成相似度就是误导。
      */
     static Map<String, Object> toHitMap(Document doc) {
-        Map<String, Object> hit = new LinkedHashMap<>(4);
+        Map<String, Object> hit = new LinkedHashMap<>(7);
         hit.put("content", doc.getMetadata().getContent().toString());
         hit.put("score", doc.getScore());
         hit.put("scored", doc.getScore() != null);
         hit.put("docId", doc.getMetadata().getDocId());
+        // 阶段 4：搜索面板也要能显示「第 k/n 段」。未知时给 null 而不是 0——
+        // 0 会被前端当成「第一段」，比缺字段更容易误导。
+        int no = SourceCitation.chunkNo(doc);
+        int total = SourceCitation.totalChunks(doc);
+        hit.put("chunkIndex", no < 0 ? null : no);
+        hit.put("totalChunks", total < 0 ? null : total);
+        hit.put("sourceLabel", SourceCitation.label(doc));
         return hit;
     }
 

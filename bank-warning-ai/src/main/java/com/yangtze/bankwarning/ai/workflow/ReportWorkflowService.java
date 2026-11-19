@@ -10,6 +10,7 @@ import com.yangtze.bankwarning.ai.service.KnowledgeService;
 import com.yangtze.bankwarning.ai.service.KnowledgeUnavailableException;
 import com.yangtze.bankwarning.ai.service.MarkdownReportService;
 import com.yangtze.bankwarning.ai.service.PartitionSectionCsvService;
+import com.yangtze.bankwarning.ai.service.SourceCitation;
 import com.yangtze.bankwarning.ai.service.VisualizationService;
 import com.yangtze.bankwarning.ai.store.ReportRunStore;
 import com.yangtze.bankwarning.ai.tool.BoundRiskDistributionTool;
@@ -740,15 +741,19 @@ public class ReportWorkflowService {
             StringBuilder sb = new StringBuilder("以下内容来自平台知识库，按相关度排序：\n");
             for (int i = 0; i < docs.size(); i++) {
                 Document d = docs.get(i);
-                String docId = String.valueOf(d.getMetadata().getDocId());
-                String chunkId = String.valueOf(d.getId());
+                String docId = d.getMetadata().getDocId();
+                String chunkId = d.getMetadata().getChunkId();
+                String sourceLabel = SourceCitation.label(d);
                 String text = String.valueOf(d.getMetadata().getContent());
-                sb.append("[").append(i + 1).append("] 来源 ").append(docId)
-                        .append("/").append(chunkId).append("\n").append(text).append("\n\n");
+                // 阶段 4：来源统一成「文件名 · 第 k/n 段」。原先拼的是内部 chunkId
+                // （形如 3-项目技术报告.docx_chunk_12），人看不懂，模型也无从转述。
+                sb.append("[").append(i + 1).append("] 来源：").append(sourceLabel)
+                        .append("\n").append(text).append("\n\n");
                 // score 可能为 null，不能用 Map.of（会 NPE）。
                 Map<String, Object> hit = new LinkedHashMap<>();
                 hit.put("docId", docId);
                 hit.put("chunkId", chunkId);
+                hit.put("sourceLabel", sourceLabel);
                 hit.put("score", d.getScore() instanceof Number n ? n.doubleValue() : null);
                 snapshot.add(hit);
             }

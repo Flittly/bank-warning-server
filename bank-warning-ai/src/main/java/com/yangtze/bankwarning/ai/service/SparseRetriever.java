@@ -134,11 +134,13 @@ public class SparseRetriever {
             if (chunkId == null || chunkId.isBlank()) {
                 chunkId = rs.getString("id");
             }
-            DocumentMetadata meta = DocumentMetadata.builder()
-                    .content(TextBlock.builder().text(body).build())
-                    .docId(rs.getString("doc_id"))
-                    .chunkId(chunkId)
-                    .build();
+            String docId = rs.getString("doc_id");
+            // 阶段 4：payload 解析失败一律按空 map 处理（SqlPermissionVectorSearch 同口径），
+            // 来源标签会自动降级成「只有文件名」，不会因为脏 JSON 丢掉整条召回结果。
+            Map<String, Object> payload =
+                    SqlPermissionVectorSearch.parsePayload(rs.getString("payload"));
+            DocumentMetadata meta = new DocumentMetadata(
+                    TextBlock.builder().text(body).build(), docId, chunkId, payload);
             return new Document(meta);
         }, args.toArray());
 
@@ -164,8 +166,11 @@ public class SparseRetriever {
         boolean hasTs = tsQuery != null && !tsQuery.isEmpty();
         boolean hasAnchors = anchors != null && !anchors.isEmpty();
 
+        // payload 里带 chunkIndex / totalChunks / fileName，是「第 k/n 段」这类
+        // 可追溯信息的唯一真源（阶段 4）。不取它，关键词路召回的段落在回答里就
+        // 只能显示文件名、显示不出段号，与向量路不一致。
         StringBuilder sql = new StringBuilder(512)
-                .append("SELECT id, doc_id, chunk_id, ").append(TEXT_EXPR).append(" AS body");
+                .append("SELECT id, doc_id, chunk_id, payload, ").append(TEXT_EXPR).append(" AS body");
         if (hasTs) {
             sql.append(", ts_rank_cd(").append(TSV_EXPR)
                     .append(", to_tsquery('simple', ?)) AS rank");

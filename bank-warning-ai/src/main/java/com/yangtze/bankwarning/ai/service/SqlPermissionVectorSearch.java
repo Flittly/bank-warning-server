@@ -204,8 +204,12 @@ public class SqlPermissionVectorSearch {
         return TextBlock.builder().text(raw).build();
     }
 
+    /**
+     * 包级可见：{@link SparseRetriever} 也要解析同一列的 JSON 形状（阶段 4 起，关键词路
+     * 召回的段落同样要能显示「第几段」，否则两路来源信息不一致）。
+     */
     @SuppressWarnings("unchecked")
-    private static Map<String, Object> parsePayload(String raw) {
+    static Map<String, Object> parsePayload(String raw) {
         if (raw == null || raw.isEmpty() || "{}".equals(raw)) {
             return Map.of();
         }

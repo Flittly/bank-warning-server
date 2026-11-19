@@ -104,7 +104,7 @@ class ReportRagIntegrationTest {
         String text = ReportWorkflowService.renderCriteriaContext(state, svc,
                 new ReportRagProperties(true, 3, "崩岸风险等级判定阈值"));
 
-        assertTrue(text.contains("[1] 来源 template.json"));
+        assertTrue(text.contains("[1] 来源：template.json"), text);
         assertTrue(text.contains("Zd 阈值 0.30"));
         assertEquals("report-run-42-step6", state.context.get("criteriaTraceId"));
         assertNotNull(state.context.get("criteriaSnapshot"));
@@ -114,6 +114,30 @@ class ReportRagIntegrationTest {
         assertTrue(json.contains("template.json"));
         assertFalse(state.context.get("criteriaSnapshot") instanceof Document);
         assertTrue(state.context.get("criteriaSnapshot") instanceof List<?>);
+    }
+
+    @Test
+    @DisplayName("命中带 payload：来源显示「第 k/n 段」，内部 chunk_id 不出现在提示词里")
+    void sourceLabelShowsChunkPosition() {
+        KnowledgeService svc = mock(KnowledgeService.class);
+        Document d = new Document(DocumentMetadata.builder()
+                .content(TextBlock.builder().text("崩岸等级判定阈值").build())
+                .docId("template.json")
+                .chunkId("template.json_chunk_4")
+                .addPayload("chunkIndex", "4")
+                .addPayload("totalChunks", "7")
+                .build());
+        when(svc.retrieve(anyString(), eq(KnowledgeService.Scenario.REPORT), any(),
+                eq(3), anyString())).thenReturn(List.of(d));
+        WorkflowState state = new WorkflowState();
+        state.caller = AiCaller.forAdmin();
+
+        String text = ReportWorkflowService.renderCriteriaContext(state, svc,
+                new ReportRagProperties(true, 3, "崩岸风险等级判定阈值"));
+
+        assertTrue(text.contains("[1] 来源：template.json · 第 5/7 段"), text);
+        assertFalse(text.contains("_chunk_4"),
+                "内部 chunk_id 对读者无意义，不该出现在给模型/报告的正文里");
     }
 
     @Test

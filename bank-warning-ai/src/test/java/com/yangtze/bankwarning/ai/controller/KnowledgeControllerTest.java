@@ -87,10 +87,21 @@ class KnowledgeControllerTest {
     }
 
     @Test
-    @DisplayName("字段顺序稳定：content / score / scored / docId")
+    @DisplayName("字段顺序稳定：content / score / scored / docId / 来源三元组")
     void hitMapKeepsFieldOrder() {
         Map<String, Object> hit = KnowledgeController.toHitMap(doc("BMS.docx", "text", null));
 
-        assertEquals(List.of("content", "score", "scored", "docId"), List.copyOf(hit.keySet()));
+        assertEquals(List.of("content", "score", "scored", "docId",
+                "chunkIndex", "totalChunks", "sourceLabel"), List.copyOf(hit.keySet()));
+    }
+
+    @Test
+    @DisplayName("来源位置未知时给 null 而不是 0——0 会被前端当成「第一段」")
+    void unknownChunkPositionIsNull() {
+        Map<String, Object> hit = KnowledgeController.toHitMap(doc("BMS.docx", "text", null));
+
+        assertNull(hit.get("chunkIndex"));
+        assertNull(hit.get("totalChunks"));
+        assertEquals("BMS.docx", hit.get("sourceLabel"));
     }
 }

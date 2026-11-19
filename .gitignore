@@ -56,5 +56,7 @@ visualization/output
 
 # 运行产物目录（出图、导出等随时可重建）不入库；
 # 只放行离线评测报告，它们是检索质量的基线证据，需要随代码一起被 review。
+# self-check 用的是固定 fixture，数字无意义，只用于验证 runner 能跑通。
 /reports/*
 !/reports/rag-eval-*.md
+/reports/rag-eval-selfcheck.md

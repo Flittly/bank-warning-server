@@ -7,6 +7,7 @@ import com.yangtze.bankwarning.ai.security.SkillPathGuard;
 import com.yangtze.bankwarning.ai.service.KnowledgeService;
 import com.yangtze.bankwarning.ai.service.KnowledgeUnavailableException;
 import com.yangtze.bankwarning.ai.service.ModelService;
+import com.yangtze.bankwarning.ai.service.SourceCitation;
 import com.yangtze.bankwarning.ai.service.TaskContextService;
 import com.yangtze.bankwarning.ai.workflow.PlanProgress;
 import com.yangtze.bankwarning.ai.workflow.ReportWorkflowService;
@@ -237,10 +238,10 @@ public class AgentController {
                     question, KnowledgeService.Scenario.CHAT, caller, null, sessionId);
             if (!docs.isEmpty()) {
                 prompt.append("以下是与用户问题相关的专业知识（系统自动检索，已为你准备好）：\n");
-                for (Document doc : docs) {
-                    prompt.append("- ").append(doc.getMetadata().getContent()).append("\n");
-                }
-                prompt.append("\n");
+                // 阶段 4：带编号与来源。chat 轨的检索在服务端一次性完成，模型若不拿到
+                // 文件名与段号，回答里就只能说「根据相关资料」，用户无法回查。
+                prompt.append(SourceCitation.render(docs));
+                prompt.append(SourceCitation.RULE).append('\n');
             }
         } catch (KnowledgeUnavailableException e) {
             // 阶段 1：不再静默跳过。把原因写进 prompt，模型会明确告知用户无法查证，
