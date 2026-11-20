@@ -22,6 +22,25 @@ public class ModelGatewayService {
     private static final ParameterizedTypeReference<Map<String, Object>> MAP_TYPE = new ParameterizedTypeReference<Map<String, Object>>() {
     };
 
+    /** 轮询间隔硬下限：再快就会让 /v0/mc/status 变成高频空转，且无额外收益。 */
+    static final long MIN_POLL_INTERVAL_MS = 50L;
+    /** 轮询间隔硬上限：再慢就退化回旧的 1s 粒度，结果早就写好却要等下一趟才看见。 */
+    static final long MAX_POLL_INTERVAL_MS = 2000L;
+
+    /**
+     * 把配置值钳制到可用区间。包可见是为了让守门测试能直接验证边界，
+     * 不必启动 Spring 上下文或真的去 sleep。
+     */
+    static long resolvePollIntervalMillis(long configured) {
+        if (configured < MIN_POLL_INTERVAL_MS) {
+            return MIN_POLL_INTERVAL_MS;
+        }
+        if (configured > MAX_POLL_INTERVAL_MS) {
+            return MAX_POLL_INTERVAL_MS;
+        }
+        return configured;
+    }
+
     private final RestClient modelRestClient;
     private final ModelServiceProperties properties;
     private final ModelParameterService parameterService;
@@ -118,6 +137,13 @@ public class ModelGatewayService {
 
         Duration timeout = resolveTimeout(timeoutSeconds);
         long deadline = System.currentTimeMillis() + timeout.toMillis();
+        // 提交接口是异步的：这里手里只有 case-id，模型算完不会主动通知，只能轮询
+        // /v0/mc/status。间隔由配置给出（默认 200ms，见 ModelServiceProperties）。
+        // 注意：case 已 COMPLETE/ERROR 的缓存命中路径，第一次查询就直接 return，
+        // 下面这行 sleep 根本执行不到。
+        long pollIntervalMs = resolvePollIntervalMillis(properties.getPollIntervalMs());
+        log.debug("[model-poll] waiting for caseId={}, intervalMs={}, timeoutMs={}",
+                caseId, pollIntervalMs, timeout.toMillis());
 
         while (System.currentTimeMillis() < deadline) {
             Map<String, Object> status = modelRestClient.get()
@@ -146,8 +172,14 @@ public class ModelGatewayService {
                 throw new IllegalStateException(buildDetailedModelError(error));
             }
 
+            // 只睡到 deadline 为止：否则最后一次 sleep 可能把一个「其实马上就好」
+            // 的 case 推过期限，误报成超时。
+            long remaining = deadline - System.currentTimeMillis();
+            if (remaining <= 0) {
+                break;
+            }
             try {
-                Thread.sleep(1000L);
+                Thread.sleep(Math.min(pollIntervalMs, remaining));
             } catch (InterruptedException exception) {
                 Thread.currentThread().interrupt();
                 throw new IllegalStateException("Interrupted while waiting for model result", exception);
