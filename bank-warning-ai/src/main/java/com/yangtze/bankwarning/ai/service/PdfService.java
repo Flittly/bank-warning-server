@@ -54,16 +54,14 @@ public class PdfService {
     private String doclingArtifactsPath;
 
     /**
-     * 单次 PDF 提取的超时（秒）；{@code <=0} 表示沿用沙箱档位。
+     * 单次 PDF 提取的超时下限（秒）；{@code <=0} 表示不单独抬升、以安全档位为准。
      *
      * <p>docling 冷启动要加载版面与表格模型，首次转换远超 pypdf 的毫秒级；
      * 档位超时（120s）对它不够，因此给 PDF 这一路单独留了覆盖值，不影响 word 等其它 skill。
+     * 实际超时还会按页数上浮，见 {@link PdfPageEstimator}。
      */
     @Value("${app.ai.pdf.timeout-seconds:0}")
     private int pdfTimeoutSeconds;
-
-    /** 覆盖值的合理上限：再长就该去查是不是卡死，而不是继续等。 */
-    private static final int MAX_PDF_TIMEOUT_SECONDS = 900;
 
     private final PythonImportScanner importScanner;
     private final SkillSandboxExecutor sandboxExecutor;
@@ -155,6 +153,28 @@ public class PdfService {
         try {
             Path pdfAbs = pdfFile.toAbsolutePath();
 
+            // 超时按页数算：固定值对「几页电子版」富余、对「几十页扫描件」必定不够，
+            // 而超时的后果是回落 pypdf（表格拍平、层级全丢）——所以宁可多等，
+            // 也不要让一份 30 页的扫描件在 300 秒时被强杀。
+            // 只有 .pdf 才估页：docx 这条路几毫秒就结束，按页算没有意义。
+            // 档位值参与取大：配置留空时不能让按页算出的预算反而低于档位。
+            boolean isPdf = pdfAbs.getFileName().toString().toLowerCase(Locale.ROOT).endsWith(".pdf");
+            int pages = isPdf ? PdfPageEstimator.estimate(pdfAbs) : -1;
+            int timeoutSeconds = PdfPageEstimator.budgetSeconds(
+                    Math.max(pdfTimeoutSeconds, settings.sandboxTimeoutSeconds()), pages);
+            if (isPdf) {
+                log.info("[pdf] 页数估算 pages={} 超时预算={}s（配置 {}s / 档位 {}s），file={}",
+                        pages > 0 ? pages : "未知", timeoutSeconds,
+                        pdfTimeoutSeconds, settings.sandboxTimeoutSeconds(), pdfAbs.getFileName());
+                if (PdfPageEstimator.exceedsLimit(pages)) {
+                    // 提前说清楚：否则只能等满上限、看到一行 success=false 才反应过来
+                    log.warn("[pdf] 该文件估 {} 页，按扫描件速率约需 {}s，已超过单次上限 {}s，"
+                                    + "很可能超时后回落 pypdf；建议拆分上传: {}",
+                            pages, PdfPageEstimator.expectedSeconds(pages),
+                            SkillSandboxExecutor.MAX_TIMEOUT_OVERRIDE_SECONDS, pdfAbs.getFileName());
+                }
+            }
+
             // Docling 要读的东西必须同时满足两件事，少一件都等于没配：
             //   1) 以环境变量进子进程 —— 沙箱清空了继承环境、只回填 env-allowlist，
             //      白名单里既没有 DOCLING_ARTIFACTS_PATH 也没有 HF_HOME，Spring 侧配了也传不进去；
@@ -194,14 +214,20 @@ public class PdfService {
                     .args(List.of(pdfAbs.toString()))
                     .readRoots(readRoots)
                     .extraEnv(extraEnv)
-                    .timeoutSeconds(pdfTimeoutSeconds)
+                    .timeoutSeconds(timeoutSeconds)
                     .useUvProject(true)
                     .build();
             SkillSandboxExecutor.SandboxResult result = sandboxExecutor.execute(sandboxReq);
 
             if (result.isTimedOut()) {
+                // 把「估几页、给多久」写进错误里：否则调用方只看到"超时"，
+                // 没法判断是文件太大、还是模型没加载起来卡住了。
+                String hint = pages > 0
+                        ? "（该文件估 " + pages + " 页，按扫描件速率约需 "
+                            + PdfPageEstimator.expectedSeconds(pages) + "s，本次上限 " + timeoutSeconds + "s）"
+                        : "";
                 return Map.of("success", false, "error",
-                        "脚本执行超时（沙箱 " + result.getMode() + "，" + result.getDurationMs() + "ms 后强杀）");
+                        "脚本执行超时（沙箱 " + result.getMode() + "，" + result.getDurationMs() + "ms 后强杀）" + hint);
             }
             if (result.isOutputTruncated()) {
                 log.warn("[pdf] 脚本输出超过沙箱上限，已截断");

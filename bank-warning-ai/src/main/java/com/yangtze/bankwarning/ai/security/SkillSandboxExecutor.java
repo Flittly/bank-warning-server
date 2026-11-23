@@ -94,8 +94,13 @@ public class SkillSandboxExecutor {
                 s.sandboxPidsLimit());
     }
 
-    /** 单次执行允许覆盖的超时上限：再长基本等于卡死，继续等没有意义。 */
-    private static final int MAX_TIMEOUT_OVERRIDE_SECONDS = 900;
+    /**
+     * 单次执行允许覆盖的超时上限：再长基本等于卡死，继续等没有意义。
+     *
+     * <p>对调用方公开，是为了让"按工作量算超时预算"的一方（如 {@code PdfPageEstimator}）
+     * 用同一个上限判断"算出来的预算会不会被截断"，避免两处各写一个 900 然后慢慢漂开。
+     */
+    public static final int MAX_TIMEOUT_OVERRIDE_SECONDS = 900;
 
     /**
      * 把调用方给的超时覆盖值套到档位快照上。
