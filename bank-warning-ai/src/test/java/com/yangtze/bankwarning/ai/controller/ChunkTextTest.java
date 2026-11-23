@@ -118,8 +118,10 @@ class ChunkTextTest {
     // ---------- 重叠量下限 ----------
 
     private static String tail(String body, int overlap) {
+        // 切分实现已搬迁到 MdLiteChunker；这里钉的仍是同一条不变量，
+        // 换个类而已——控制器只是薄委托，不该再持有算法副本。
         return ReflectionTestUtils.<String>invokeMethod(
-                KnowledgeController.class, "overlapTail", body, overlap);
+                com.yangtze.bankwarning.ai.service.MdLiteChunker.class, "overlapTail", body, overlap);
     }
 
     @Test

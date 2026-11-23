@@ -312,6 +312,11 @@ app:
     pdf:
       # 兼容旧路径：仅当 cache 里找不到时回退到这里
       fallback-scripts-dir: ${user.dir}/src/main/resources/skills/pdf/scripts
+      # Docling 的模型目录（不是密钥，也不是服务地址——权重在本机加载）。
+      # 留空 = 首次转换联网下载到 ~/.cache/docling；离线部署必须指向随包目录。
+      docling-artifacts-path: ${DOCLING_ARTIFACTS_PATH:}
+      # 部署环境是否无外网：只影响启动自检告警，不改变行为
+      docling-offline: false
     # 可视化脚本配置
     visualization:
       # 脚本目录（bank-model-server 路径）

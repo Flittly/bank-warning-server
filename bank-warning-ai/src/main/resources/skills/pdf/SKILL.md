@@ -10,6 +10,38 @@ license: Proprietary. LICENSE.txt has complete terms
 
 This guide covers essential PDF processing operations using Python libraries and command-line tools. For advanced features, JavaScript libraries, and detailed examples, see REFERENCE.md. If you need to fill out a PDF form, read FORMS.md and follow its instructions.
 
+## 知识库入库用的两个提取器
+
+知识库上传 PDF 时只用到两个脚本，它们的产出是 **md-lite/1**，与 `word` skill 的输出同格式：
+
+| 脚本 | 能力 | 依赖 | 失败时 |
+|---|---|---|---|
+| `scripts/extract_text_docling.py` | 版面分析、阅读顺序、表格结构、扫描件 OCR；带 `<!-- page: N -->` | Docling + 本地模型权重 | 非 0 退出，由 Java 侧回落 |
+| `scripts/extract_text.py` | 只按文本流取字（pypdf） | pypdf | — |
+
+顺序是「先 Docling，拿不到再 pypdf」，并且把实际生效的提取器与是否降级写进入库结果
+（`extractor` / `degraded`）。降级必须可见：pypdf 拿不到表格与层级，
+如果不在结果里标出来，「检索没命中」和「入库时就没拿到」在日志里长得一模一样。
+
+### Docling 的模型不是「密钥」
+
+它不要 `api_key`，也不要 `base_url`——权重下载到本机、由 torch 在本进程内加载，
+请求不出机器。要配的只有目录：
+
+| 环境变量 | 作用 |
+|---|---|
+| `DOCLING_ARTIFACTS_PATH` | 模型权重目录；**离线/内网部署必须设置**，不设则首次转换会联网下载 |
+| `DOCLING_OCR` | `0` 关闭 OCR（纯文本 PDF 可以关，扫描件不能关） |
+
+安装（只在本机启用时做一次）：
+
+```
+uv pip install --project <skill-dir> "docling-slim[format-pdf,models-local]"
+```
+
+`format-pdf` 本身不含 torch，`models-local` 才带；两者都要。没装时脚本以退出码 2 结束，
+Java 侧自动回落 pypdf 并标记 `degraded=true`，上传不会失败。
+
 ## Quick Start
 
 ```python

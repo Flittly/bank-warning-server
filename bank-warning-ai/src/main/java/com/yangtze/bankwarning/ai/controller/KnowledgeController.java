@@ -5,6 +5,7 @@ import com.yangtze.bankwarning.ai.config.RagProperties;
 import com.yangtze.bankwarning.ai.context.AiCaller;
 import com.yangtze.bankwarning.ai.service.KnowledgeService;
 import com.yangtze.bankwarning.ai.service.KnowledgeUnavailableException;
+import com.yangtze.bankwarning.ai.service.MdLiteChunker;
 import com.yangtze.bankwarning.ai.service.PdfService;
 import com.yangtze.bankwarning.ai.service.SourceCitation;
 import com.yangtze.bankwarning.security.security.SecurityUtils;
@@ -39,6 +40,18 @@ public class KnowledgeController {
     private final EmbeddingBatchProperties batchProps;
 
     private static final int MAX_CHUNK_SIZE = 500;
+
+    /** 文本直传（{@code POST /knowledge}）没有经过任何提取器。 */
+    static final String EXTRACTOR_INLINE = "inline";
+
+    /** PDF 结构化提取，保留版面与表格。 */
+    static final String EXTRACTOR_DOCLING = "docling";
+
+    /** PDF 纯文本兜底，只回正文，表格与层级都会丢。 */
+    static final String EXTRACTOR_PYPDF = "pypdf";
+
+    /** DOCX 结构化提取（body 顺序 + 表格 + 字面编号推层级）。 */
+    static final String EXTRACTOR_DOCX = "docx-structure";
 
     /**
      * 相邻 chunk 共享的边界字数，取值 {@code [0, MAX_CHUNK_SIZE / 2]}，默认 50。
@@ -109,6 +122,42 @@ public class KnowledgeController {
     static String stagingDocId(String docTitle) {
         String base = docTitle.length() > 200 ? docTitle.substring(0, 200) : docTitle;
         return base + "#stg-" + UUID.randomUUID().toString().substring(0, 12);
+    }
+
+    /**
+     * 按统一口径造块，并把结构元信息写进 payload。
+     *
+     * <p>{@code headingPath} / {@code page} / {@code blockType} 刻意放 payload 而不是
+     * {@code content}：它们要能被程序读到（拼引用标签、按章节过滤），但不该被向量化，
+     * 也不该占提示词的 token。{@code payload} 是 JSONB，加键不需要 DDL。
+     *
+     * <p>空值不写键：{@code headingPath} 为空说明这段不属于任何标题（纯文本或文档前言），
+     * 写一个空串会让「有没有归属」变成两义；{@code page == 0} 表示未知（docx 没有页概念），
+     * 与「第 0 页」区分开。
+     */
+    static List<Document> structuredDocuments(String docTitle, String stagingDocId,
+                                              List<MdLiteChunker.Chunk> chunks,
+                                              Map<String, String> payload) {
+        List<Document> docs = new ArrayList<>(chunks.size());
+        for (int i = 0; i < chunks.size(); i++) {
+            MdLiteChunker.Chunk chunk = chunks.get(i);
+            var builder = DocumentMetadata.builder()
+                    .content(TextBlock.builder().text(chunk.text()).build())
+                    .docId(stagingDocId)
+                    .chunkId(docTitle + "_chunk_" + i)
+                    .addPayload("chunkIndex", String.valueOf(i))
+                    .addPayload("totalChunks", String.valueOf(chunks.size()))
+                    .addPayload("blockType", chunk.blockType());
+            if (chunk.headingPath() != null && !chunk.headingPath().isBlank()) {
+                builder.addPayload("headingPath", chunk.headingPath());
+            }
+            if (chunk.page() > 0) {
+                builder.addPayload("page", String.valueOf(chunk.page()));
+            }
+            payload.forEach(builder::addPayload);
+            docs.add(new Document(builder.build()));
+        }
+        return docs;
     }
 
     /** 按统一口径造块：{@code chunkId} 用正式标题（换名后与检索去重键保持一致），docId 用临时 id。 */
@@ -198,12 +247,14 @@ public class KnowledgeController {
 
         // 与 /knowledge/upload 走同一套切分。文本直传曾把整篇写成一个 chunk_0，
         // 长文件（如 riskLevel.py）会退化成单段，检索粒度与 PDF 路径不一致。
-        List<String> chunks = chunkText(content);
+        // 文本直传没有提取器：extractor 记为 inline，不产生 headingPath 与页码。
+        List<MdLiteChunker.Chunk> chunks = chunkStructured(content);
         // 阶段二：先写进一个临时 doc_id，整批成功后再换名成正式 doc_id。
         // 直接往正式 doc_id 里 INSERT 会让「同文档再传一次」变成两份（id 是 UUID，
         // 表上没有任何东西能挡住重复），检索时两份相同内容互相挤名额。
         String staging = stagingDocId(title);
-        List<Document> docs = chunkDocuments(title, staging, chunks, Map.of("type", type));
+        List<Document> docs = structuredDocuments(title, staging, chunks,
+                Map.of("type", type, "extractor", EXTRACTOR_INLINE));
         Long userId = SecurityUtils.getCurrentUserId();
         KnowledgeService.IngestResult ingest = ingest(docs);
         boolean ok = finishIngest(staging, title, userId, ingest);
@@ -238,16 +289,10 @@ public class KnowledgeController {
         }
 
         String lowerName = fileName.toLowerCase();
-        String skillName;
-        String scriptName;
         String suffix;
         if (lowerName.endsWith(".pdf")) {
-            skillName = "pdf";
-            scriptName = "extract_text.py";
             suffix = ".pdf";
         } else if (lowerName.endsWith(".docx")) {
-            skillName = "word";
-            scriptName = "extract_text_docx.py";
             suffix = ".docx";
         } else {
             return Map.of("success", false, "error", "仅支持 PDF 和 DOCX 文件");
@@ -260,20 +305,27 @@ public class KnowledgeController {
             tempFile = Files.createTempFile("knowledge-", suffix);
             file.transferTo(tempFile.toFile());
 
-            Map<String, Object> result = pdfService.processPdf(skillName, scriptName, tempFile.toString());
-            if (!Boolean.TRUE.equals(result.get("success"))) {
-                return result;
+            Extraction extraction = extract(tempFile, suffix);
+            if (!extraction.ok()) {
+                return Map.of("success", false, "error", extraction.error());
             }
-            String text = (String) result.get("content");
+            String text = extraction.text();
             if (text == null || text.isBlank()) {
                 return Map.of("success", false, "error", "文件中未提取到文本内容");
             }
 
-            List<String> chunks = chunkText(text);
+            List<MdLiteChunker.Chunk> chunks = chunkStructured(text);
             // 阶段二：同 importKnowledge，先写临时 doc_id，整批成功后再换名。
             String staging = stagingDocId(docTitle);
-            List<Document> docs = chunkDocuments(docTitle, staging, chunks,
-                    Map.of("type", type, "fileName", fileName));
+            Map<String, String> payload = new LinkedHashMap<>();
+            payload.put("type", type);
+            payload.put("fileName", fileName);
+            payload.put("extractor", extraction.extractor());
+            payload.put("format", MdLiteChunker.FORMAT);
+            // 降级是个事实，不是内部细节：pypdf 只回纯文本，表格与层级都会丢，
+            // 检索不命中时得能分清「资料里没有」和「抽取时就没拿到」。
+            payload.put("degraded", String.valueOf(extraction.degraded()));
+            List<Document> docs = structuredDocuments(docTitle, staging, chunks, payload);
 
             Long userId = SecurityUtils.getCurrentUserId();
             KnowledgeService.IngestResult ingest = ingest(docs);
@@ -287,11 +339,16 @@ public class KnowledgeController {
                 jdbcTemplate.update("UPDATE ai_knowledge_store SET is_public = ? "
                         + "WHERE doc_id = ? AND user_id IS NULL", isPublic, docTitle);
             }
-            log.info("[api] knowledge imported, title={}, chunks={}, embedded={}, failed={}, file={}, isPublic={}",
-                    docTitle, chunks.size(), ingest.ok(), ingest.failed(), fileName, isPublic);
+            log.info("[api] knowledge imported, title={}, chunks={}, embedded={}, failed={}, file={}, isPublic={}, extractor={}, degraded={}",
+                    docTitle, chunks.size(), ingest.ok(), ingest.failed(), fileName, isPublic,
+                    extraction.extractor(), extraction.degraded());
 
-            return ingestResponse(ok, docTitle, chunks.size(), ingest,
-                    Map.of("type", type, "isPublic", isPublic));
+            Map<String, Object> extra = new LinkedHashMap<>();
+            extra.put("type", type);
+            extra.put("isPublic", isPublic);
+            extra.put("extractor", extraction.extractor());
+            extra.put("degraded", extraction.degraded());
+            return ingestResponse(ok, docTitle, chunks.size(), ingest, extra);
 
         } catch (Exception e) {
             log.error("[api] upload failed", e);
@@ -300,6 +357,71 @@ public class KnowledgeController {
             if (tempFile != null) {
                 try { Files.deleteIfExists(tempFile); } catch (Exception ignored) {}
             }
+        }
+    }
+
+    /**
+     * 按后缀选提取器：PDF 先试 Docling，拿不到再回落 pypdf。
+     *
+     * <p><b>为什么降级必须留下痕迹：</b>pypdf 只回纯文本，表格与标题层级全部丢失。
+     * 不标出来的话，「检索没命中」和「入库时就没拿到」在日志里长得一模一样，
+     * 而两者的处置完全相反——前者去调排序，后者要换提取器。
+     *
+     * <p><b>Docling 失败是常态不是异常：</b>模型目录没预置、离线机器首次转换、
+     * 脚本还没物化到 {@code .skills-cache}，都会让它拿不到结果。这些都不该让上传失败。
+     */
+    private Extraction extract(Path file, String suffix) {
+        if (".pdf".equals(suffix)) {
+            Map<String, Object> docling = pdfService.processPdf(
+                    "pdf", "extract_text_docling.py", file.toString());
+            String text = textOf(docling);
+            if (text != null && !text.isBlank()) {
+                return new Extraction(text, EXTRACTOR_DOCLING, false, null);
+            }
+            log.warn("[api] Docling 抽取不可用，回落 pypdf（表格与层级会丢失）: {}", errorOf(docling));
+            Map<String, Object> plain = pdfService.processPdf(
+                    "pdf", "extract_text.py", file.toString());
+            String fallback = textOf(plain);
+            if (fallback == null) {
+                return new Extraction(null, EXTRACTOR_PYPDF, true, errorOf(plain));
+            }
+            return new Extraction(fallback, EXTRACTOR_PYPDF, true, null);
+        }
+
+        Map<String, Object> result = pdfService.processPdf(
+                "word", "extract_text_docx.py", file.toString());
+        String text = textOf(result);
+        if (text == null) {
+            return new Extraction(null, EXTRACTOR_DOCX, false, errorOf(result));
+        }
+        return new Extraction(text, EXTRACTOR_DOCX, false, null);
+    }
+
+    /** 成功结果的正文；执行失败返回 null（空正文照常返回空串，交由调用方给统一文案）。 */
+    private static String textOf(Map<String, Object> result) {
+        if (result == null || !Boolean.TRUE.equals(result.get("success"))) {
+            return null;
+        }
+        Object content = result.get("content");
+        return content == null ? "" : String.valueOf(content);
+    }
+
+    private static String errorOf(Map<String, Object> result) {
+        Object error = result == null ? null : result.get("error");
+        return error == null ? "提取器未返回结果" : String.valueOf(error);
+    }
+
+    /**
+     * 一次文件抽取的结果。
+     *
+     * @param text      正文；抽取器执行失败时为 null
+     * @param extractor 实际生效的提取器，写进 payload 供事后排查
+     * @param degraded  是否走了有损降级路径
+     * @param error     失败原因；成功为 null
+     */
+    record Extraction(String text, String extractor, boolean degraded, String error) {
+        boolean ok() {
+            return error == null;
         }
     }
 
@@ -327,6 +449,10 @@ public class KnowledgeController {
                 Map<String, Object> p = (Map<String, Object>) payload;
                 meta.putIfAbsent("type", p.getOrDefault("type", ""));
                 meta.putIfAbsent("fileName", p.getOrDefault("fileName", docId));
+                // 抽取降级要在列表里看得见：pypdf 拿不到表格与层级，
+                // 用户问「为什么表里的数搜不到」时，答案就在这一行。
+                meta.putIfAbsent("extractor", p.getOrDefault("extractor", ""));
+                meta.putIfAbsent("degraded", "true".equals(String.valueOf(p.getOrDefault("degraded", ""))));
             }
             Integer chunks = jdbcTemplate.queryForObject(
                     "SELECT COUNT(*) FROM ai_knowledge_store WHERE doc_id = ? AND "
@@ -445,126 +571,24 @@ public class KnowledgeController {
      * </ol>
      *
      * <p>{@code chunkOverlap = 0} 时不加尾巴，块间无重复。
+     *
+     * <p><b>实现已搬到 {@link MdLiteChunker#chunkPlain}</b>，这里只剩一层薄委托：
+     * 上传链路现在走 {@link #chunkStructured}，这个入口保留给「纯文本、无结构」的场景
+     * 与既有的切分不变量测试——它们钉的是同一套算法，不该因为换了个调用方就失去守门。
      */
     List<String> chunkText(String text) {
-        int max = MAX_CHUNK_SIZE;
-        // 重叠不能超过半块：否则下一块的起点会落回上一块中间，产生近乎重复的段。
-        int overlap = Math.max(0, Math.min(chunkOverlap, max / 2));
-
-        List<String> chunks = new ArrayList<>();
-        String[] paragraphs = text.split("\\n\\s*\\n");
-        StringBuilder current = new StringBuilder();
-
-        for (String p : paragraphs) {
-            String trimmed = p.trim();
-            if (trimmed.isBlank()) {
-                continue;
-            }
-            // 单段本身就超长：先把已有的块落盘，再把这个长段按句子边界切碎。
-            if (trimmed.length() > max) {
-                if (current.length() > 0) {
-                    chunks.add(current.toString().trim());
-                    current = new StringBuilder();
-                }
-                chunks.addAll(splitLongParagraph(trimmed, max, overlap));
-                continue;
-            }
-            if (current.length() + trimmed.length() > max && current.length() > 0) {
-                String body = current.toString().trim();
-                chunks.add(body);
-                String tail = overlapTail(body, overlap);
-                // 尾巴加新段仍超上限（新段本身就很长）：宁可不要尾巴，也不突破单块长度。
-                current = new StringBuilder(tail.length() + trimmed.length() > max ? "" : tail);
-            }
-            if (current.length() > 0) {
-                current.append("\n\n");
-            }
-            current.append(trimmed);
-        }
-        if (current.length() > 0) {
-            chunks.add(current.toString().trim());
-        }
-        if (chunks.isEmpty() && !text.isBlank()) {
-            chunks.add(text.trim());
-        }
-        return chunks;
+        return MdLiteChunker.chunkPlain(text, MAX_CHUNK_SIZE, chunkOverlap);
     }
 
     /**
-     * 把超长段落切成不超过 {@code max} 的若干块，尽量落在句末，避免从词中间截断。
+     * 结构感知切块：md-lite 输入按标题分节、表格原子成块；纯文本输入与
+     * {@link #chunkText} 逐字一致，所以「升级提取器」不会顺带改变纯文本的切法。
      *
-     * <p>找不到句末标点（例如无标点的长数字串、英文表格）时退化为硬切——
-     * 有截断总比整段超长好，因为超长段会同时拖累嵌入质量和检索精度。
+     * <p>切块逻辑放在 {@link MdLiteChunker} 而不是留在这里：控制器里只能靠端到端测，
+     * 一旦块数或归属出问题，定位不到「是切块错了还是嵌入丢了」。
      */
-    private static List<String> splitLongParagraph(String paragraph, int max, int overlap) {
-        List<String> out = new ArrayList<>();
-        int start = 0;
-        while (start < paragraph.length()) {
-            int end = Math.min(paragraph.length(), start + max);
-            if (end < paragraph.length()) {
-                int cut = lastSentenceEnd(paragraph, start, end);
-                if (cut > start) {
-                    end = cut;
-                }
-            }
-            String piece = paragraph.substring(start, end).trim();
-            if (!piece.isEmpty()) {
-                out.add(piece);
-            }
-            if (end >= paragraph.length()) {
-                break;
-            }
-            // 至少前进一个字，防止 overlap 恰好等于块长时死循环
-            start = Math.max(start + 1, end - overlap);
-        }
-        return out;
-    }
-
-    /** 在 [from, to) 里找最后一个句末标点之后的切点；找不到返回 -1。 */
-    private static int lastSentenceEnd(String text, int from, int to) {
-        for (int i = to - 1; i >= from; i--) {
-            char c = text.charAt(i);
-            if (c == '。' || c == '！' || c == '？' || c == '；' || c == '\n') {
-                return i + 1;
-            }
-        }
-        return -1;
-    }
-
-    /**
-     * 取上一块末尾的重叠文本，长度落在 {@code [overlap / 2, overlap]}；{@code overlap == 0} 时返回空串。
-     *
-     * <p>优先让尾巴从句子边界开始，避免下一块以半句话开头。但「对齐」不能以牺牲重叠量为代价：
-     * 若窗口里第一个句末标点太靠后（对齐后剩余不足 {@code overlap / 2}），说明真正的句界
-     * 落在窗口之外，此时退回原始窗口——宁可尾巴从半句开始，也不能把重叠让没了。
-     *
-     * <p>这一条在段落末尾是短标题时尤为关键：例如上一块以「…具有节点的作用。\n\n2.1.3.2 主要地质问题」
-     * 结尾、配置 100 字时，若对齐到该标题只继承 14 字，而标题并不携带上一块的正文信息，
-     * 重叠形同未生效。
-     */
-    private static String overlapTail(String body, int overlap) {
-        if (overlap <= 0 || body.isEmpty()) {
-            return "";
-        }
-        // 块本身不比窗口长：整块复制给下一块是重复，不是重叠。
-        // 不排除这两种情况会让短块（标题行、单句段）在原处和下一块开头各出现一次，
-        // 并且下一块 = 整块 + 新段，突破单块上限。
-        if (body.length() <= overlap) {
-            return "";
-        }
-        int hard = Math.max(0, body.length() - overlap);
-        int minKeep = overlap / 2;
-        for (int i = hard; i < body.length() - 1; i++) {
-            char c = body.charAt(i);
-            if (c == '。' || c == '！' || c == '？' || c == '；' || c == '\n') {
-                // 对齐后仍须保留至少一半重叠量，否则放弃对齐
-                if (body.length() - (i + 1) >= minKeep) {
-                    return body.substring(i + 1).trim();
-                }
-                break;
-            }
-        }
-        return body.substring(hard).trim();
+    List<MdLiteChunker.Chunk> chunkStructured(String text) {
+        return MdLiteChunker.chunk(text, MAX_CHUNK_SIZE, chunkOverlap);
     }
 
     @GetMapping("/knowledge/stats")

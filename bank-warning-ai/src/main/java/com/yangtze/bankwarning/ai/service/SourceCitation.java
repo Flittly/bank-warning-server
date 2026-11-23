@@ -39,6 +39,12 @@ public final class SourceCitation {
     /** 入库时写入的段总数。 */
     static final String PAYLOAD_TOTAL_CHUNKS = "totalChunks";
 
+    /** 入库时写入的章节路径，形如 {@code 二、平台总体架构 / （二）总体架构}；无标题的块没有这个键。 */
+    static final String PAYLOAD_HEADING_PATH = "headingPath";
+
+    /** label 里最多显示的标题字数：多出来的截断，避免一行小字被长标题撑满。 */
+    private static final int MAX_HEADING_CHARS = 24;
+
     /** 兜底：{@code template.json_chunk_0} → 0。 */
     private static final Pattern CHUNK_ID_SUFFIX = Pattern.compile("_chunk_(\\d+)$");
 
@@ -81,21 +87,56 @@ public final class SourceCitation {
     }
 
     /**
-     * 单条来源标签：{@code BMS.docx · 第 3/4 段}。
+     * 单条来源标签：{@code BMS.docx · 三级阈值 · 第 3/4 段}。
      *
-     * <p>三种降级：段号未知 → 只有文件名；总段数未知 → 「第 k 段」；文件名为空 → 占位文案。
+     * <p>标题只取<b>最后一级</b>，不拼整条路径：这个串在前端是一行小字，
+     * 塞进「二、平台总体架构 /（二）总体架构 / 4.2.2.3」会直接溢出。
+     * 完整路径仍在 {@code payload.headingPath} 里，留给详情面板。
+     *
+     * <p>四种降级：没有标题 → 只有文件名；段号未知 → 只有文件名与标题；
+     * 总段数未知 → 「第 k 段」；文件名为空 → 占位文案。
      */
     public static String label(Document doc) {
         String docId = docId(doc);
+        String heading = lastHeading(doc);
+        String prefix = heading == null ? docId : docId + " · " + heading;
         int no = chunkNo(doc);
         if (no < 0) {
-            return docId;
+            return prefix;
         }
         int total = totalChunks(doc);
         if (total > 0 && total >= no) {
-            return docId + " · 第 " + no + "/" + total + " 段";
+            return prefix + " · 第 " + no + "/" + total + " 段";
         }
-        return docId + " · 第 " + no + " 段";
+        return prefix + " · 第 " + no + " 段";
+    }
+
+    /**
+     * 章节路径的最后一级；没有则返回 null。
+     *
+     * <p>路径用 {@code " / "} 分隔，取最后一段即可——不用正则去解析层级编号，
+     * 因为编号形态（`4.2.2.3`、`（二）`、`三、`）不是我们能穷举的。
+     */
+    static String lastHeading(Document doc) {
+        DocumentMetadata meta = doc == null ? null : doc.getMetadata();
+        if (meta == null) {
+            return null;
+        }
+        Object raw = meta.getPayloadValue(PAYLOAD_HEADING_PATH);
+        if (raw == null) {
+            return null;
+        }
+        String path = String.valueOf(raw).trim();
+        if (path.isEmpty()) {
+            return null;
+        }
+        int slash = path.lastIndexOf(" / ");
+        String last = (slash >= 0 ? path.substring(slash + 3) : path).trim();
+        if (last.isEmpty()) {
+            return null;
+        }
+        return last.length() > MAX_HEADING_CHARS
+                ? last.substring(0, MAX_HEADING_CHARS) + "…" : last;
     }
 
     /** 展示用的 1 基段号；未知返回 -1。 */
