@@ -36,8 +36,10 @@
 | 东西 | 位置 | 大小 | 来源 |
 |---|---|---|---|
 | Python 依赖（pypdf / python-docx） | `.skills-cache/<skill>/<版本>/.venv` | 几 MB | 首次执行时 uv 自动装 |
-| Docling 及其依赖（torch / rtree / opencv / rapidocr） | 同一个 `.venv` | 约 3 GB | 手动执行一次 |
-| 版面与表格模型权重 | `HF_HOME`（默认 `%USERPROFILE%\.cache\huggingface`） | **509 MB** | 首次转换时联网下载，或从旧机搬 |
+| Docling 及其依赖（torch / rtree / opencv / rapidocr） | 同一个 `.venv` | 装完后整个 venv **1.2 GB** | 手动执行一次 |
+| 版面与表格模型权重 | `HF_HOME`（默认 `%USERPROFILE%\.cache\huggingface`） | **510 MB** | 首次转换时联网下载，或从旧机搬 |
+
+OCR 的三个 `.onnx`（det / rec / cls，共 30.9 MB）**在 pip 包里**，不走下载——`rapidocr` 整个包解压 62 MB。
 
 注意最后一行：**权重不在 `~/.cache/docling`**。那个目录只是 docling 的运行期工作区，权重由 `huggingface_hub` 下到 `HF_HOME`。按前者去找部署产物必然找不到。
 
@@ -58,7 +60,7 @@ uv run --quiet python scripts/extract_text_docling.py <任意一份 PDF>
 HF_HUB_OFFLINE=1 uv run --quiet python scripts/extract_text_docling.py <同一份 PDF>
 ```
 
-第 3 步成功之后，`HF_HOME` 里会有 `docling-layout-heron`、`docling-models` 等目录，共约 509 MB。
+第 3 步成功之后，`HF_HOME` 里会有 `docling-layout-heron`、`docling-models` 等目录，共约 510 MB。
 
 ### 3.3 配置
 
@@ -117,7 +119,7 @@ app:
 换机 / 交付时，除了 jar 和数据库，还要带这两样：
 
 ```bash
-# ① 模型权重（约 509 MB）
+# ① 模型权重（约 510 MB）
 robocopy "%USERPROFILE%\.cache\huggingface" "D:\deliver\huggingface" /E
 
 # ② docling 的 venv 没法直接搬（路径写死在 Scripts/*.exe 里），到目标机重装一次
