@@ -110,6 +110,8 @@ app:
 
 **容器内不装 Docling**（torch + 模型权重都要进镜像，体积翻倍），所以容器部署下 PDF 一律走 pypdf 降级，界面会显示「降级」。要容器内也做结构化抽取，需要另外扩镜像并挂载 `HF_HOME` 卷——目前不做。
 
+真要在容器里装，有一条好消息：`docling-slim[standard]` 拉的是 **`opencv-python-headless`**（本机实测 5.1.0.95），不带 GUI 依赖，Linux 上不会踩 `libGL.so.1: cannot open shared object file`。PDF 渲染走 `pypdfium2`（二进制在 wheel 里），也不需要装 poppler。
+
 ## 5. 离线交付产物清单
 
 换机 / 交付时，除了 jar 和数据库，还要带这两样：
