@@ -56,6 +56,41 @@ def _open_is_write(args) -> bool:
         return False
 
 
+def _dll_allowed(name: str) -> bool:
+    """判断一次 ctypes.dlopen 是否放行。
+
+    以前这里是「一律拒绝」，理由是禁止脚本加载任意原生库。但 torch / numpy /
+    opencv 这类科学计算库在**导入期**就会 dlopen 原生扩展——numpy 甚至在
+    `import ctypes` 时就要解析 kernel32，一律拒绝等于禁止所有带原生扩展的依赖
+    （实测表现是一句看不出因果的 `AttributeError: kernel32`）。
+
+    改成按来源分档：
+      - 裸名（不含路径分隔符，如 kernel32）→ 走系统目录查找，放行；
+        但工作目录里已有同名文件时拒绝——Windows 的 DLL 搜索顺序里当前目录
+        排在系统目录之前，而脚本对工作目录有写权限，放行裸名等于给它留了
+        一条「自己写个 kernel32.dll 再按裸名加载」的绕行路；
+      - 绝对路径 → 必须落在解释器前缀（venv / stdlib）或系统目录内；
+      - 其余 → 拒绝。
+    """
+    if not name:
+        return False
+    if os.sep not in name and "/" not in name:
+        try:
+            if os.path.exists(os.path.join(os.getcwd(), name)):
+                return False
+        except OSError:
+            # 取不到工作目录时按不安全处理：宁可让脚本失败，也不放行来源不明的库
+            return False
+        return True
+    path = _norm(name)
+    allowed = {_norm(sys.prefix), _norm(sys.base_prefix)}
+    for env in ("SYSTEMROOT", "WINDIR"):
+        value = os.environ.get(env)
+        if value:
+            allowed.add(_norm(value))
+    return _within(path, allowed)
+
+
 def main() -> None:
     if len(sys.argv) < 2:
         print("usage: sandbox_bootstrap.py <script> [args...]", file=sys.stderr)
@@ -93,10 +128,19 @@ def main() -> None:
             ro_roots.add(_norm(root))
 
     def audit(event, args):
-        # 危险通道直接拒绝：联网 / 起子进程 / 系统命令 / 加载原生库
-        if event.startswith(("socket.", "subprocess.")) or event in ("os.system", "ctypes.dlopen"):
+        # 危险通道直接拒绝：联网 / 起子进程 / 系统命令
+        if event.startswith(("socket.", "subprocess.")) or event == "os.system":
             raise PermissionError("blocked by skill sandbox: " + event)
+        # 原生库加载按来源分档（科学计算库导入期就要 dlopen，见 _dll_allowed）
+        if event == "ctypes.dlopen":
+            name = str(args[0]) if args else ""
+            if not _dll_allowed(name):
+                raise PermissionError("blocked ctypes.dlopen outside venv/system: " + name)
         if event == "open" and args:
+            # 空设备是进程级设施而不是数据文件：dill/pickle 在导入期就会 open(os.devnull)
+            # 探测文件类型，拦掉它会让一切用到 dill 的库（torch 走这条）在 import 阶段就死。
+            if str(args[0]) in (os.devnull, "nul", "/dev/null"):
+                return
             path = _norm(str(args[0]))
             if _open_is_write(args):
                 if not _within(path, rw_roots):

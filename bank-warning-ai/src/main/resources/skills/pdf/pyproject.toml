@@ -12,6 +12,15 @@
 #   分发出的 skill 就是"装不上机"的包裹。
 #
 # 自动排除的产物（勿提交）：同目录下的 .venv/、uv.lock
+#
+# Docling 刻意**不写进 dependencies**：
+#   它是可选能力，装在同一个 .venv 里，但必须由人显式执行一次
+#       uv pip install "docling-slim[standard]"
+#   写进 dependencies 的后果是：离线机器上 `uv run --project` 会试图解算这份
+#   依赖、装不上就整体失败——连 pypdf 降级路径都跑不起来，等于让 PDF 上传
+#   从"质量降级"变成"完全不能用"。
+#   `standard` 一次带齐 torch / rtree / opencv / rapidocr；
+#   只装 `format-pdf,models-local` 会缺 rtree 与 opencv（实测依次报错）。
 [project]
 name = "pdf-extract"
 version = "0.1.0"

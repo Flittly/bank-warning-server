@@ -312,8 +312,13 @@ app:
     pdf:
       # 兼容旧路径：仅当 cache 里找不到时回退到这里
       fallback-scripts-dir: ${user.dir}/src/main/resources/skills/pdf/scripts
+      # 单次 PDF 提取超时（秒），覆盖沙箱档位值；<=0 表示沿用档位。
+      # docling 冷启动要加载版面与表格模型，档位默认的 120s 对它不够。
+      timeout-seconds: ${PDF_TIMEOUT_SECONDS:300}
       # Docling 的模型目录（不是密钥，也不是服务地址——权重在本机加载）。
-      # 留空 = 首次转换联网下载到 ~/.cache/docling；离线部署必须指向随包目录。
+      # 留空 = 用 HF_HOME（缺省 ~/.cache/huggingface）里已下的权重，没有才联网下载；
+      # ~/.cache/docling 只是运行期工作区，权重不放那儿。离线部署要连 HF_HOME 一起搬。
+      # 它会被翻译成子进程的 DOCLING_ARTIFACTS_PATH 并加入沙箱只读根；只写这里不够。
       docling-artifacts-path: ${DOCLING_ARTIFACTS_PATH:}
       # 部署环境是否无外网：只影响启动自检告警，不改变行为
       docling-offline: false

@@ -94,6 +94,28 @@ public class SkillSandboxExecutor {
                 s.sandboxPidsLimit());
     }
 
+    /** 单次执行允许覆盖的超时上限：再长基本等于卡死，继续等没有意义。 */
+    private static final int MAX_TIMEOUT_OVERRIDE_SECONDS = 900;
+
+    /**
+     * 把调用方给的超时覆盖值套到档位快照上。
+     *
+     * <p>{@code <=0} 表示不覆盖（沿用档位）；覆盖值只换超时，其余参数仍由档位决定——
+     * 否则「传个超时」就等于顺手绕过了内存/CPU/输出上限。
+     */
+    private static SandboxRuntime withTimeoutOverride(SandboxRuntime base, int overrideSeconds) {
+        if (overrideSeconds <= 0) {
+            return base;
+        }
+        return new SandboxRuntime(
+                base.mode(),
+                Math.min(overrideSeconds, MAX_TIMEOUT_OVERRIDE_SECONDS),
+                base.maxOutputBytes(),
+                base.memoryMb(),
+                base.cpuSeconds(),
+                base.pidsLimit());
+    }
+
     // TODO(冗余审计 2026-10-12): getMode() 与 isSandboxEnabled() 均零调用方 ——
     //  沙箱档位/开关已定义却无人查询，属「配置可设、无人读取」的接线缺口，保留勿删。
     /** 当前沙箱档位（供面板与日志用） */
@@ -113,7 +135,7 @@ public class SkillSandboxExecutor {
      * @throws IOException 进程启动失败
      */
     public SandboxResult execute(SandboxRequest request) throws IOException {
-        SandboxRuntime rt = runtime();
+        SandboxRuntime rt = withTimeoutOverride(runtime(), request.timeoutSeconds());
         Path script = request.script.toAbsolutePath().normalize();
         if (!Files.isRegularFile(script)) {
             throw new IllegalArgumentException("脚本不存在: " + script);
@@ -436,6 +458,8 @@ public class SkillSandboxExecutor {
         private final byte[] stdin;
         private final Path workDir;
         private final boolean useUvProject;
+        /** {@code <=0} 表示沿用沙箱档位超时。 */
+        private final int timeoutSeconds;
 
         private SandboxRequest(Builder builder) {
             this.script = builder.script;
@@ -446,10 +470,16 @@ public class SkillSandboxExecutor {
             this.stdin = builder.stdin;
             this.workDir = builder.workDir;
             this.useUvProject = builder.useUvProject;
+            this.timeoutSeconds = builder.timeoutSeconds;
         }
 
         public static Builder builder() {
             return new Builder();
+        }
+
+        /** 单次执行的超时覆盖（秒）；{@code <=0} 表示沿用档位。 */
+        public int timeoutSeconds() {
+            return timeoutSeconds;
         }
 
         public static final class Builder {
@@ -461,6 +491,7 @@ public class SkillSandboxExecutor {
             private byte[] stdin;
             private Path workDir;
             private boolean useUvProject;
+            private int timeoutSeconds;
 
             public Builder script(Path script) {
                 this.script = script;
@@ -489,6 +520,12 @@ public class SkillSandboxExecutor {
 
             public Builder useUvProject(boolean useUvProject) {
                 this.useUvProject = useUvProject;
+                return this;
+            }
+
+            /** 单次执行的超时覆盖（秒）；不设或 {@code <=0} 沿用档位。 */
+            public Builder timeoutSeconds(int timeoutSeconds) {
+                this.timeoutSeconds = timeoutSeconds;
                 return this;
             }
 

@@ -67,9 +67,20 @@ public class DoclingStartupReport implements ApplicationRunner {
         }
     }
 
-    /** Docling 的默认缓存位置，与 {@code docling.datamodel.settings.AppSettings.cache_dir} 一致。 */
+    /**
+     * 模型权重的默认落盘位置。
+     *
+     * <p><b>不是</b> {@code ~/.cache/docling}：那个目录是 docling 的运行期工作区。
+     * 权重实际由 {@code huggingface_hub} 下载，落在 {@code HF_HOME}（缺省
+     * {@code ~/.cache/huggingface}）的 {@code hub/} 下面。两处搞混会让「模型明明下过」
+     * 和「启动自检说没有」同时成立。
+     */
     static Path defaultCacheDir() {
-        return Paths.get(System.getProperty("user.home", "."), ".cache", "docling", "models");
+        String hfHome = System.getenv("HF_HOME");
+        Path base = hfHome != null && !hfHome.isBlank()
+                ? Paths.get(hfHome.strip())
+                : Paths.get(System.getProperty("user.home", "."), ".cache", "huggingface");
+        return base.resolve("hub");
     }
 
     /** 缓存目录里的文件数；目录不存在或读不了都算 0（这只是个提示，不是判据）。 */
@@ -77,7 +88,8 @@ public class DoclingStartupReport implements ApplicationRunner {
         if (dir == null || !Files.isDirectory(dir)) {
             return 0;
         }
-        try (Stream<Path> files = Files.walk(dir, 3)) {
+        // 深度 4 才够到 snapshots/<rev>/<权重文件>；blobs/ 浅一层也能数到，取大的那个口径
+        try (Stream<Path> files = Files.walk(dir, 4)) {
             return (int) files.filter(Files::isRegularFile).count();
         } catch (Exception e) {
             return 0;

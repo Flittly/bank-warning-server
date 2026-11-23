@@ -17,6 +17,7 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
@@ -42,6 +43,27 @@ public class PdfService {
      */
     @Value("${app.ai.pdf.allowed-read-roots:}")
     private String allowedReadRootsRaw;
+
+    /**
+     * Docling 模型权重目录；空 = 用 docling 自己的默认缓存目录。
+     *
+     * <p>它是<b>跨进程配置</b>：Spring 只把它读进 Java 进程，Python 子进程看不到任何继承环境，
+     * 必须由本类翻译成 {@code DOCLING_ARTIFACTS_PATH} 显式投喂（见 {@link #doclingEnv}）。
+     */
+    @Value("${app.ai.pdf.docling-artifacts-path:}")
+    private String doclingArtifactsPath;
+
+    /**
+     * 单次 PDF 提取的超时（秒）；{@code <=0} 表示沿用沙箱档位。
+     *
+     * <p>docling 冷启动要加载版面与表格模型，首次转换远超 pypdf 的毫秒级；
+     * 档位超时（120s）对它不够，因此给 PDF 这一路单独留了覆盖值，不影响 word 等其它 skill。
+     */
+    @Value("${app.ai.pdf.timeout-seconds:0}")
+    private int pdfTimeoutSeconds;
+
+    /** 覆盖值的合理上限：再长就该去查是不是卡死，而不是继续等。 */
+    private static final int MAX_PDF_TIMEOUT_SECONDS = 900;
 
     private final PythonImportScanner importScanner;
     private final SkillSandboxExecutor sandboxExecutor;
@@ -132,15 +154,47 @@ public class PdfService {
 
         try {
             Path pdfAbs = pdfFile.toAbsolutePath();
+
+            // Docling 要读的东西必须同时满足两件事，少一件都等于没配：
+            //   1) 以环境变量进子进程 —— 沙箱清空了继承环境、只回填 env-allowlist，
+            //      白名单里既没有 DOCLING_ARTIFACTS_PATH 也没有 HF_HOME，Spring 侧配了也传不进去；
+            //   2) 进只读根 —— bootstrap 的审计钩子会拦掉根外的一切 open，
+            //      权重在读根外时 docling 会以 PermissionError 失败。
+            Path artifacts = doclingArtifactsPathNormalized();
+            Path hfCache = hfCacheDir();
+            Map<String, String> extraEnv = new HashMap<>();
+            extraEnv.put("PYTHONIOENCODING", "utf-8");
+            List<Path> readRoots = new ArrayList<>();
+            // 只挂"这一个输入文件"本身，而不是它所在的整个目录：
+            // 避免脚本顺带拿到同目录下其它文件的读取权
+            readRoots.add(pdfAbs);
+            if (artifacts != null) {
+                extraEnv.put("DOCLING_ARTIFACTS_PATH", artifacts.toString());
+                readRoots.add(artifacts);
+            }
+            if (hfCache != null) {
+                // 子进程没有 HOME/USERPROFILE（环境被清空），huggingface_hub 找不到默认缓存目录，
+                // 必须显式告诉它权重在哪，否则会当成"没下过"去联网——而沙箱拒绝一切 socket。
+                extraEnv.put("HF_HOME", hfCache.toString());
+                readRoots.add(hfCache);
+            }
+            if (artifacts != null || hfCache != null) {
+                // 离线模式让"模型没预置"立刻失败并给出明确原因，好过被 socket 拦截后
+                // 报成一句看不出因果的 ProxyError / ConnectionError。
+                extraEnv.put("HF_HUB_OFFLINE", "1");
+            } else {
+                log.warn("[pdf] 未找到 docling 模型目录（配置为空且 HuggingFace 缓存不存在），"
+                        + "PDF 将回落 pypdf，表格与层级会丢失");
+            }
+
             // 统一走阶段二沙箱执行器：环境白名单 + 强超时 + 输出上限 + audit hook/rlimit
             SkillSandboxExecutor.SandboxRequest sandboxReq = SkillSandboxExecutor.SandboxRequest.builder()
                     .script(scriptFile.toPath().toAbsolutePath())
                     .skillDir(skillDir.toAbsolutePath())
                     .args(List.of(pdfAbs.toString()))
-                    // 只读挂载"这一个输入文件"本身，而不是它所在的整个目录：
-                    // 避免脚本顺带拿到同目录下其它文件的读取权
-                    .readRoots(List.of(pdfAbs))
-                    .extraEnv(Map.of("PYTHONIOENCODING", "utf-8"))
+                    .readRoots(readRoots)
+                    .extraEnv(extraEnv)
+                    .timeoutSeconds(pdfTimeoutSeconds)
                     .useUvProject(true)
                     .build();
             SkillSandboxExecutor.SandboxResult result = sandboxExecutor.execute(sandboxReq);
@@ -273,6 +327,31 @@ public class PdfService {
             }
         }
         throw new IllegalArgumentException("文件不在允许读取的目录内: " + candidate + "（允许根：" + roots + "）");
+    }
+
+    /**
+     * 显式配置的 docling artifacts 目录；未配置返回 {@code null}。
+     *
+     * <p>配错（目录不存在）也原样返回：让 docling 带着真实路径去失败，
+     * 比默默换成默认目录更容易定位。
+     */
+    Path doclingArtifactsPathNormalized() {
+        if (doclingArtifactsPath == null || doclingArtifactsPath.isBlank()) {
+            return null;
+        }
+        return Paths.get(doclingArtifactsPath.strip()).toAbsolutePath().normalize();
+    }
+
+    /**
+     * HuggingFace 缓存根：docling 的模型权重实际落在这里（不是 {@code ~/.cache/docling}，
+     * 那个目录只放运行期工作文件）。目录不存在返回 {@code null}。
+     */
+    Path hfCacheDir() {
+        String hfHome = System.getenv("HF_HOME");
+        Path base = hfHome != null && !hfHome.isBlank()
+                ? Paths.get(hfHome.strip())
+                : Paths.get(System.getProperty("user.home", "."), ".cache", "huggingface");
+        return Files.isDirectory(base) ? base.toAbsolutePath().normalize() : null;
     }
 
     /** 解析允许读取的根目录列表；配置为空时回退到默认集合 */
