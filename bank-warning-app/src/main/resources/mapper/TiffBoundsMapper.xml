@@ -15,10 +15,20 @@
         <result property="createdAt" column="created_at"/>
         <result property="updatedAt" column="updated_at"/>
         <result property="userId" column="user_id"/>
+        <result property="terrainStatus" column="terrain_status"/>
+        <result property="terrainFp" column="terrain_fp"/>
+        <result property="terrainMinzoom" column="terrain_minzoom"/>
+        <result property="terrainMaxzoom" column="terrain_maxzoom"/>
     </resultMap>
 
     <select id="selectAll" resultMap="TiffBoundsResultMap">
         SELECT * FROM tiff_bounds WHERE (user_id = #{userId} OR #{userId, jdbcType=BIGINT} IS NULL) ORDER BY tiff_key
+    </select>
+
+    <!-- 单条查询**不带**用户过滤：权限由调用方按 DataScope 判定（fail-closed），
+         这里只负责把行读出来。 -->
+    <select id="selectByTiffKey" resultMap="TiffBoundsResultMap">
+        SELECT * FROM tiff_bounds WHERE tiff_key = #{tiffKey} LIMIT 1
     </select>
 
 </mapper>

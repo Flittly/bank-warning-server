@@ -11,4 +11,7 @@ public interface TiffBoundsMapper {
 
     List<TiffBoundsPO> selectAll(@Param("userId") Long userId);
 
+    /** 按 tiff_key 取单行，**不做用户过滤**（权限由调用方判定）。 */
+    TiffBoundsPO selectByTiffKey(@Param("tiffKey") String tiffKey);
+
 }

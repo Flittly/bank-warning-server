@@ -23,17 +23,24 @@ import org.springframework.web.util.UriComponentsBuilder;
 
 import java.net.URI;
 import java.nio.charset.StandardCharsets;
-import java.time.Duration;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.regex.Pattern;
 import java.util.stream.Collectors;
 
 @Service
 public class TiffService {
 
     private static final Logger log = LoggerFactory.getLogger(TiffService.class);
+
+    /**
+     * DEM 预览可选的配色名，与模型服务 {@code model/demPreview.py} 的 {@code RAMPS} 一一对应。
+     * 加配色要两边一起加，否则这边会把新名字当未知值回落到灰度。
+     */
+    private static final List<String> PREVIEW_RAMPS = List.of("gray", "hypsometric");
+
     private final RestTemplate restTemplate = new RestTemplate();
     private final TiffBoundsMapper tiffBoundsMapper;
 
@@ -120,26 +127,31 @@ public class TiffService {
     }
 
     /**
-     * 取 DEM 预览图（灰度高程 + 红色 nodata），由模型服务现场渲染。
+     * 取 DEM 预览图（高程配色 + 红色 nodata），由模型服务现场渲染。
      *
      * <p>图片本体直接透传字节，不落盘、不缓存到 Java 侧：模型服务已按
-     * 「路径 + mtime + 文件大小」做了磁盘缓存，这里再加一层只会出现两边不一致。
+     * 「路径 + mtime + 文件大小 + 配色」做了磁盘缓存，这里再加一层只会出现两边不一致。
      *
      * <p>模型服务把地理范围与色标放在 {@code X-Dem-*} 响应头里，这里原样转给前端 ——
      * 前端要用这几项才能把图贴到正确位置、画出图例。
      *
      * @param tiffKey DEM 的 {@code tiff_key}
      * @param maxSize 输出长边像素上限，null/0 表示用服务端默认值（1536）
+     * @param ramp 配色名（{@code gray} / {@code hypsometric}）；不认识的名字**回落到默认灰度**
+     *             而不是报错 —— 它只影响观感，且响应头 {@code X-Dem-Ramp} 会回显实际用的配色，
+     *             前端据它画图例，不会出现「图是灰的、图例是彩的」。
      */
-    public ResponseEntity<byte[]> fetchPreview(String tiffKey, Integer maxSize) {
+    public ResponseEntity<byte[]> fetchPreview(String tiffKey, Integer maxSize, String ramp) {
         if (tiffKey == null || tiffKey.isBlank()) {
             throw new IllegalArgumentException("tiff_key is required");
         }
 
+        String palette = normalizeRamp(ramp);
+
         // 必须构造 URI 对象再交给 RestTemplate：传 String 会被当成 URI 模板「再编码一次」，
         // tiff_key 里的 "/" → "%2F" → "%252F"，模型侧解码一次后拿到 "tiff%2FYZ%2F..." 这种
         // 并不存在的路径，直接 404（且会白等一轮 RustFS 回源的 10+ 秒）。
-        URI uri = buildModelServiceUri(modelServiceBaseUrl, "/v0/dem/preview", tiffKey, maxSize);
+        URI uri = buildModelServiceUri(modelServiceBaseUrl, "/v0/dem/preview", tiffKey, maxSize, palette);
 
         long startedAt = System.currentTimeMillis();
         log.info("[dem-preview] 请求模型服务生成预览, tiff_key={}, uri={}", tiffKey, uri);
@@ -152,7 +164,14 @@ public class TiffService {
 
             HttpHeaders outHeaders = new HttpHeaders();
             outHeaders.setContentType(MediaType.IMAGE_PNG);
-            outHeaders.setCacheControl(CacheControl.maxAge(Duration.ofHours(1)).cachePublic());
+            // 绝不能给这张图加强缓存：URL 只由 tiff_key 与 ramp 决定，而「同一份 DEM 的内容」
+            // 会随重新切片、换配色、nodata 改透明而变化。上一版是 maxAge(1h).cachePublic()，
+            // 结果是：用户在旧进程上点过一次「分层设色」，浏览器就把灰度图存到了
+            // ?tiff_key=X&ramp=hypsometric 这个 URL 下，重启后端也没用 —— 点完 Segmented
+            // 拿回的还是缓存的 X-Dem-Ramp: gray，选中态立刻弹回灰度，表现为「点了没反应」。
+            // 现场渲染的图本来就该每次取新的；真要省算力有模型侧的磁盘缓存兜着（按路径+mtime+
+            // 文件大小+配色做键），HTTP 这一层不需要也不应该再拦一道。
+            outHeaders.setCacheControl(CacheControl.noStore());
             upstream.getHeaders().forEach((name, values) -> {
                 if (name != null && name.toLowerCase(Locale.ROOT).startsWith("x-dem-")) {
                     outHeaders.put(name, values);
@@ -188,14 +207,176 @@ public class TiffService {
      * {@code execute(URI, ...)}，不再做模板展开。
      */
     static URI buildModelServiceUri(String baseUrl, String path, String tiffKey, Integer maxSize) {
-        String base = baseUrl.endsWith("/") ? baseUrl.substring(0, baseUrl.length() - 1) : baseUrl;
-        UriComponentsBuilder builder = UriComponentsBuilder.fromUriString(base)
-                .path(path)
-                .queryParam("tiff_key", tiffKey);
+        return buildModelServiceUri(baseUrl, path, tiffKey, maxSize, null);
+    }
+
+    /**
+     * 同上，额外带上配色名。{@code ramp} 为空时**不写进查询参数** ——
+     * 否则模型服务的地址会平白多一个 {@code ramp=}，也让既有断言（URI 逐字比对）失效。
+     */
+    static URI buildModelServiceUri(
+            String baseUrl, String path, String tiffKey, Integer maxSize, String ramp) {
+        Map<String, Object> params = new LinkedHashMap<>();
+        params.put("tiff_key", tiffKey);
         if (maxSize != null && maxSize > 0) {
-            builder.queryParam("max_size", maxSize);
+            params.put("max_size", maxSize);
         }
+        if (ramp != null && !ramp.isBlank()) {
+            params.put("ramp", ramp);
+        }
+        return buildModelServiceUri(baseUrl, path, params);
+    }
+
+    /** 只放行前端会发的那两个配色名；其余一律当没传（回落默认灰度）。 */
+    static String normalizeRamp(String ramp) {
+        if (ramp == null || ramp.isBlank()) {
+            return null;
+        }
+        String value = ramp.trim().toLowerCase(Locale.ROOT);
+        if (PREVIEW_RAMPS.contains(value)) {
+            return value;
+        }
+        log.warn("[dem-preview] 未知配色 {}，按默认灰度处理", ramp);
+        return null;
+    }
+
+    /** 同上的通用版：查询参数按键值对给，值为 null 的不追加。同样必须返回 {@link URI}。 */
+    static URI buildModelServiceUri(String baseUrl, String path, Map<String, ?> params) {
+        String base = baseUrl.endsWith("/") ? baseUrl.substring(0, baseUrl.length() - 1) : baseUrl;
+        UriComponentsBuilder builder = UriComponentsBuilder.fromUriString(base).path(path);
+        params.forEach((key, value) -> {
+            if (value != null) {
+                builder.queryParam(key, value);
+            }
+        });
         return builder.build().encode(StandardCharsets.UTF_8).toUri();
+    }
+
+    // ==================== 三维地形（Mapbox terrain 的 Terrarium 瓦片） ====================
+    //
+    // 地形瓦片不能像天地图那样放进 nginx 的静态目录：DEM 是**按用户隔离**的（tiff_bounds.user_id），
+    // 而 /tiles/ 没有鉴权。所以每张瓦片都走这里 —— 先判归属，再转发模型服务。
+    // 代价是每张瓦片多一次单行查询 + 一次内网转发，一份 DEM 首屏也就一两百张，可以接受。
+
+    /** 金字塔指纹：模型服务生成的 16 位十六进制。它会被拼进转发 URL，必须先验格式。 */
+    private static final Pattern TERRAIN_FP = Pattern.compile("^[0-9a-f]{16}$");
+
+    /** 指纹在 URL 里 ⇒ 源文件一换 URL 就换 ⇒ 可以让浏览器放心缓存一年。 */
+    static final String TERRAIN_TILE_CACHE_CONTROL = "private, max-age=31536000, immutable";
+
+    /**
+     * 取出一份 DEM 的边界行，并确认**当前登录用户**有权访问它。
+     *
+     * <p>权限判定用 {@link SecurityUtils#getDataScope()} 而不是 {@code getCurrentUserIdForDataFilter()}：
+     * 后者的 {@code null} 同时表示「管理员」与「读不到身份」，是 fail-open；
+     * 这里 fail-closed —— 读不到身份一律拒绝。
+     *
+     * <p>无权访问与不存在返回**同一个异常**（→ 404）：不向调用方泄露「别人有这份 DEM」。
+     */
+    TiffBoundsPO requireAccessibleTiff(String tiffKey) {
+        if (tiffKey == null || tiffKey.isBlank()) {
+            throw new IllegalArgumentException("tiff_key is required");
+        }
+        SecurityUtils.DataScope scope = SecurityUtils.getDataScope();
+        if (!scope.authenticated()) {
+            throw new IllegalArgumentException("无法确认当前用户身份，拒绝访问 DEM：" + tiffKey);
+        }
+        TiffBoundsPO row = tiffBoundsMapper.selectByTiffKey(tiffKey);
+        if (row == null) {
+            throw new IllegalArgumentException("DEM 不存在或无权访问：" + tiffKey);
+        }
+        if (!scope.seeAll() && (scope.userId() == null || !scope.userId().equals(row.getUserId()))) {
+            throw new IllegalArgumentException("DEM 不存在或无权访问：" + tiffKey);
+        }
+        return row;
+    }
+
+    /** 三维地形状态（顺手让模型服务做过期检查）。 */
+    public Map<String, Object> fetchTerrainStatus(String tiffKey) {
+        requireAccessibleTiff(tiffKey);
+        return callModelServiceJson(buildModelServiceUri(modelServiceBaseUrl, "/v0/dem/terrain/status", tiffKey, null), false);
+    }
+
+    /** 开始（或确认）切片。幂等：已就绪且未过期时模型服务什么都不做。 */
+    public Map<String, Object> requestTerrainBuild(String tiffKey) {
+        requireAccessibleTiff(tiffKey);
+        return callModelServiceJson(buildModelServiceUri(modelServiceBaseUrl, "/v0/dem/terrain/build", tiffKey, null), true);
+    }
+
+    private Map<String, Object> callModelServiceJson(URI uri, boolean post) {
+        try {
+            ResponseEntity<Map> upstream = post
+                    ? restTemplate.postForEntity(uri, null, Map.class)
+                    : restTemplate.getForEntity(uri, Map.class);
+            @SuppressWarnings("unchecked")
+            Map<String, Object> body = upstream.getBody();
+            return body == null ? new LinkedHashMap<>() : body;
+        } catch (HttpStatusCodeException exception) {
+            int status = exception.getStatusCode().value();
+            String detail = shorten(exception.getResponseBodyAsString());
+            log.warn("[dem-terrain] 模型服务返回错误, uri={}, status={}, detail={}", uri.getPath(), status, detail);
+            if (status == 404 || status == 400) {
+                throw new IllegalArgumentException("DEM 三维地形请求被拒绝：" + detail);
+            }
+            throw new IllegalStateException("DEM 三维地形生成失败：" + detail, exception);
+        }
+    }
+
+    /**
+     * 转发一张地形瓦片。
+     *
+     * <p>ETag 由「指纹 + 层级行列」拼出，不读文件内容：瓦片不可变，指纹一换 URL 就换。
+     * 命中 {@code If-None-Match} 直接回 304，连模型服务都不用去。
+     *
+     * <p>模型服务回 404（走廊以外的空白瓦片）原样透传成 404 —— Mapbox 把「没有瓦片」
+     * 当成 0 米，这正是裙边设计依赖的约定。
+     */
+    public ResponseEntity<byte[]> fetchTerrainTile(
+            String tiffKey, String fingerprint, int z, int x, int y, String ifNoneMatch) {
+        if (fingerprint == null || !TERRAIN_FP.matcher(fingerprint).matches()
+                || z < 0 || z > 24 || x < 0 || x >= (1 << z) || y < 0 || y >= (1 << z)) {
+            throw new IllegalArgumentException("地形瓦片参数非法");
+        }
+        requireAccessibleTiff(tiffKey);
+
+        String etag = terrainEtag(fingerprint, z, x, y);
+        if (etag.equals(ifNoneMatch == null ? null : ifNoneMatch.trim())) {
+            return ResponseEntity.status(HttpStatus.NOT_MODIFIED)
+                    .eTag(etag)
+                    .header(HttpHeaders.CACHE_CONTROL, TERRAIN_TILE_CACHE_CONTROL)
+                    .build();
+        }
+
+        Map<String, Object> params = new LinkedHashMap<>();
+        params.put("tiff_key", tiffKey);
+        params.put("fp", fingerprint);
+        params.put("z", z);
+        params.put("x", x);
+        params.put("y", y);
+        URI uri = buildModelServiceUri(modelServiceBaseUrl, "/v0/dem/terrain/tile", params);
+        try {
+            ResponseEntity<byte[]> upstream = restTemplate.getForEntity(uri, byte[].class);
+            byte[] body = upstream.getBody();
+            if (body == null || body.length == 0) {
+                return ResponseEntity.status(HttpStatus.NOT_FOUND)
+                        .header(HttpHeaders.CACHE_CONTROL, "no-store")
+                        .build();
+            }
+            return ResponseEntity.ok()
+                    .contentType(MediaType.IMAGE_PNG)
+                    .eTag(etag)
+                    .header(HttpHeaders.CACHE_CONTROL, TERRAIN_TILE_CACHE_CONTROL)
+                    .body(body);
+        } catch (HttpStatusCodeException exception) {
+            // 404 不能带长缓存头：源文件更新后同一 URL（指纹）下不该再出现，但别让中间任何一层记住它
+            return ResponseEntity.status(exception.getStatusCode())
+                    .header(HttpHeaders.CACHE_CONTROL, "no-store")
+                    .build();
+        }
+    }
+
+    static String terrainEtag(String fingerprint, int z, int x, int y) {
+        return "\"terrain-" + fingerprint + '-' + z + '-' + x + '-' + y + "\"";
     }
 
     /** 截断上游错误体，避免把整段堆栈塞进前端提示里。 */
@@ -221,6 +402,8 @@ public class TiffService {
         map.put("max_y", po.getMaxY());
         map.put("created_at", po.getCreatedAt());
         map.put("updated_at", po.getUpdatedAt());
+        // 三维地形是否已就绪（null = 从未切过）。前端据此决定「直接挂地形」还是「先生成」。
+        map.put("terrain_status", po.getTerrainStatus());
         return map;
     }
 }

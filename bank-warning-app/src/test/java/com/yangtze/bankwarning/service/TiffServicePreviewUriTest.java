@@ -75,6 +75,32 @@ class TiffServicePreviewUriTest {
     }
 
     @Test
+    void rampIsOnlyAppendedWhenKnown() {
+        String base = "http://localhost:8088";
+
+        // 不传 / 传空：URI 里不能平白多出一个 ramp=，否则与旧断言（逐字比对）不等
+        assertFalse(TiffService.buildModelServiceUri(base, "/v0/dem/preview", KEY, null, null)
+                .getRawQuery().contains("ramp"));
+        assertFalse(TiffService.buildModelServiceUri(base, "/v0/dem/preview", KEY, null, "  ")
+                .getRawQuery().contains("ramp"));
+
+        URI withRamp = TiffService.buildModelServiceUri(base, "/v0/dem/preview", KEY, null, "hypsometric");
+        assertEquals("tiff_key=" + KEY + "&ramp=hypsometric",
+                URLDecoder.decode(withRamp.getRawQuery(), StandardCharsets.UTF_8));
+    }
+
+    @Test
+    void unknownRampFallsBackToDefaultInsteadOfBreaking() {
+        // 配色只影响观感：拼错一个名字不该让整张预览图 404，回落到灰度即可；
+        // 实际用了什么配色由响应头 X-Dem-Ramp 回显，前端据它画图例。
+        assertEquals("hypsometric", TiffService.normalizeRamp(" Hypsometric "));
+        assertEquals("gray", TiffService.normalizeRamp("gray"));
+        assertEquals(null, TiffService.normalizeRamp("rainbow"));
+        assertEquals(null, TiffService.normalizeRamp(""));
+        assertEquals(null, TiffService.normalizeRamp(null));
+    }
+
+    @Test
     void deleteUriUsesTheSameSingleEncoding() {
         // 删除接口以前靠 Python 侧的 unquote 兜住了二次编码，属于巧合；这里一并钉住。
         URI uri = TiffService.buildModelServiceUri(
