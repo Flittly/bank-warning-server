@@ -1,8 +1,10 @@
 name: CI
 
 on:
+  # 2026-11-27 起废弃 dev：server 也收敛到单分支（与 web/model 一致），
+  # 直接在 main 开发、发布即打 tag。保留 dev 会让 push 触发永远不跑。
   push:
-    branches: [main, dev]
+    branches: [main]
   pull_request:
 
 jobs:
