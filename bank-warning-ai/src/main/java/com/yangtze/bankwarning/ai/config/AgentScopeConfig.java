@@ -58,7 +58,7 @@ public class AgentScopeConfig {
     public Model deepseekModel(
             @Value("${agentscope.openai.api-key:${DEEPSEEK_API_KEY:}}") String apiKey,
             @Value("${agentscope.openai.base-url:${DEEPSEEK_BASE_URL:https://api.deepseek.com}}") String baseUrl,
-            @Value("${agentscope.openai.model-name:${DEEPSEEK_MODEL:deepseek-v4-flash}}") String modelName) {
+            @Value("${agentscope.openai.model-name:${DEEPSEEK_MODEL:deepseek-flash}}") String modelName) {
         return OpenAIChatModel.builder()
                 .apiKey(apiKey)
                 .baseUrl(baseUrl + "/v1/")

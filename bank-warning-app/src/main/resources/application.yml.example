@@ -75,7 +75,8 @@ agentscope:
     # DeepSeek API 地址
     base-url: ${DEEPSEEK_BASE_URL:https://api.deepseek.com}
     # 使用的模型（与 application.yml、docker-compose 保持一致）
-    model-name: ${DEEPSEEK_MODEL:deepseek-v4-flash}
+    # 服务商正式 id 只有 deepseek-flash / deepseek-v4-pro 两个
+    model-name: ${DEEPSEEK_MODEL:deepseek-flash}
   dashscope:
     # 【选填】DashScope API Key（用于文本嵌入）。
     # 不填时知识库检索会明确返回「未配置」，不会静默降级成关键词检索。
