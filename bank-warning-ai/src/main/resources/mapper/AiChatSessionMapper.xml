@@ -19,6 +19,10 @@
         SELECT * FROM ai_chat_sessions WHERE session_id = #{sessionId} AND (user_id = #{userId} OR #{userId, jdbcType=BIGINT} IS NULL)
     </select>
 
+    <update id="touch">
+        UPDATE ai_chat_sessions SET updated_at = NOW() WHERE session_id = #{sessionId}
+    </update>
+
     <insert id="insert" parameterType="com.yangtze.bankwarning.ai.domain.po.AiChatSessionPO"
             useGeneratedKeys="true" keyProperty="id">
         INSERT INTO ai_chat_sessions (session_id, title, user_id)
